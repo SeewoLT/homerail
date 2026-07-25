@@ -1,0 +1,10 @@
+#!/bin/sh
+ROOT="$(git rev-parse --show-toplevel)"
+if command -v bash >/dev/null 2>&1; then
+  exec bash "$ROOT/scripts/post-sync-rebuild.sh" merge
+fi
+if [ -x /bin/bash ]; then
+  exec /bin/bash "$ROOT/scripts/post-sync-rebuild.sh" merge
+fi
+echo "post-merge: bash not found; cannot run post-sync-rebuild.sh" >&2
+exit 127

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Fires after git pull --rebase and other rewrite operations.
+command="$1"
+if [ "$command" != "rebase" ]; then
+  exit 0
+fi
+ROOT="$(git rev-parse --show-toplevel)"
+if command -v bash >/dev/null 2>&1; then
+  exec bash "$ROOT/scripts/post-sync-rebuild.sh" rebase
+fi
+if [ -x /bin/bash ]; then
+  exec /bin/bash "$ROOT/scripts/post-sync-rebuild.sh" rebase
+fi
+echo "post-rewrite: bash not found; cannot run post-sync-rebuild.sh" >&2
+exit 127
