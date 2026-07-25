@@ -121,7 +121,10 @@ export class WsClient extends EventEmitter {
     const identity = Object.fromEntries(
       Object.entries(this.opts.runtimeIdentity)
         .filter((entry): entry is [string, string] => (
-          typeof entry[1] === "string" && Boolean(entry[1].trim())
+          typeof entry[1] === "string"
+          && Boolean(entry[1].trim())
+          && entry[1].trim() !== "unknown"
+          && entry[1].trim() !== "<no value>"
         ))
         .map(([key, value]) => [key, value.trim()]),
     );

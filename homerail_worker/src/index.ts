@@ -81,6 +81,8 @@ function localWorkerVersion(): string | undefined {
   }
 }
 
+// Runtime identity is immutable for one Worker process. Updating the Worker
+// requires rebuilding the image and restarting the process.
 const WORKER_RUNTIME_IDENTITY = {
   worker_version: process.env.HOMERAIL_WORKER_VERSION?.trim() || localWorkerVersion(),
   protocol_version: process.env.HOMERAIL_WORKER_PROTOCOL_VERSION?.trim() || PROTOCOL_VERSION,

@@ -100,6 +100,48 @@ it("classifies a missing Docker CLI without throwing or blocking Manager startup
   expect(status.revision).toBeGreaterThan(0);
 });
 
+it("classifies platform permission error codes without relying on localized text", async () => {
+  const runner: DagEnvironmentCommandRunner = vi.fn(async () => {
+    throw Object.assign(new Error("localized Docker error"), { code: "EACCES" });
+  });
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    repoRoot: currentRepoRoot(),
+    statusPath: statusPath(),
+  });
+
+  const status = await controller.check();
+
+  expect(status.docker).toMatchObject({
+    status: "error",
+    reason_code: "docker_permission_denied",
+  });
+});
+
+it("probes Docker from a stable temporary cwd when Worker source is absent", async () => {
+  const calls: Array<{ cwd?: string }> = [];
+  const runner: DagEnvironmentCommandRunner = vi.fn(async (_command, args, options) => {
+    calls.push(options);
+    if (args[0] === "version") return dockerVersion();
+    if (args[0] === "info") return dockerInfo();
+    if (args[1] === "ls") return { stdout: "", stderr: "" };
+    if (args[1] === "inspect") throw new Error("No such image");
+    throw new Error(`Unexpected Docker arguments: ${args.join(" ")}`);
+  });
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    repoRoot: path.join(os.tmpdir(), "missing-homerail-worker-source"),
+    statusPath: statusPath(),
+  });
+
+  const status = await controller.check();
+
+  expect(status.docker.status).toBe("ready");
+  expect(status.source.available).toBe(false);
+  expect(calls.length).toBeGreaterThan(0);
+  expect(calls.every((call) => call.cwd === os.tmpdir())).toBe(true);
+});
+
 it("reports image inventory failures instead of leaving the check pending", async () => {
   const runner: DagEnvironmentCommandRunner = vi.fn(async (_command, args) => {
     if (args[0] === "version") return dockerVersion();
@@ -408,6 +450,133 @@ it("times out a stuck Docker build and preserves the failed terminal state", asy
   expect(controller.getStatus().build?.status).toBe("failed");
 });
 
+it("interrupts and persists an active Docker build during Manager shutdown", async () => {
+  const runner: DagEnvironmentCommandRunner = vi.fn(async (_command, args) => {
+    if (args[0] === "version") return dockerVersion();
+    if (args[0] === "info") return dockerInfo();
+    if (args[1] === "ls") return { stdout: "", stderr: "" };
+    if (args[1] === "inspect") throw new Error("No such image");
+    throw new Error(`Unexpected Docker arguments: ${args.join(" ")}`);
+  });
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: vi.fn(() => true),
+  });
+  const spawnImpl = vi.fn(() => child as never);
+  const persistedPath = statusPath();
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    spawnImpl,
+    repoRoot: currentRepoRoot(),
+    statusPath: persistedPath,
+  });
+
+  controller.startBuild();
+  await vi.waitFor(() => expect(spawnImpl).toHaveBeenCalledTimes(1));
+  child.stderr.write("last buffered build line\n");
+  controller.shutdown();
+
+  expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  expect(controller.getStatus()).toMatchObject({
+    build: {
+      status: "failed",
+      error: "Manager shutdown interrupted the Docker build.",
+    },
+    worker_image: {
+      status: "error",
+      reason_code: "worker_image_build_failed",
+    },
+  });
+  const recovered = new DagEnvironmentController({
+    repoRoot: currentRepoRoot(),
+    statusPath: persistedPath,
+  });
+  expect(recovered.getStatus().build?.logs.join("\n")).toContain("last buffered build line");
+  child.emit("close", 0, null);
+  expect(controller.getStatus().build?.status).toBe("failed");
+});
+
+it("does not spawn Docker when shutdown interrupts a pre-build environment check", async () => {
+  let resolveVersion!: (value: ReturnType<typeof dockerVersion>) => void;
+  const version = new Promise<ReturnType<typeof dockerVersion>>((resolve) => {
+    resolveVersion = resolve;
+  });
+  const runner: DagEnvironmentCommandRunner = vi.fn(async (_command, args) => {
+    if (args[0] === "version") return version;
+    throw new Error(`Unexpected Docker arguments: ${args.join(" ")}`);
+  });
+  const spawnImpl = vi.fn();
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    spawnImpl: spawnImpl as never,
+    repoRoot: currentRepoRoot(),
+    statusPath: statusPath(),
+  });
+
+  controller.startBuild();
+  await vi.waitFor(() => expect(runner).toHaveBeenCalled());
+  const pendingCheck = (controller as unknown as {
+    checkPromise: Promise<unknown> | null;
+  }).checkPromise;
+  if (!pendingCheck) throw new Error("expected a pending environment check");
+  controller.shutdown();
+  resolveVersion(dockerVersion());
+  await pendingCheck;
+  await Promise.resolve();
+
+  expect(controller.getStatus().build?.status).toBe("failed");
+  expect(spawnImpl).not.toHaveBeenCalled();
+});
+
+it("does not let an older check overwrite a build started during image inspection", async () => {
+  const fingerprint = dagWorkerSourceFingerprint(currentRepoRoot())!;
+  let inspectStarted = false;
+  let resolveInspection!: (value: ReturnType<typeof imageInspection>) => void;
+  const inspection = new Promise<ReturnType<typeof imageInspection>>((resolve) => {
+    resolveInspection = resolve;
+  });
+  const runner: DagEnvironmentCommandRunner = vi.fn(async (_command, args) => {
+    if (args[0] === "version") return dockerVersion();
+    if (args[0] === "info") return dockerInfo();
+    if (args[1] === "ls") {
+      return {
+        stdout: JSON.stringify({ Repository: "homerail-worker", Tag: "latest", Labels: "" }),
+        stderr: "",
+      };
+    }
+    if (args[1] === "inspect") {
+      inspectStarted = true;
+      return inspection;
+    }
+    throw new Error(`Unexpected Docker arguments: ${args.join(" ")}`);
+  });
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: vi.fn(() => true),
+  });
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    spawnImpl: vi.fn(() => child as never),
+    repoRoot: currentRepoRoot(),
+    statusPath: statusPath(),
+  });
+
+  const check = controller.check();
+  await vi.waitFor(() => expect(inspectStarted).toBe(true));
+  controller.startBuild();
+  resolveInspection(imageInspection(fingerprint));
+  await check;
+  await vi.waitFor(() => expect(controller.getStatus().build?.status).toBe("running"));
+
+  expect(controller.getStatus().worker_image).toMatchObject({
+    status: "building",
+    reason: "requested",
+  });
+  controller.shutdown();
+});
+
 it("persists a failed build and accepts a later retry that reaches ready", async () => {
   const fingerprint = dagWorkerSourceFingerprint(currentRepoRoot())!;
   let built = false;
@@ -513,6 +682,76 @@ it("publishes each persisted revision on the existing DAG event bus", async () =
   } finally {
     unsubscribe();
   }
+});
+
+it.each(["queued", "running"] as const)(
+  "marks a persisted %s build failed after Manager restart",
+  (buildStatus) => {
+    const persistedPath = statusPath();
+    const controller = new DagEnvironmentController({
+      repoRoot: currentRepoRoot(),
+      statusPath: persistedPath,
+    });
+    const persisted = controller.getStatus();
+    persisted.revision = 7;
+    persisted.build = {
+      operation_id: `interrupted-${buildStatus}`,
+      status: buildStatus,
+      started_at: 100,
+      logs: ["before restart"],
+    };
+    fs.writeFileSync(persistedPath, JSON.stringify(persisted), "utf8");
+
+    const recovered = new DagEnvironmentController({
+      repoRoot: currentRepoRoot(),
+      statusPath: persistedPath,
+      now: () => 200,
+    }).getStatus();
+
+    expect(recovered.build).toMatchObject({
+      operation_id: `interrupted-${buildStatus}`,
+      status: "failed",
+      finished_at: 200,
+      error: "Manager restarted while the image build was running.",
+    });
+    expect(recovered.build?.logs.at(-1)).toBe("Build interrupted by Manager restart.");
+  },
+);
+
+it("preserves a succeeded build and falls back safely from corrupt persisted state", () => {
+  const persistedPath = statusPath();
+  const controller = new DagEnvironmentController({
+    repoRoot: currentRepoRoot(),
+    statusPath: persistedPath,
+  });
+  const persisted = controller.getStatus();
+  persisted.revision = 9;
+  persisted.build = {
+    operation_id: "completed-build",
+    status: "succeeded",
+    started_at: 100,
+    finished_at: 150,
+    logs: ["complete"],
+  };
+  fs.writeFileSync(persistedPath, JSON.stringify(persisted), "utf8");
+
+  const recovered = new DagEnvironmentController({
+    repoRoot: currentRepoRoot(),
+    statusPath: persistedPath,
+  }).getStatus();
+  expect(recovered.build).toEqual(persisted.build);
+
+  fs.writeFileSync(persistedPath, "{not-json", "utf8");
+  const fallback = new DagEnvironmentController({
+    repoRoot: currentRepoRoot(),
+    statusPath: persistedPath,
+  }).getStatus();
+  expect(fallback).toMatchObject({
+    revision: 0,
+    docker: { status: "unknown" },
+    worker_image: { status: "unknown" },
+  });
+  expect(fallback.build).toBeUndefined();
 });
 
 it("checks immediately and then at the configured monitoring interval", async () => {

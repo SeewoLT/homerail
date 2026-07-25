@@ -1,6 +1,7 @@
 import { spawn, execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -139,6 +140,12 @@ export type DagEnvironmentSpawn = (
   },
 ) => ReturnType<typeof spawn>;
 
+interface ActiveBuildProcess {
+  operationId: string;
+  child: ReturnType<typeof spawn>;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 export interface DagEnvironmentControllerOptions {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
@@ -173,6 +180,7 @@ function defaultCommandRunner(
     execFile(command, args, {
       cwd: options.cwd,
       encoding: "utf8",
+      env: { ...process.env, LANG: "C", LC_ALL: "C" },
       maxBuffer: 8 * 1024 * 1024,
       timeout: options.timeoutMs ?? 15_000,
       windowsHide: true,
@@ -256,15 +264,25 @@ function dockerReason(error: unknown, platform: NodeJS.Platform): {
   message: string;
 } {
   const failure = error instanceof CommandFailure ? error : undefined;
+  const errorCode = failure?.code
+    ?? (typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined);
   const text = `${failure?.message ?? String(error)} ${failure?.stderr ?? ""} ${failure?.stdout ?? ""}`.toLowerCase();
-  if (failure?.code === "ENOENT" || text.includes("enoent") || text.includes("not recognized as an internal")) {
+  if (errorCode === "ENOENT" || text.includes("enoent") || text.includes("not recognized as an internal")) {
     return { code: "docker_cli_missing", message: "Docker CLI is not installed or is not available on PATH." };
   }
-  if (text.includes("permission denied") || text.includes("access is denied")) {
+  if (
+    errorCode === "EACCES"
+    || errorCode === "EPERM"
+    || text.includes("permission denied")
+    || text.includes("access is denied")
+  ) {
     return { code: "docker_permission_denied", message: "HomeRail does not have permission to access the Docker engine." };
   }
   if (
-    text.includes("cannot connect to the docker daemon")
+    errorCode === "ECONNREFUSED"
+    || text.includes("cannot connect to the docker daemon")
     || text.includes("is the docker daemon running")
     || text.includes("dockerdesktoplinuxengine")
     || text.includes("open //./pipe/docker")
@@ -366,6 +384,9 @@ export class DagEnvironmentController {
   private checkPromise: Promise<DagEnvironmentStatus> | null = null;
   private monitorTimer: ReturnType<typeof setInterval> | null = null;
   private buildCommitTimer: ReturnType<typeof setTimeout> | null = null;
+  private activeBuildProcess: ActiveBuildProcess | null = null;
+  private checkEpoch = 0;
+  private shuttingDown = false;
 
   constructor(options: DagEnvironmentControllerOptions = {}) {
     this.env = options.env ?? process.env;
@@ -396,7 +417,7 @@ export class DagEnvironmentController {
   }
 
   startMonitoring(intervalMs = 60_000): void {
-    if (this.monitorTimer) return;
+    if (this.monitorTimer || this.shuttingDown) return;
     void this.check();
     this.monitorTimer = setInterval(() => void this.check(), intervalMs);
     this.monitorTimer.unref?.();
@@ -407,21 +428,28 @@ export class DagEnvironmentController {
       clearInterval(this.monitorTimer);
       this.monitorTimer = null;
     }
-    if (this.buildCommitTimer) {
-      clearTimeout(this.buildCommitTimer);
-      this.buildCommitTimer = null;
-    }
+  }
+
+  shutdown(): void {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    this.checkEpoch += 1;
+    this.stopMonitoring();
+    this.abortBuild("Manager shutdown interrupted the Docker build.");
   }
 
   check(): Promise<DagEnvironmentStatus> {
+    if (this.shuttingDown) return Promise.resolve(this.getStatus());
     if (this.checkPromise) return this.checkPromise;
-    this.checkPromise = this.runCheck().finally(() => {
+    const epoch = this.checkEpoch;
+    this.checkPromise = this.runCheck(epoch).finally(() => {
       this.checkPromise = null;
     });
     return this.checkPromise;
   }
 
   startBuild(): DagEnvironmentStatus {
+    if (this.shuttingDown) return this.getStatus();
     if (this.status.build?.status === "queued" || this.status.build?.status === "running") {
       return this.getStatus();
     }
@@ -454,7 +482,7 @@ export class DagEnvironmentController {
     return this.getStatus();
   }
 
-  private async runCheck(): Promise<DagEnvironmentStatus> {
+  private async runCheck(epoch: number): Promise<DagEnvironmentStatus> {
     if (this.status.build?.status !== "queued" && this.status.build?.status !== "running") {
       this.status.docker = {
         ...this.status.docker,
@@ -473,11 +501,13 @@ export class DagEnvironmentController {
     let version: Record<string, unknown>;
     try {
       const result = await this.commandRunner("docker", ["version", "--format", "{{json .}}"], {
-        cwd: this.repoRoot,
+        cwd: os.tmpdir(),
         timeoutMs: 15_000,
       });
+      if (!this.isCheckCurrent(epoch)) return this.getStatus();
       version = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
     } catch (error) {
+      if (!this.isCheckCurrent(epoch)) return this.getStatus();
       const reason = dockerReason(error, this.platform);
       this.status.docker = {
         status: "error",
@@ -510,11 +540,13 @@ export class DagEnvironmentController {
     let info: Record<string, unknown> = {};
     try {
       const result = await this.commandRunner("docker", ["info", "--format", "{{json .}}"], {
-        cwd: this.repoRoot,
+        cwd: os.tmpdir(),
         timeoutMs: 15_000,
       });
+      if (!this.isCheckCurrent(epoch)) return this.getStatus();
       info = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
     } catch {
+      if (!this.isCheckCurrent(epoch)) return this.getStatus();
       // `docker version` already proved the daemon is reachable. Missing info
       // fields should not make an otherwise usable engine unavailable.
     }
@@ -554,13 +586,15 @@ export class DagEnvironmentController {
       checked_at: this.now(),
     };
 
-    const buildActive = this.status.build?.status === "queued" || this.status.build?.status === "running";
     try {
-      this.status.images = await this.inspectImages();
+      const images = await this.inspectImages();
+      if (!this.isCheckCurrent(epoch)) return this.getStatus();
+      this.status.images = images;
     } catch (error) {
+      if (!this.isCheckCurrent(epoch)) return this.getStatus();
       const reason = dockerReason(error, this.platform);
       this.status.images = [];
-      if (!buildActive) {
+      if (!this.hasActiveBuild()) {
         this.status.worker_image = {
           status: "error",
           image: this.workerImage,
@@ -575,7 +609,7 @@ export class DagEnvironmentController {
       this.commit();
       return this.getStatus();
     }
-    if (!buildActive) {
+    if (!this.hasActiveBuild()) {
       const selected = this.status.images.find((image) => image.selected);
       if (!selected) {
         this.status.worker_image = {
@@ -631,7 +665,7 @@ export class DagEnvironmentController {
       "--no-trunc",
       "--format",
       "{{json .}}",
-    ], { cwd: this.repoRoot, timeoutMs: 15_000 });
+    ], { cwd: os.tmpdir(), timeoutMs: 15_000 });
     const refs = new Set<string>([this.workerImage]);
     for (const row of parseJsonLines(inventory.stdout)) {
       const repository = nonEmpty(row.Repository);
@@ -642,6 +676,8 @@ export class DagEnvironmentController {
         && tag
         && tag !== "<none>"
         && (
+          // Generic OCI version/revision labels are intentionally excluded:
+          // they do not identify an image as a HomeRail Worker.
           repository === "homerail-worker"
           || repository.endsWith("/homerail-worker")
           || hasDockerLabel(labels, HOMERAIL_WORKER_SOURCE_LABEL)
@@ -656,7 +692,7 @@ export class DagEnvironmentController {
     for (const ref of refs) {
       try {
         const result = await this.commandRunner("docker", ["image", "inspect", ref], {
-          cwd: this.repoRoot,
+          cwd: os.tmpdir(),
           timeoutMs: 15_000,
         });
         const parsed = JSON.parse(result.stdout) as unknown;
@@ -734,6 +770,7 @@ export class DagEnvironmentController {
     this.commit();
 
     await this.check();
+    if (!this.isBuildActive(operationId)) return;
     if (this.status.docker.status !== "ready") {
       this.failBuild(this.status.docker.message, "worker_image_build_failed", operationId);
       return;
@@ -797,23 +834,25 @@ export class DagEnvironmentController {
     child.stdout?.on("data", (chunk) => this.appendBuildLog(String(chunk)));
     child.stderr?.on("data", (chunk) => this.appendBuildLog(String(chunk)));
     const buildTimeout = setTimeout(() => {
-      if (!this.isBuildActive(operationId)) return;
+      const activeProcess = this.detachBuildProcess(operationId);
+      if (!activeProcess || !this.isBuildActive(operationId)) return;
       const timeoutMinutes = Math.max(1, Math.round(this.buildTimeoutMs / 60_000));
       const message = `Docker build timed out after ${timeoutMinutes} minute${timeoutMinutes === 1 ? "" : "s"}.`;
       this.failBuild(message, "worker_image_build_failed", operationId);
       try {
-        child.kill();
+        activeProcess.child.kill("SIGTERM");
       } catch {
         // The process may already have exited while the timeout callback ran.
       }
     }, this.buildTimeoutMs);
     buildTimeout.unref?.();
+    this.activeBuildProcess = { operationId, child, timeout: buildTimeout };
     child.once("error", (error) => {
-      clearTimeout(buildTimeout);
+      this.detachBuildProcess(operationId);
       this.failBuild(error.message, "worker_image_build_failed", operationId);
     });
     child.once("close", (code, signal) => {
-      clearTimeout(buildTimeout);
+      this.detachBuildProcess(operationId);
       const activeBuild = this.status.build;
       if (
         activeBuild?.operation_id !== operationId
@@ -888,6 +927,35 @@ export class DagEnvironmentController {
   private isBuildActive(operationId: string): boolean {
     return this.status.build?.operation_id === operationId
       && (this.status.build.status === "queued" || this.status.build.status === "running");
+  }
+
+  private hasActiveBuild(): boolean {
+    return this.status.build?.status === "queued" || this.status.build?.status === "running";
+  }
+
+  private isCheckCurrent(epoch: number): boolean {
+    return !this.shuttingDown && this.checkEpoch === epoch;
+  }
+
+  private detachBuildProcess(operationId: string): ActiveBuildProcess | null {
+    if (this.activeBuildProcess?.operationId !== operationId) return null;
+    const activeProcess = this.activeBuildProcess;
+    this.activeBuildProcess = null;
+    clearTimeout(activeProcess.timeout);
+    return activeProcess;
+  }
+
+  private abortBuild(message: string): void {
+    const build = this.status.build;
+    if (!build || (build.status !== "queued" && build.status !== "running")) return;
+    const activeProcess = this.detachBuildProcess(build.operation_id);
+    this.failBuild(message, "worker_image_build_failed", build.operation_id);
+    if (!activeProcess) return;
+    try {
+      activeProcess.child.kill("SIGTERM");
+    } catch {
+      // Shutdown will continue even if the child has already exited.
+    }
   }
 
   private flushBuildCommitTimer(): void {
@@ -976,6 +1044,6 @@ export function getDagEnvironmentController(): DagEnvironmentController {
 }
 
 export function resetDagEnvironmentControllerForTests(): void {
-  defaultController?.stopMonitoring();
+  defaultController?.shutdown();
   defaultController = undefined;
 }

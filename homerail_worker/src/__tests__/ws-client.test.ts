@@ -113,6 +113,7 @@ describe("WsClient", () => {
         worker_version: " 1.2.3 ",
         protocol_version: " ",
         source_fingerprint: "",
+        image_revision: "unknown",
       },
     });
     const sendSpy = vi.spyOn(client, "send").mockImplementation(() => {});

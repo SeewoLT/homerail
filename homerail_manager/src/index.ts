@@ -70,7 +70,7 @@ let shuttingDown = false;
 function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
-  dagEnvironment.stopMonitoring();
+  dagEnvironment.shutdown();
   const forcedExit = setTimeout(() => process.exit(1), 5_000);
   forcedExit.unref();
   void shutdownHostShellManagerAgents().finally(() => {
