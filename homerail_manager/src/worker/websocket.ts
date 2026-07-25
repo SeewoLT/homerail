@@ -222,6 +222,8 @@ export interface WorkerWebSocketOptions {
    * cold-recovery boot path to re-dispatch READY nodes of recovered runs now
    * that a dispatch target exists. */
   onFirstWorkerRegistered?: () => void;
+  /** Refreshes the environment snapshot when a versioned Worker connects or disconnects. */
+  onWorkerRegistryChanged?: () => void;
 }
 
 export function setupWorkerWebSocket(
@@ -302,6 +304,8 @@ export function setupWorkerWebSocket(
         if (registered) {
           clearByTargetId(worker_id);
           unregisterWorker(worker_id);
+          registered = false;
+          options.onWorkerRegistryChanged?.();
         }
       };
 
@@ -323,6 +327,7 @@ export function setupWorkerWebSocket(
         if (msg.type === "register" || msg.type === "control") {
           const registeredWorkerId = msg.type === "register" ? msg.worker_id : msg.data.worker_id;
           const capabilities = msg.type === "register" ? msg.capabilities : msg.data.capabilities;
+          const runtimeIdentity = msg.type === "register" ? msg.runtime_identity : msg.data.runtime_identity;
           if (registeredWorkerId !== worker_id) {
             ws.close(4001, "worker_id mismatch");
             clearTimeout(registrationTimeout);
@@ -338,10 +343,12 @@ export function setupWorkerWebSocket(
               socket: ws,
               status: "idle",
               capabilities: capabilities ?? [],
+              runtime_identity: runtimeIdentity,
               registered_at: Date.now(),
               last_heartbeat: Date.now(),
             };
             registerWorker(state);
+            options.onWorkerRegistryChanged?.();
             if (!firstWorkerFired) {
               // Process-local hook: only the first successfully registered
               // worker should trigger cold-recovery re-dispatch for this

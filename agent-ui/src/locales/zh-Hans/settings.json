@@ -4,7 +4,7 @@
   "tabs": {
     "general": "常规",
     "workspace": "工作区",
-    "nodes": "Node 节点",
+    "nodes": "运行环境",
     "git": "Git",
     "providers": "供应商与模型",
     "voice": "语音",
@@ -16,6 +16,7 @@
   },
   "descriptions": {
     "general": "管理 HomeRail 的界面和通用偏好。",
+    "nodes": "检查 Docker、管理 Worker 镜像，并核对正在运行的 Worker 版本。",
     "git": "管理 Git Server token。项目和仓库在新增目录时关联。",
     "providers": "维护供应商、模型能力和本地加密保存的模型配置。",
     "voice": "配置语音播报和按键控制。",
@@ -49,6 +50,57 @@
         "zhHant": "繁体中文",
         "enUS": "英语"
       }
+    }
+  },
+  "environment": {
+    "statusTitle": "DAG 运行环境",
+    "loading": "正在读取运行环境状态…",
+    "check": "重新检查",
+    "build": "构建 Worker",
+    "rebuild": "重新构建",
+    "dockerEngine": "Docker Engine",
+    "available": "可用",
+    "unavailable": "不可用",
+    "selectedImage": "当前 Worker 镜像",
+    "sourceFingerprint": "当前源码指纹",
+    "protocolVersion": "协议版本",
+    "connectedWorkers": "{count} 个 Worker 已连接",
+    "imagesTitle": "HomeRail Worker 镜像",
+    "imagesUnavailable": "Docker 可用后才能读取镜像列表。",
+    "noImages": "尚未发现 HomeRail Worker 镜像。",
+    "inUse": "当前使用",
+    "workerVersion": "Worker 版本",
+    "fingerprint": "源码指纹",
+    "workersTitle": "正在运行的 Worker",
+    "noWorkers": "当前没有已连接的 Worker；新 DAG 任务会按需启动。",
+    "buildLog": "构建日志",
+    "compatibility": {
+      "current": "当前版本",
+      "stale": "需要更新",
+      "incompatible": "协议不兼容",
+      "unknown": "版本未知"
+    },
+    "buildStatus": {
+      "queued": "等待中",
+      "running": "构建中",
+      "succeeded": "已完成",
+      "failed": "失败"
+    },
+    "guidance": {
+      "installWindows": "请安装 Docker Desktop，启动后确认使用 Linux containers。",
+      "installMac": "请安装并打开 Docker Desktop。",
+      "installLinux": "请安装 Docker Engine，然后启动 docker 服务。",
+      "startWindows": "请启动 Docker Desktop，等待 Engine 显示 Running，并确认使用 Linux containers。",
+      "startMac": "请打开 Docker Desktop，并等待 Docker Engine 启动完成。",
+      "startLinux": "请启动 Docker 服务，例如运行 sudo systemctl start docker。",
+      "permissionLinux": "当前用户无权访问 Docker。请检查 Docker Desktop 权限，或在 Linux 上将用户加入 docker 组后重新登录。",
+      "linuxEngineWindows": "HomeRail Worker 需要 Linux 容器。请在 Docker Desktop 中切换到 Linux containers。",
+      "sourceUnavailable": "当前安装中没有 Worker 构建源码，无法在此主机重新构建镜像。",
+      "worker_image_missing": "还没有可用的 Worker 镜像，请点击“构建 Worker”。",
+      "worker_image_stale": "镜像与当前 HomeRail 源码不一致，请重新构建。",
+      "worker_image_incompatible": "镜像使用了不兼容的协议版本，请重新构建。",
+      "worker_image_build_failed": "上次构建失败。展开构建日志排查后可以重试。",
+      "checkFailed": "无法完成 Docker 检查，请查看 Manager 日志了解详情。"
     }
   },
   "storage": {

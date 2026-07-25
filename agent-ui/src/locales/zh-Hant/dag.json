@@ -74,6 +74,8 @@
     "preparing": "正在準備 DAG 資源",
     "preparingDescription": "正在準備 DAG 的運行資源，稍後即可啓動。",
     "skipped": "本次啓動跳過了 worker 鏡像構建，Docker DAG 可能暫時不可用。",
-    "status": "DAG 資源狀態"
+    "status": "DAG 資源狀態",
+    "manage": "管理 DAG 執行環境",
+    "manageDescription": "開啟設定，檢查 Docker 或建置 Worker 映像。"
   }
 }

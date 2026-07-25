@@ -1,21 +1,19 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AlertTriangle, Hammer, Loader2 } from 'lucide-vue-next'
-import { getManagerAgentReadiness, type ManagerAgentReadiness } from '@/api/services/voice-agent-api'
+import { useDagEnvironment } from '@/composables/useDagEnvironment'
+import { useAgentStore } from '@/stores/agent-store'
 import { cn } from '@/lib/utils'
 
-type WorkerImage = NonNullable<ManagerAgentReadiness['checks']['dag_resources']>['worker_image']
-
 const { t } = useI18n()
-
-const workerImage = ref<WorkerImage | null>(null)
-const open = ref(false)
-let timer: number | undefined
+const store = useAgentStore()
+const { status } = useDagEnvironment()
+const workerImage = computed(() => status.value?.worker_image ?? null)
 
 const visible = computed(() => {
   const status = workerImage.value?.status
-  return status === 'checking' || status === 'building' || status === 'error' || status === 'skipped'
+  return status !== 'ready'
 })
 
 const preparing = computed(() => {
@@ -30,37 +28,17 @@ const label = computed(() => {
 })
 
 const title = computed(() => {
-  if (!workerImage.value) return t('dag.resources.preparing')
+  if (!workerImage.value) return t('dag.resources.manage')
   if (preparing.value) return t('dag.resources.preparingDescription')
-  if (workerImage.value.status === 'error') return workerImage.value.error || workerImage.value.message
+  if (workerImage.value.status === 'error') return t('dag.resources.manageDescription')
   if (workerImage.value.status === 'skipped') return t('dag.resources.skipped')
-  return workerImage.value.message
+  return t('dag.resources.manageDescription')
 })
 
-async function refresh(): Promise<void> {
-  try {
-    const readiness = await getManagerAgentReadiness()
-    workerImage.value = readiness.checks.dag_resources?.worker_image ?? null
-    if (!visible.value) open.value = false
-  } catch {
-    workerImage.value = null
-    open.value = false
-  }
+function openEnvironmentSettings(): void {
+  store.settingsRequestedTab = 'nodes'
+  store.settingsPageOpen = true
 }
-
-function toggle(): void {
-  if (!visible.value) return
-  open.value = !open.value
-}
-
-onMounted(() => {
-  void refresh()
-  timer = window.setInterval(() => void refresh(), 2500)
-})
-
-onBeforeUnmount(() => {
-  if (timer !== undefined) window.clearInterval(timer)
-})
 </script>
 
 <template>
@@ -70,18 +48,13 @@ onBeforeUnmount(() => {
       class="dag-resource-status__button"
       :class="cn(workerImage?.status === 'error' && 'dag-resource-status__button--error')"
       :title="title"
-      @click="toggle"
+      @click="openEnvironmentSettings"
     >
       <Loader2 v-if="preparing" class="h-4 w-4 animate-spin" />
       <AlertTriangle v-else-if="workerImage?.status === 'error'" class="h-4 w-4" />
       <Hammer v-else class="h-4 w-4" />
       <span>{{ label }}</span>
     </button>
-    <div v-if="open" class="dag-resource-status__tooltip">
-      <strong>{{ preparing ? t('dag.resources.preparing') : t('dag.resources.status') }}</strong>
-      <span>{{ title }}</span>
-      <em v-if="workerImage?.image">{{ workerImage.image }}</em>
-    </div>
   </div>
 </template>
 
@@ -115,36 +88,4 @@ onBeforeUnmount(() => {
   color: var(--hr-warning);
 }
 
-.dag-resource-status__tooltip {
-  position: absolute;
-  top: calc(100% + 0.55rem);
-  right: 0;
-  z-index: 80;
-  display: grid;
-  gap: 0.28rem;
-  width: min(21rem, 76vw);
-  padding: 0.75rem 0.85rem;
-  border-radius: 0.65rem;
-  border: 1px solid var(--hr-border-strong);
-  background: var(--hr-panel);
-  box-shadow: var(--hr-shadow-panel);
-  color: var(--hr-text-2);
-}
-
-.dag-resource-status__tooltip strong {
-  color: var(--hr-text-1);
-  font-size: 0.82rem;
-}
-
-.dag-resource-status__tooltip span {
-  font-size: 0.76rem;
-  line-height: 1.45;
-}
-
-.dag-resource-status__tooltip em {
-  font-size: 0.7rem;
-  font-style: normal;
-  color: var(--hr-text-3);
-  overflow-wrap: anywhere;
-}
 </style>

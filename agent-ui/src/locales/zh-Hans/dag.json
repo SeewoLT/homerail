@@ -74,6 +74,8 @@
     "preparing": "正在准备 DAG 资源",
     "preparingDescription": "正在准备 DAG 的运行资源，稍后即可启动。",
     "skipped": "本次启动跳过了 worker 镜像构建，Docker DAG 可能暂时不可用。",
-    "status": "DAG 资源状态"
+    "status": "DAG 资源状态",
+    "manage": "管理 DAG 运行环境",
+    "manageDescription": "打开设置，检查 Docker 或构建 Worker 镜像。"
   }
 }

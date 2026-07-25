@@ -4,7 +4,7 @@
   "tabs": {
     "general": "常規",
     "workspace": "工作區",
-    "nodes": "Node 節點",
+    "nodes": "執行環境",
     "git": "Git",
     "providers": "供應商與模型",
     "voice": "語音",
@@ -16,6 +16,7 @@
   },
   "descriptions": {
     "general": "管理 HomeRail 的界面和通用偏好。",
+    "nodes": "檢查 Docker、管理 Worker 映像，並核對執行中 Worker 的版本。",
     "git": "管理 Git Server token。項目和倉庫在新增目錄時關聯。",
     "providers": "維護供應商、模型能力和本地加密保存的模型配置。",
     "voice": "配置語音播報和按鍵控制。",
@@ -49,6 +50,57 @@
         "zhHant": "繁體中文",
         "enUS": "英語"
       }
+    }
+  },
+  "environment": {
+    "statusTitle": "DAG 執行環境",
+    "loading": "正在讀取執行環境狀態…",
+    "check": "重新檢查",
+    "build": "建置 Worker",
+    "rebuild": "重新建置",
+    "dockerEngine": "Docker Engine",
+    "available": "可用",
+    "unavailable": "不可用",
+    "selectedImage": "目前 Worker 映像",
+    "sourceFingerprint": "目前原始碼指紋",
+    "protocolVersion": "協定版本",
+    "connectedWorkers": "已連線 {count} 個 Worker",
+    "imagesTitle": "HomeRail Worker 映像",
+    "imagesUnavailable": "Docker 可用後才能讀取映像清單。",
+    "noImages": "尚未找到 HomeRail Worker 映像。",
+    "inUse": "目前使用",
+    "workerVersion": "Worker 版本",
+    "fingerprint": "原始碼指紋",
+    "workersTitle": "執行中的 Worker",
+    "noWorkers": "目前沒有已連線的 Worker；新的 DAG 工作會視需要啟動。",
+    "buildLog": "建置記錄",
+    "compatibility": {
+      "current": "目前版本",
+      "stale": "需要更新",
+      "incompatible": "協定不相容",
+      "unknown": "版本未知"
+    },
+    "buildStatus": {
+      "queued": "等待中",
+      "running": "建置中",
+      "succeeded": "已完成",
+      "failed": "失敗"
+    },
+    "guidance": {
+      "installWindows": "請安裝 Docker Desktop，啟動後確認使用 Linux containers。",
+      "installMac": "請安裝並開啟 Docker Desktop。",
+      "installLinux": "請安裝 Docker Engine，然後啟動 docker 服務。",
+      "startWindows": "請啟動 Docker Desktop，等待 Engine 顯示 Running，並確認使用 Linux containers。",
+      "startMac": "請開啟 Docker Desktop，並等待 Docker Engine 啟動完成。",
+      "startLinux": "請啟動 Docker 服務，例如執行 sudo systemctl start docker。",
+      "permissionLinux": "目前使用者無權存取 Docker。請檢查 Docker Desktop 權限，或在 Linux 將使用者加入 docker 群組後重新登入。",
+      "linuxEngineWindows": "HomeRail Worker 需要 Linux 容器。請在 Docker Desktop 切換到 Linux containers。",
+      "sourceUnavailable": "目前安裝中沒有 Worker 建置原始碼，無法在此主機重新建置映像。",
+      "worker_image_missing": "尚無可用的 Worker 映像，請按「建置 Worker」。",
+      "worker_image_stale": "映像與目前 HomeRail 原始碼不一致，請重新建置。",
+      "worker_image_incompatible": "映像使用不相容的協定版本，請重新建置。",
+      "worker_image_build_failed": "上次建置失敗。展開建置記錄排查後可以重試。",
+      "checkFailed": "無法完成 Docker 檢查，請查看 Manager 記錄了解詳情。"
     }
   },
   "storage": {

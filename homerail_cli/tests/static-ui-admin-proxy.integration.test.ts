@@ -21,6 +21,35 @@ afterEach(async () => {
 });
 
 describe("static Agent UI mutation proxy", () => {
+  it("proxies the Manager event WebSocket used by runtime environment updates", async () => {
+    let upgradedPath = "";
+    const manager = http.createServer();
+    manager.on("upgrade", (req, socket) => {
+      upgradedPath = req.url || "";
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: websocket\r\n" +
+        "\r\n",
+      );
+      socket.end();
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    await startStaticUi({
+      port: uiPort,
+      host: "127.0.0.1",
+      origin: uiOrigin,
+      managerUrl,
+    });
+
+    const response = await websocketUpgrade(uiPort, "/ws/events");
+    expect(response).toContain("HTTP/1.1 101 Switching Protocols");
+    expect(upgradedPath).toBe("/ws/events");
+  }, 15_000);
+
   it("proxies the same-origin ASR realtime WebSocket to the Manager", async () => {
     let upgradedPath = "";
     const manager = http.createServer();

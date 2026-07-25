@@ -26,6 +26,7 @@ import GeneralSettings from './settings/GeneralSettings.vue'
 import StorageRetentionSettings from './settings/StorageRetentionSettings.vue'
 import PluginSettings from './settings/PluginSettings.vue'
 import SkillSettings from './settings/SkillSettings.vue'
+import DagEnvironmentSettings from './settings/DagEnvironmentSettings.vue'
 import {
   listProjects,
   listProjectStorages,
@@ -133,7 +134,7 @@ let settingsGamepadFrame = 0
 let settingsGamepadPressedButtons = new Set<number>()
 let settingsGamepadAxisLocks = new Set<string>()
 let nativeSettingsGamepadAnalogAt = 0
-const activeTab = ref<SettingsTab>('general')
+const activeTab = ref<SettingsTab>(store.settingsRequestedTab === 'nodes' ? 'nodes' : 'general')
 const loading = ref(false)
 const saving = ref<string | null>(null)
 const error = ref<string | null>(null)
@@ -301,13 +302,14 @@ const tabs = computed<Array<{ id: SettingsTab; label: string; icon: typeof Setti
   { id: 'mcp', label: t('settings.tabs.mcp'), icon: Network },
   { id: 'memory', label: t('settings.tabs.memory'), icon: Brain },
 ])
-const hiddenSettingsTabs = new Set<SettingsTab>(['workspace', 'nodes', 'mcp', 'memory'])
+const hiddenSettingsTabs = new Set<SettingsTab>(['workspace', 'mcp', 'memory'])
 const visibleTabs = computed(() =>
   tabs.value.filter(tab => !hiddenSettingsTabs.has(tab.id) && (tab.id !== 'device' || androidTvLocalSettingsVisible.value))
 )
 const activeTabLabel = computed(() => tabs.value.find(tab => tab.id === activeTab.value)?.label || t('settings.title'))
 const activeTabDescription = computed(() => {
   if (activeTab.value === 'general') return t('settings.descriptions.general')
+  if (activeTab.value === 'nodes') return t('settings.descriptions.nodes')
   if (activeTab.value === 'git') return t('settings.descriptions.git')
   if (activeTab.value === 'providers') return t('settings.descriptions.providers')
   if (activeTab.value === 'voice') return t('settings.descriptions.voice')
@@ -339,7 +341,15 @@ watch(activeTab, tab => {
   if (tab === 'device') void refreshWireGuardSettings()
 })
 
+watch(
+  () => store.settingsRequestedTab,
+  tab => {
+    if (tab === 'nodes') activeTab.value = 'nodes'
+  },
+)
+
 function back(): void {
+  store.settingsRequestedTab = null
   store.settingsPageOpen = false
 }
 
@@ -1550,46 +1560,8 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <section v-if="activeTab === 'nodes'" data-testid="agent-settings-section-nodes" class="mt-10 space-y-4">
-          <div class="grid gap-3 sm:grid-cols-4">
-            <div class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-4">
-              <div class="text-sm text-[var(--hr-text-3)]">Registered Nodes</div>
-              <div class="mt-2 text-2xl font-semibold">{{ nodes.length }}</div>
-            </div>
-            <div class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-4">
-              <div class="text-sm text-[var(--hr-text-3)]">Connected (Runtime)</div>
-              <div class="mt-2 text-2xl font-semibold text-[var(--hr-success)]">{{ runtimeStatus?.connected_nodes ?? 0 }}</div>
-            </div>
-            <div class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-4">
-              <div class="text-sm text-[var(--hr-text-3)]">Workers</div>
-              <div class="mt-2 text-2xl font-semibold">{{ runtimeStatus?.connected_workers ?? 0 }}</div>
-            </div>
-            <div class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-4">
-              <div class="text-sm text-[var(--hr-text-3)]">Runtime Status</div>
-              <div class="mt-2 text-sm" :class="nodesRuntimeStatus === 'healthy' ? 'text-[var(--hr-success)]' : nodesRuntimeStatus === 'degraded' ? 'text-[var(--hr-warning)]' : 'text-[var(--hr-text-3)]'">{{ nodesRuntimeStatus }}</div>
-            </div>
-          </div>
-          <div class="grid gap-3 sm:grid-cols-2">
-            <div class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-4">
-              <div class="text-sm text-[var(--hr-text-3)]">Active Runs</div>
-              <div class="mt-2 text-2xl font-semibold">{{ runtimeStatus?.active_runs ?? 0 }}</div>
-            </div>
-            <div class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-4">
-              <div class="text-sm text-[var(--hr-text-3)]">DAG 可用性</div>
-              <div class="mt-2 text-sm">{{ (runtimeStatus?.connected_nodes ?? 0) > 0 ? '可调度' : '无在线 Node' }}</div>
-            </div>
-          </div>
-          <div class="rounded-lg border border-[var(--hr-border)] bg-[var(--hr-surface-1)]">
-            <div v-for="node in nodes" :key="node.node_id" class="grid gap-3 border-b border-[var(--hr-border)] px-4 py-3 last:border-0 md:grid-cols-[1fr_120px_1fr]">
-              <div>
-                <div class="font-medium">{{ node.name }}</div>
-                <div class="mt-1 font-mono text-xs text-[var(--hr-text-3)]">{{ node.node_id }}</div>
-              </div>
-              <div class="text-sm" :class="node.status === 'connected' ? 'text-[var(--hr-success)]' : 'text-[var(--hr-text-3)]'">{{ node.status }}</div>
-              <div class="text-sm text-[var(--hr-text-2)]">{{ node.resources?.cpu_cores ?? '-' }} CPU · {{ node.resources?.memory_gb ?? '-' }} GB · {{ node.docker_host || '-' }}</div>
-            </div>
-            <div v-if="!nodes.length" data-testid="agent-settings-nodes-empty-state" class="p-4 text-sm text-[var(--hr-text-3)]">暂无 Node。</div>
-          </div>
+        <section v-if="activeTab === 'nodes'" data-testid="agent-settings-section-nodes" class="mt-8">
+          <DagEnvironmentSettings />
         </section>
 
         <section v-if="activeTab === 'git'" data-testid="agent-settings-section-git" class="mt-8 space-y-5">

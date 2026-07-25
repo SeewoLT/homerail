@@ -38,6 +38,18 @@ function writeDagResourceStatus(home: string, status: "building" | "ready" | "er
   const dir = path.join(home, "runtime");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "dag-resources.json"), JSON.stringify({
+    revision: 42,
+    updated_at: Date.now(),
+    platform: "linux",
+    docker: {
+      status: "ready",
+      message: "Docker is ready",
+    },
+    source: {
+      available: true,
+      repo_root: "/repo",
+      protocol_version: "0.1.0",
+    },
     worker_image: {
       status,
       image: "homerail-worker:latest",
@@ -45,6 +57,8 @@ function writeDagResourceStatus(home: string, status: "building" | "ready" | "er
       updated_at: Date.now(),
       error: status === "error" ? "test build failed" : undefined,
     },
+    images: [],
+    workers: [],
   }));
 }
 
@@ -349,11 +363,23 @@ describe("/api/manager-agent/readiness", () => {
     const body = await response.json() as {
       data: {
         checks: {
-          dag_resources?: { worker_image: { status: string; image: string; message: string } };
+          dag_resources?: {
+            revision?: number;
+            docker?: { status: string };
+            images?: unknown[];
+            workers?: unknown[];
+            worker_image: { status: string; image: string; message: string };
+          };
         };
       };
     };
 
+    expect(body.data.checks.dag_resources).toMatchObject({
+      revision: 42,
+      docker: { status: "ready" },
+      images: [],
+      workers: [],
+    });
     expect(body.data.checks.dag_resources?.worker_image).toMatchObject({
       status: "building",
       image: "homerail-worker:latest",

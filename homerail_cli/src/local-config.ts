@@ -25,9 +25,6 @@ export interface LocalHomeRailConfig {
     endpoint?: string;
     setDefault?: boolean;
   };
-  runtime?: {
-    buildWorkerImage?: boolean;
-  };
   assets?: {
     root?: string;
   };
@@ -80,9 +77,6 @@ export function defaultLocalConfig(): LocalHomeRailConfig {
     },
     model: {
       setDefault: true,
-    },
-    runtime: {
-      buildWorkerImage: true,
     },
   };
 }
@@ -332,7 +326,6 @@ function mergeConfig(defaults: LocalHomeRailConfig, raw: LocalHomeRailConfig): L
     },
     ui: { ...defaults.ui, ...(raw.ui ?? {}) },
     model: { ...defaults.model, ...(raw.model ?? {}) },
-    runtime: { ...defaults.runtime, ...(raw.runtime ?? {}) },
     assets: raw.assets ? { ...raw.assets } : defaults.assets,
   };
 }

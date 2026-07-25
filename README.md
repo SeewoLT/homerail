@@ -104,9 +104,9 @@ cd homerail_cli && npm link && cd ..
 hr --help
 ```
 
-Start Manager and Node together. On first run this builds the
-`homerail-worker:latest` image; it is rebuilt automatically when the worker
-source fingerprint changes:
+Start Manager and Node together. Manager becomes available without waiting for
+Docker. Open **Settings → Runtime Environment** to check Docker, inspect Worker
+versions, and build or rebuild `homerail-worker:latest` asynchronously:
 
 ```bash
 hr start

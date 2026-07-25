@@ -266,7 +266,7 @@ function onRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
 
 server.on("upgrade", (req, socket, head) => {
   const pathname = new URL(req.url || "/", "http://localhost").pathname;
-  if (pathname === "/ws" || pathname === "/api/voice/asr/realtime") {
+  if (pathname === "/ws" || pathname === "/ws/events" || pathname === "/api/voice/asr/realtime") {
     handleWebSocket(req, socket as unknown as net.Socket, head);
     return;
   }

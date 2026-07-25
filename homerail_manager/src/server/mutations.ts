@@ -145,6 +145,7 @@ export function requiresDagMutationAuthorization(pathname: string, method?: stri
     || pathname.startsWith("/api/runs/")
     || pathname === "/api/dag/workflows/sync"
     || pathname === "/api/dag/profiles/sync"
+    || pathname.startsWith("/api/dag/environment/")
     || pathname === "/api/dag/workspaces/cleanup"
     || pathname === "/api/settings/workspace-retention";
 }

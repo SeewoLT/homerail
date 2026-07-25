@@ -1,4 +1,5 @@
 import type WebSocket from "ws";
+import type { WorkerRuntimeIdentity } from "homerail-protocol";
 
 export interface WorkerState {
   worker_id: string;
@@ -6,6 +7,7 @@ export interface WorkerState {
   socket: WebSocket;
   status: string;
   capabilities: string[];
+  runtime_identity?: WorkerRuntimeIdentity;
   registered_at: number;
   last_heartbeat: number;
 }

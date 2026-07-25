@@ -1,13 +1,20 @@
+import type { WorkerRuntimeIdentity } from "homerail-protocol";
+
 export interface RegisterMessage {
   type: "register";
   worker_id: string;
   capabilities?: string[];
+  runtime_identity?: WorkerRuntimeIdentity;
 }
 
 export interface ControlRegisterMessage {
   type: "control";
   action: "register";
-  data: { worker_id: string; capabilities?: string[] };
+  data: {
+    worker_id: string;
+    capabilities?: string[];
+    runtime_identity?: WorkerRuntimeIdentity;
+  };
 }
 
 export interface StatusMessage {
@@ -137,6 +144,25 @@ function stringList(value: unknown): string[] | undefined {
     .filter((item) => item.length > 0);
 }
 
+function runtimeIdentity(value: unknown): WorkerRuntimeIdentity | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const identity: WorkerRuntimeIdentity = {};
+  if (typeof raw.worker_version === "string" && raw.worker_version.trim()) {
+    identity.worker_version = raw.worker_version.trim();
+  }
+  if (typeof raw.protocol_version === "string" && raw.protocol_version.trim()) {
+    identity.protocol_version = raw.protocol_version.trim();
+  }
+  if (typeof raw.source_fingerprint === "string" && raw.source_fingerprint.trim()) {
+    identity.source_fingerprint = raw.source_fingerprint.trim();
+  }
+  if (typeof raw.image_revision === "string" && raw.image_revision.trim()) {
+    identity.image_revision = raw.image_revision.trim();
+  }
+  return Object.keys(identity).length ? identity : undefined;
+}
+
 export function parseIncomingMessage(raw: unknown): IncomingWorkerMessage | null {
   if (typeof raw !== "object" || raw === null) return null;
   const obj = raw as Record<string, unknown>;
@@ -149,6 +175,7 @@ export function parseIncomingMessage(raw: unknown): IncomingWorkerMessage | null
         type: "register",
         worker_id: obj.worker_id,
         capabilities: stringList(obj.capabilities),
+        runtime_identity: runtimeIdentity(obj.runtime_identity),
       };
     case "control":
       if (obj.action !== "register") return null;
@@ -160,6 +187,7 @@ export function parseIncomingMessage(raw: unknown): IncomingWorkerMessage | null
         data: {
           worker_id: (obj.data as Record<string, unknown>).worker_id as string,
           capabilities: stringList((obj.data as Record<string, unknown>).capabilities),
+          runtime_identity: runtimeIdentity((obj.data as Record<string, unknown>).runtime_identity),
         },
       };
     case "status":

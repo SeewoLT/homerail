@@ -46,7 +46,10 @@ export function readDagResourceStatus(): DagResourceStatus {
     ) {
       return defaultDagResourceStatus();
     }
+    // Preserve Manager-owned revisioned environment fields for readiness
+    // consumers while normalizing the legacy worker_image admission shape.
     return {
+      ...parsed,
       worker_image: {
         status,
         image: typeof worker.image === "string" && worker.image ? worker.image : process.env.HOMERAIL_WORKER_IMAGE || "homerail-worker:latest",
