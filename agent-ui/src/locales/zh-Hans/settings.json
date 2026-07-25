@@ -74,6 +74,19 @@
     "workersTitle": "正在运行的 Worker",
     "noWorkers": "当前没有已连接的 Worker；新 DAG 任务会按需启动。",
     "buildLog": "构建日志",
+    "state": {
+      "unknown": "尚未确认 DAG 运行环境是否就绪。",
+      "checking": "正在检查 Docker 和 Worker 镜像…",
+      "building": "正在构建 Worker 镜像…",
+      "ready": "DAG 运行环境已就绪。",
+      "dockerUnavailable": "Docker 不可用，暂时无法启动 DAG 任务。",
+      "workerImageMissing": "尚未构建 Worker 镜像。",
+      "workerImageStale": "Worker 镜像需要针对当前 HomeRail 版本重新构建。",
+      "workerImageIncompatible": "Worker 镜像使用了不兼容的协议版本。",
+      "buildFailed": "Worker 镜像构建失败。",
+      "skipped": "已跳过 Worker 镜像准备。",
+      "unavailable": "DAG 运行环境暂时不可用。"
+    },
     "compatibility": {
       "current": "当前版本",
       "stale": "需要更新",
@@ -100,6 +113,7 @@
       "worker_image_stale": "镜像与当前 HomeRail 源码不一致，请重新构建。",
       "worker_image_incompatible": "镜像使用了不兼容的协议版本，请重新构建。",
       "worker_image_build_failed": "上次构建失败。展开构建日志排查后可以重试。",
+      "unknown": "请点击“重新检查”，等待 Manager 确认 Docker 和 Worker 镜像状态后再启动 DAG 任务。",
       "checkFailed": "无法完成 Docker 检查，请查看 Manager 日志了解详情。"
     }
   },

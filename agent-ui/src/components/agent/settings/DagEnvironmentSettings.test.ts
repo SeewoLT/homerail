@@ -134,7 +134,8 @@ describe('DagEnvironmentSettings', () => {
     button.click()
     await flush()
 
-    expect(element.textContent).toContain('Building homerail-worker:latest.')
+    expect(element.textContent).toContain('正在构建 Worker 镜像')
+    expect(element.textContent).not.toContain('Building homerail-worker:latest.')
     expect(button.disabled).toBe(true)
   })
 
@@ -159,5 +160,51 @@ describe('DagEnvironmentSettings', () => {
 
     expect(element.textContent).toContain('请启动 Docker Desktop')
     expect(element.querySelector<HTMLButtonElement>('[data-testid="dag-environment-build"]')?.disabled).toBe(true)
+  })
+
+  it('renders unknown readiness as localized and actionable instead of using Manager text', async () => {
+    api.status = {
+      ...baseStatus(),
+      docker: {
+        status: 'unknown',
+        message: 'Docker environment has not been checked yet.',
+      },
+      worker_image: {
+        status: 'unknown',
+        image: 'homerail-worker:latest',
+        message: 'DAG worker image status has not been checked yet.',
+      },
+      images: [],
+    }
+    const element = await mount()
+
+    expect(element.textContent).toContain('尚未确认 DAG 运行环境是否就绪')
+    expect(element.textContent).toContain('请点击“重新检查”')
+    expect(element.textContent).not.toContain('DAG worker image status has not been checked yet.')
+    expect(element.querySelector<HTMLButtonElement>('[data-testid="dag-environment-build"]')?.disabled).toBe(true)
+  })
+
+  it('renders stale readiness as a localized rebuild action instead of using Manager text', async () => {
+    api.status = {
+      ...baseStatus(),
+      worker_image: {
+        status: 'error',
+        image: 'homerail-worker:latest',
+        reason: 'stale',
+        reason_code: 'worker_image_stale',
+        compatibility: 'stale',
+        message: 'homerail-worker:latest does not match the current HomeRail source.',
+      },
+      images: [{
+        ...baseStatus().images[0]!,
+        compatibility: 'stale',
+      }],
+    }
+    const element = await mount()
+
+    expect(element.textContent).toContain('Worker 镜像需要针对当前 HomeRail 版本重新构建')
+    expect(element.textContent).toContain('镜像与当前 HomeRail 源码不一致，请重新构建')
+    expect(element.textContent).not.toContain('does not match the current HomeRail source')
+    expect(element.querySelector<HTMLButtonElement>('[data-testid="dag-environment-build"]')?.disabled).toBe(false)
   })
 })

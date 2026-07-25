@@ -74,6 +74,19 @@
     "workersTitle": "執行中的 Worker",
     "noWorkers": "目前沒有已連線的 Worker；新的 DAG 工作會視需要啟動。",
     "buildLog": "建置記錄",
+    "state": {
+      "unknown": "尚未確認 DAG 執行環境是否就緒。",
+      "checking": "正在檢查 Docker 與 Worker 映像…",
+      "building": "正在建置 Worker 映像…",
+      "ready": "DAG 執行環境已就緒。",
+      "dockerUnavailable": "Docker 無法使用，暫時無法啟動 DAG 工作。",
+      "workerImageMissing": "尚未建置 Worker 映像。",
+      "workerImageStale": "Worker 映像需要針對目前的 HomeRail 版本重新建置。",
+      "workerImageIncompatible": "Worker 映像使用了不相容的協定版本。",
+      "buildFailed": "Worker 映像建置失敗。",
+      "skipped": "已略過 Worker 映像準備。",
+      "unavailable": "DAG 執行環境暫時無法使用。"
+    },
     "compatibility": {
       "current": "目前版本",
       "stale": "需要更新",
@@ -100,6 +113,7 @@
       "worker_image_stale": "映像與目前 HomeRail 原始碼不一致，請重新建置。",
       "worker_image_incompatible": "映像使用不相容的協定版本，請重新建置。",
       "worker_image_build_failed": "上次建置失敗。展開建置記錄排查後可以重試。",
+      "unknown": "請按一下「重新檢查」，等待 Manager 確認 Docker 與 Worker 映像狀態後再啟動 DAG 工作。",
       "checkFailed": "無法完成 Docker 檢查，請查看 Manager 記錄了解詳情。"
     }
   },

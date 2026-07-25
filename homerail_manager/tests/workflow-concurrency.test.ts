@@ -38,6 +38,18 @@ async function closeServer(server: http.Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
+function writeReadyDagResources(home: string): void {
+  const runtimeDir = path.join(home, "runtime");
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.writeFileSync(path.join(runtimeDir, "dag-resources.json"), JSON.stringify({
+    worker_image: {
+      status: "ready",
+      image: "homerail-worker:latest",
+      message: "Worker image is ready for the unrelated concurrency test.",
+    },
+  }));
+}
+
 function workflow(id: string, triggers: string): string {
   const triggerBlock = triggers.trim()
     ? `  triggers:\n${triggers.replace(/^/gm, "    ")}\n`
@@ -141,6 +153,7 @@ describe("workflow-level run admission", () => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workflow-concurrency-"));
     process.env.HOMERAIL_HOME = tmpHome;
     process.env.HOMERAIL_DAG_COMMAND_ALLOWLIST = "node";
+    writeReadyDagResources(tmpHome);
     closeDb();
     _clearActiveRuns();
   });

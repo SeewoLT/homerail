@@ -35,6 +35,43 @@ const canBuild = computed(() =>
 )
 const selectedImage = computed(() => status.value?.images.find(image => image.selected))
 
+const statusSummary = computed(() => {
+  if (!status.value) return t('settings.environment.loading')
+  const worker = status.value.worker_image
+  const build = status.value.build
+  if (build?.status === 'queued' || build?.status === 'running' || worker.status === 'building') {
+    return t('settings.environment.state.building')
+  }
+  if (status.value.docker.status === 'checking' || worker.status === 'checking') {
+    return t('settings.environment.state.checking')
+  }
+  if (status.value.docker.status === 'unknown' || worker.status === 'unknown') {
+    return t('settings.environment.state.unknown')
+  }
+  if (status.value.docker.status === 'error') {
+    return t('settings.environment.state.dockerUnavailable')
+  }
+  if (
+    worker.reason_code === 'worker_image_stale'
+    || worker.reason === 'stale'
+    || worker.compatibility === 'stale'
+  ) {
+    return t('settings.environment.state.workerImageStale')
+  }
+  if (worker.reason_code === 'worker_image_missing') {
+    return t('settings.environment.state.workerImageMissing')
+  }
+  if (worker.reason_code === 'worker_image_incompatible') {
+    return t('settings.environment.state.workerImageIncompatible')
+  }
+  if (worker.reason_code === 'worker_image_build_failed') {
+    return t('settings.environment.state.buildFailed')
+  }
+  if (worker.status === 'ready') return t('settings.environment.state.ready')
+  if (worker.status === 'skipped') return t('settings.environment.state.skipped')
+  return t('settings.environment.state.unavailable')
+})
+
 function compatibilityLabel(value: DagEnvironmentCompatibility): string {
   return t(`settings.environment.compatibility.${value}`)
 }
@@ -71,9 +108,23 @@ function guidanceKey(reason: DagEnvironmentReasonCode | undefined): string | nul
 }
 
 const guidance = computed(() => {
-  const reason = status.value?.docker.reason_code ?? status.value?.worker_image.reason_code
+  const reason = status.value?.docker.reason_code
+    ?? status.value?.worker_image.reason_code
+    ?? (
+      status.value?.worker_image.reason === 'stale'
+      || status.value?.worker_image.compatibility === 'stale'
+        ? 'worker_image_stale'
+        : undefined
+    )
   const key = guidanceKey(reason)
-  return key ? t(key) : ''
+  if (key) return t(key)
+  if (
+    status.value?.docker.status === 'unknown'
+    || status.value?.worker_image.status === 'unknown'
+  ) {
+    return t('settings.environment.guidance.unknown')
+  }
+  return ''
 })
 
 function formatSize(value: number | undefined): string {
@@ -125,7 +176,7 @@ function shortId(value: string | undefined): string {
           <div class="min-w-0">
             <h3 class="font-semibold text-[var(--hr-text-1)]">{{ t('settings.environment.statusTitle') }}</h3>
             <p class="mt-1 text-sm leading-6 text-[var(--hr-text-2)]">
-              {{ status?.worker_image.message || t('settings.environment.loading') }}
+              {{ statusSummary }}
             </p>
             <p v-if="guidance" class="mt-2 text-sm leading-6 text-[var(--hr-warning)]">{{ guidance }}</p>
             <p v-if="error" class="mt-2 text-sm text-[var(--hr-danger)]">{{ error }}</p>

@@ -74,6 +74,19 @@
     "workersTitle": "Running Workers",
     "noWorkers": "No Workers are connected. New DAG tasks start them on demand.",
     "buildLog": "Build log",
+    "state": {
+      "unknown": "DAG readiness has not been confirmed yet.",
+      "checking": "Checking Docker and the Worker image…",
+      "building": "Building the Worker image…",
+      "ready": "The DAG runtime environment is ready.",
+      "dockerUnavailable": "Docker is unavailable, so DAG runs cannot start.",
+      "workerImageMissing": "The Worker image has not been built yet.",
+      "workerImageStale": "The Worker image needs to be rebuilt for this HomeRail version.",
+      "workerImageIncompatible": "The Worker image uses an incompatible protocol version.",
+      "buildFailed": "The Worker image build failed.",
+      "skipped": "Worker image preparation was skipped.",
+      "unavailable": "The DAG runtime environment is unavailable."
+    },
     "compatibility": {
       "current": "Current",
       "stale": "Update needed",
@@ -100,6 +113,7 @@
       "worker_image_stale": "The image does not match the current HomeRail source. Rebuild it.",
       "worker_image_incompatible": "The image uses an incompatible protocol version. Rebuild it.",
       "worker_image_build_failed": "The last build failed. Expand the build log, resolve the problem, and retry.",
+      "unknown": "Select “Check again” and wait for Manager to confirm Docker and Worker image readiness before starting a DAG run.",
       "checkFailed": "Docker could not be checked. See the Manager log for details."
     }
   },

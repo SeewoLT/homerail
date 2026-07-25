@@ -34,7 +34,11 @@ async function removeTempDir(dir: string): Promise<void> {
   }
 }
 
-function writeDagResourceStatus(home: string, status: "building" | "ready" | "error"): void {
+function writeDagResourceStatus(
+  home: string,
+  status: "unknown" | "building" | "ready" | "error",
+  compatibility?: "current" | "stale" | "incompatible" | "unknown",
+): void {
   const dir = path.join(home, "runtime");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "dag-resources.json"), JSON.stringify({
@@ -56,6 +60,9 @@ function writeDagResourceStatus(home: string, status: "building" | "ready" | "er
       message: status === "building" ? "Building test worker image" : "Worker image test status",
       updated_at: Date.now(),
       error: status === "error" ? "test build failed" : undefined,
+      compatibility,
+      reason: compatibility === "stale" ? "stale" : undefined,
+      reason_code: compatibility === "stale" ? "worker_image_stale" : undefined,
     },
     images: [],
     workers: [],
@@ -402,5 +409,56 @@ describe("/api/manager-agent/readiness", () => {
     expect(response.status).toBe(503);
     expect(body.message).toContain("DAG 资源正在准备");
     expect(body.data?.code).toBe("dag_resources_preparing");
+  });
+
+  it("does not silently run with unknown or stale DAG resources", async () => {
+    writeDagResourceStatus(tmpHome, "unknown");
+    server = createServer(0, undefined, undefined, false);
+    const port = await listen(server);
+
+    const unknownResponse = await fetch(`http://127.0.0.1:${port}/api/runs/create-and-run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ yamlPath: "assets/orchestrations/simple-demo.yaml" }),
+    });
+    const unknownBody = await unknownResponse.json() as {
+      message: string;
+      data?: {
+        code?: string;
+        dag_resources?: { worker_image?: { status?: string } };
+      };
+    };
+
+    expect(unknownResponse.status).toBe(503);
+    expect(unknownBody.message).toContain("尚未确认 DAG 资源是否就绪");
+    expect(unknownBody.data?.code).toBe("dag_resources_unavailable");
+    expect(unknownBody.data?.dag_resources?.worker_image?.status).toBe("unknown");
+
+    writeDagResourceStatus(tmpHome, "ready", "stale");
+    const staleResponse = await fetch(`http://127.0.0.1:${port}/api/runs/create-and-run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ yamlPath: "assets/orchestrations/simple-demo.yaml" }),
+    });
+    const staleBody = await staleResponse.json() as {
+      data?: {
+        code?: string;
+        dag_resources?: {
+          worker_image?: {
+            status?: string;
+            reason_code?: string;
+            compatibility?: string;
+          };
+        };
+      };
+    };
+
+    expect(staleResponse.status).toBe(503);
+    expect(staleBody.data?.code).toBe("dag_resources_unavailable");
+    expect(staleBody.data?.dag_resources?.worker_image).toMatchObject({
+      status: "ready",
+      reason_code: "worker_image_stale",
+      compatibility: "stale",
+    });
   });
 });
