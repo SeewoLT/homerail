@@ -38,6 +38,17 @@ test("production deployment is atomic, health checked, and rollback capable", ()
   assert.match(deploy, /rolling back/);
   assert.match(deploy, /PREVIOUS_TARGET/);
   assert.match(deploy, /UNIT_BACKUP/);
+  assert.match(deploy, /loginctl show-user "\$DEPLOY_USER" --property=Linger --value/);
+  assert.match(deploy, /sudo loginctl enable-linger \$DEPLOY_USER/);
+  assert.match(deploy, /StartLimitIntervalSec=0/);
+  assert.doesNotMatch(deploy, /StartLimitBurst=/);
+  assert.match(deploy, /WorkingDirectory=%h/);
+  assert.doesNotMatch(deploy, /WorkingDirectory=\$PRODUCTION_ROOT\/current/);
+  assert.match(
+    deploy,
+    /ExecStart=\/bin\/bash -c 'release="\\\$HOMERAIL_PRODUCTION_ROOT\/current"; until \[ -x "\\\$release\/scripts\/run-production-service\.sh" \]; do sleep 10; done; cd "\\\$release"; exec "\\\$release\/scripts\/run-production-service\.sh"'/,
+  );
+  assert.doesNotMatch(deploy, /After=network-online\.target docker\.service/);
   assert.match(deploy, /curl -fkSs/);
   assert.match(deploy, /connected_nodes/);
   assert.match(deploy, /grep -Fxl -- "\$old_revision"/);
@@ -267,6 +278,8 @@ test("production deployment rolls back a failed DAG smoke and accepts a successf
     write("scripts/lib/production-runtime.sh", fs.readFileSync(path.join(repoRoot, "scripts", "lib", "production-runtime.sh"), "utf8"), 0o755);
 
     fakeCommand("docker", `#!/usr/bin/env bash\nif [ "${'${1:-}'}" = network ] && [ "${'${2:-}'}" = inspect ] && [ "${'${3:-}'}" = bridge ]; then echo 172.17.0.1; fi\nexit 0\n`);
+    fakeCommand("codex", "#!/usr/bin/env bash\nexit 0\n");
+    fakeCommand("loginctl", "#!/usr/bin/env bash\nprintf 'yes\\n'\n");
     fakeCommand("systemctl", "#!/usr/bin/env bash\nexit 0\n");
     fakeCommand("journalctl", "#!/usr/bin/env bash\nexit 0\n");
     fakeCommand("curl", `#!/usr/bin/env bash\nurl="${'${!#}'}"\ncase "$url" in */runtime/status) printf '{"connected_nodes":1}\\n' ;; esac\nexit 0\n`);
@@ -285,7 +298,7 @@ test("production deployment rolls back a failed DAG smoke and accepts a successf
         HOMERAIL_DEPLOY_REVISION: revision,
         HOMERAIL_PRODUCTION_PUBLIC_HOST: "production.test",
         HOMERAIL_PRODUCTION_ALLOW_INSECURE_REMOTE_WS: "1",
-        HOMERAIL_CODEX_BIN: "/bin/true",
+        HOMERAIL_CODEX_BIN: path.join(fakeBin, "codex"),
         FAKE_SMOKE_EXIT: String(smokeExit),
       },
     });
@@ -309,6 +322,14 @@ test("production deployment rolls back a failed DAG smoke and accepts a successf
     assert.equal(passed.result.status, 0, passed.result.stderr);
     assert.equal(fs.readFileSync(path.join(passed.productionRoot, "last-successful-revision"), "utf8"), `${revision}\n`);
     assert.notEqual(fs.readlinkSync(path.join(passed.productionRoot, "current")), "releases/previous");
+    const unit = fs.readFileSync(passed.unitPath, "utf8");
+    assert.match(unit, /StartLimitIntervalSec=0/);
+    assert.doesNotMatch(unit, /StartLimitBurst=/);
+    assert.match(unit, /WorkingDirectory=%h/);
+    assert.match(
+      unit,
+      /ExecStart=\/bin\/bash -c 'release="\$HOMERAIL_PRODUCTION_ROOT\/current"; until \[ -x "\$release\/scripts\/run-production-service\.sh" \]; do sleep 10; done; cd "\$release"; exec "\$release\/scripts\/run-production-service\.sh"'/,
+    );
   } finally {
     fs.rmSync(passed.tempRoot, { recursive: true, force: true });
   }

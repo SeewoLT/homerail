@@ -101,6 +101,20 @@ mkdir -p "$PRODUCTION_ROOT/releases" "$PRODUCTION_ROOT/locks" "$HOMERAIL_HOME" "
 HOMERAIL_HOME="$(realpath "$HOMERAIL_HOME")"
 chmod 700 "$HOMERAIL_HOME"
 
+# An enabled user unit starts during boot only when the account lingers without
+# an interactive login. Fail deployment instead of accepting a service that
+# silently disappears after the next reboot.
+DEPLOY_USER="$(id -un)"
+if ! command -v loginctl >/dev/null 2>&1; then
+  echo "Production deployment requires loginctl to verify systemd user lingering." >&2
+  exit 1
+fi
+LINGER_STATE="$(loginctl show-user "$DEPLOY_USER" --property=Linger --value 2>/dev/null || true)"
+if [ "$LINGER_STATE" != "yes" ]; then
+  echo "Production service requires user lingering; run: sudo loginctl enable-linger $DEPLOY_USER" >&2
+  exit 1
+fi
+
 # systemd user services do not inherit interactive-shell Node initialization.
 # Resolve an optional Codex entry point now; the release later wraps it with
 # the exact Node binary copied into runtime/ instead of trusting its shebang or
@@ -191,14 +205,16 @@ fi
 cat > "$UNIT_PATH.tmp" <<UNIT
 [Unit]
 Description=HomeRail persistent production service
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=120
-StartLimitBurst=5
+# A boot-time data mount or Docker daemon may appear after the user manager.
+# Keep retrying instead of entering a permanent failed state after five starts.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-WorkingDirectory=$PRODUCTION_ROOT/current
+# The production volume may not exist when the lingering user manager starts.
+WorkingDirectory=%h
 Environment=HOMERAIL_PRODUCTION_ROOT=$PRODUCTION_ROOT
 Environment=HOMERAIL_HOME=$HOMERAIL_HOME
 Environment=HOMERAIL_PRODUCTION_RESOURCES=$RESOURCE_ROOT
@@ -215,9 +231,11 @@ Environment=HOMERAIL_PRODUCTION_UI_HTTP_PORT=$UI_HTTP_PORT
 Environment=HOMERAIL_PRODUCTION_PUBLIC_HOST=$PUBLIC_HOST
 Environment=PATH=$SERVICE_PATH
 $CODEX_UNIT_ENV
-ExecStart=$PRODUCTION_ROOT/current/scripts/run-production-service.sh
+# /bin/bash and %h exist before the data volume is mounted. Wait for the atomic
+# `current` release, then preserve the release working-directory contract.
+ExecStart=/bin/bash -c 'release="\$HOMERAIL_PRODUCTION_ROOT/current"; until [ -x "\$release/scripts/run-production-service.sh" ]; do sleep 10; done; cd "\$release"; exec "\$release/scripts/run-production-service.sh"'
 Restart=always
-RestartSec=5
+RestartSec=10
 KillMode=control-group
 TimeoutStopSec=120
 Nice=5
