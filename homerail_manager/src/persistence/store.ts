@@ -369,6 +369,178 @@ export function loadRunMetadata(runId: string): PersistedRunMetadata | undefined
   return row ? parseJsonRow<PersistedRunMetadata>(row.metadata) : undefined;
 }
 
+export interface PersistedRunControlState {
+  status: DagRunStatus;
+  nodeStates: Record<string, string>;
+}
+
+export interface PersistedRunSummary {
+  runId: string;
+  workflowId?: string;
+  workflowName?: string;
+  nodeCount?: number;
+  status: DagRunStatus;
+  currentRound?: PersistedCurrentDagRunRound;
+  createdAt: number;
+  completedAt?: number;
+}
+
+interface PersistedRunSummaryRow {
+  run_id: string;
+  workflow_id: string | null;
+  workflow_name: string | null;
+  status: DagRunStatus;
+  created_at: number;
+  completed_at: number | null;
+  graph: string | null;
+  node_states: string | null;
+  round_id: string | null;
+  ordinal: number | null;
+  round_status: PersistedCurrentDagRunRound["status"] | null;
+  target_actor_ids_json: string | null;
+  await_node_id: string | null;
+  opened_at: number | null;
+  closed_at: number | null;
+  expires_at: number | null;
+}
+
+function _nodeCountFromExpandedColumns(row: PersistedRunSummaryRow): number | undefined {
+  if (row.graph) {
+    const graph = parseJsonRow<unknown>(row.graph);
+    if (
+      graph
+      && typeof graph === "object"
+      && !Array.isArray(graph)
+      && Array.isArray((graph as { nodes?: unknown }).nodes)
+    ) {
+      return (graph as { nodes: unknown[] }).nodes.length;
+    }
+  }
+  if (row.node_states) {
+    const nodeStates = parseJsonRow<unknown>(row.node_states);
+    if (nodeStates && typeof nodeStates === "object" && !Array.isArray(nodeStates)) {
+      return Object.keys(nodeStates).length;
+    }
+  }
+  return undefined;
+}
+
+function _currentRoundFromSummaryRow(
+  row: PersistedRunSummaryRow,
+): PersistedCurrentDagRunRound | undefined {
+  if (
+    row.round_id === null
+    || row.ordinal === null
+    || row.round_status === null
+    || row.target_actor_ids_json === null
+    || row.opened_at === null
+  ) {
+    return undefined;
+  }
+  const targetActorIds = parseJsonRow<unknown>(row.target_actor_ids_json);
+  if (!Array.isArray(targetActorIds) || targetActorIds.some((value) => typeof value !== "string")) {
+    throw new Error(`DAG run round ${row.run_id}/${row.round_id} has invalid target_actor_ids_json`);
+  }
+  return {
+    round_id: row.round_id,
+    ordinal: row.ordinal,
+    status: row.round_status,
+    target_actor_ids: [...targetActorIds],
+    ...(row.await_node_id === null ? {} : { await_node_id: row.await_node_id }),
+    opened_at: row.opened_at,
+    ...(row.closed_at === null ? {} : { closed_at: row.closed_at }),
+    ...(row.expires_at === null ? {} : { expires_at: row.expires_at }),
+  };
+}
+
+export function listPersistedRunSummaries(): PersistedRunSummary[] {
+  const rows = getDb().prepare(`
+    SELECT
+      run.run_id,
+      run.workflow_id,
+      run.workflow_name,
+      run.status,
+      run.created_at,
+      run.completed_at,
+      run.graph,
+      run.node_states,
+      round.round_id,
+      round.ordinal,
+      round.status AS round_status,
+      round.target_actor_ids_json,
+      round.await_node_id,
+      round.opened_at,
+      round.closed_at,
+      round.expires_at
+    FROM dag_runs run
+    LEFT JOIN dag_run_rounds round
+      ON round.run_id = run.run_id
+      AND round.ordinal = (
+        SELECT MAX(latest.ordinal)
+        FROM dag_run_rounds latest
+        WHERE latest.run_id = run.run_id
+      )
+    ORDER BY run.updated_at DESC, run.run_id
+  `).all() as PersistedRunSummaryRow[];
+
+  return rows.map((row) => {
+    assertStatus("dag_run", row.status);
+    const currentRound = _currentRoundFromSummaryRow(row);
+    const nodeCount = _nodeCountFromExpandedColumns(row);
+    return {
+      runId: row.run_id,
+      ...(row.workflow_id === null ? {} : { workflowId: row.workflow_id }),
+      ...(row.workflow_name === null ? {} : { workflowName: row.workflow_name }),
+      ...(nodeCount === undefined ? {} : { nodeCount }),
+      status: row.status,
+      ...(currentRound ? { currentRound } : {}),
+      createdAt: row.created_at,
+      ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
+    };
+  });
+}
+
+export function loadPersistedRunControlState(runId: string): PersistedRunControlState | undefined {
+  _safeRunId(runId);
+  const row = getDb()
+    .prepare("SELECT status, node_states FROM dag_runs WHERE run_id = ?")
+    .get(runId) as { status: DagRunStatus; node_states: string | null } | undefined;
+  if (!row) return undefined;
+  assertStatus("dag_run", row.status);
+  if (row.node_states !== null) {
+    const nodeStates = parseJsonRow<unknown>(row.node_states);
+    if (nodeStates && typeof nodeStates === "object" && !Array.isArray(nodeStates)) {
+      return { status: row.status, nodeStates: nodeStates as Record<string, string> };
+    }
+  }
+  const legacy = loadRunMetadata(runId);
+  return legacy ? { status: legacy.status, nodeStates: legacy.nodeStates } : undefined;
+}
+
+export function getPersistedRunStatus(runId: string): DagRunStatus | undefined {
+  _safeRunId(runId);
+  const row = getDb()
+    .prepare("SELECT status FROM dag_runs WHERE run_id = ?")
+    .get(runId) as { status: DagRunStatus } | undefined;
+  if (!row) return undefined;
+  assertStatus("dag_run", row.status);
+  return row.status;
+}
+
+export function listPersistedRunIdsByStatus(statuses: readonly DagRunStatus[]): string[] {
+  if (statuses.length === 0) return [];
+  for (const status of statuses) assertStatus("dag_run", status);
+  const placeholders = statuses.map(() => "?").join(", ");
+  return (getDb()
+    .prepare(`
+      SELECT run_id FROM dag_runs
+      WHERE status IN (${placeholders})
+      ORDER BY updated_at DESC, run_id
+    `)
+    .all(...statuses) as Array<{ run_id: string }>)
+    .map((row) => row.run_id);
+}
+
 export function listPersistedRunIds(): string[] {
   return (getDb()
     .prepare("SELECT run_id FROM dag_runs ORDER BY updated_at DESC, run_id")

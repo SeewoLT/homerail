@@ -15,7 +15,7 @@ import {
   writeDagActorCheckpoint,
 } from "../src/persistence/dag-actor-leases.js";
 import { getDagActor, registerDagActor } from "../src/persistence/dag-actors.js";
-import { closeDb } from "../src/persistence/db.js";
+import { closeDb, getDb } from "../src/persistence/db.js";
 import { ensureRunDir, loadRunMetadata, writeRunMetadata } from "../src/persistence/store.js";
 import { reapDagActorLeases } from "../src/runtime/dag-actor-lease-reaper.js";
 import { _clearWorkers, registerWorker } from "../src/worker/registry.js";
@@ -263,7 +263,7 @@ describe("DAG actor lease reaper", () => {
   });
 
   it("deletes only terminal, retention-expired dormant runtime and checkpoints", async () => {
-    setRunStatus("completed");
+    setRunStatus("active");
     const lease = acquireDagActorLease({
       run_id: "run-reaper",
       actor_id: "actor-1",
@@ -301,9 +301,16 @@ describe("DAG actor lease reaper", () => {
       retention_ttl_ms: 10,
       now: now + 1,
     });
-
-    expect((await reapDagActorLeases({ now: now + 10 })).runtimes_deleted).toBe(0);
+    // Expired retention alone is insufficient while the owning run is active.
+    expect((await reapDagActorLeases({ now: now + 11 })).runtimes_deleted).toBe(0);
     expect(getLatestDagActorCheckpoint({ run_id: "run-reaper", actor_id: "actor-1" })).toBeDefined();
+
+    setRunStatus("completed");
+    // Once terminal, retention is selected from normalized status/lease
+    // columns and must not parse aggregate metadata on every reaper tick.
+    getDb().prepare("UPDATE dag_runs SET metadata = ? WHERE run_id = ?")
+      .run("{ intentionally invalid terminal metadata", "run-reaper");
+
     expect((await reapDagActorLeases({ now: now + 11 })).runtimes_deleted).toBe(1);
     expect(getDagActor("run-reaper", "actor-1")).toBeUndefined();
     expect(getLatestDagActorCheckpoint({ run_id: "run-reaper", actor_id: "actor-1" })).toBeUndefined();

@@ -5,12 +5,16 @@ import {
   getDagActorLease,
   listDagProvisionedWorkers,
   listExpiredDagActorLeases,
+  listExpiredTerminalDagActorRuntimes,
   releaseDagActorLease,
   transitionDagProvisionedWorker,
 } from "../persistence/dag-actor-leases.js";
 import { listDagActors } from "../persistence/dag-actors.js";
-import { listPersistedRunIds, loadRunMetadata } from "../persistence/store.js";
-import type { DagRunStatus } from "../persistence/status.js";
+import {
+  getPersistedRunStatus,
+  listPersistedRunIdsByStatus,
+  loadPersistedRunControlState,
+} from "../persistence/store.js";
 import { getWorker } from "../worker/registry.js";
 import { loadDagActorLeaseSettings } from "../config/dag-actor-lease-settings.js";
 import {
@@ -54,10 +58,6 @@ function recordEntry(record: ReturnType<typeof listDagProvisionedWorkers>[number
   };
 }
 
-function runStatus(runId: string): DagRunStatus | undefined {
-  return loadRunMetadata(runId)?.status;
-}
-
 export async function reapDagActorLeases(
   options: DagActorLeaseReaperOptions = {},
 ): Promise<DagActorLeaseReaperReport> {
@@ -71,8 +71,7 @@ export async function reapDagActorLeases(
   };
 
   const renewalThreshold = Math.floor(loadDagActorLeaseSettings().worker_idle_ttl_ms / 2);
-  for (const runId of listPersistedRunIds()) {
-    if (runStatus(runId) !== "active") continue;
+  for (const runId of listPersistedRunIdsByStatus(["active"])) {
     for (const actor of listDagActors(runId)) {
       const lease = getDagActorLease({ run_id: runId, actor_id: actor.actor_id });
       if (!lease || lease.state !== "leased" || lease.pinned || lease.idle_deadline! - now > renewalThreshold) continue;
@@ -100,10 +99,10 @@ export async function reapDagActorLeases(
   for (const worker of pending) {
     if (worker.status === "active") {
       const lease = getDagActorLease({ run_id: worker.run_id, actor_id: worker.actor_id });
-      const metadata = loadRunMetadata(worker.run_id);
-      const status = metadata?.status;
+      const control = loadPersistedRunControlState(worker.run_id);
+      const status = control?.status;
       const activeNodeDisconnected = status === "active"
-        && metadata?.nodeStates[worker.node_id] === "RUNNING";
+        && control?.nodeStates[worker.node_id] === "RUNNING";
       const stillOwned = lease?.state === "leased"
         && lease.lease_generation === worker.lease_generation
         && (lease.target_type === "worker" || lease.target_type === "provisioned_worker")
@@ -175,7 +174,7 @@ export async function reapDagActorLeases(
   }
 
   for (const lease of listExpiredDagActorLeases({ now, limit: options.limit })) {
-    if (runStatus(lease.run_id) === "active") continue;
+    if (getPersistedRunStatus(lease.run_id) === "active") continue;
     try {
       // This versioned transition is the physical-generation fence. Once it
       // commits, late results from the released worker are no longer current.
@@ -213,15 +212,13 @@ export async function reapDagActorLeases(
     }
   }
 
-  for (const runId of listPersistedRunIds()) {
-    const status = runStatus(runId);
-    if (status === "active" || status === "waiting") continue;
-    for (const actor of listDagActors(runId)) {
-      const lease = getDagActorLease({ run_id: runId, actor_id: actor.actor_id });
-      if (!lease || lease.state === "leased" || lease.pinned || lease.retained_until! > now) continue;
-      if (deleteExpiredDagActorRuntime({ run_id: runId, actor_id: actor.actor_id, now }).deleted) {
-        report.runtimes_deleted++;
-      }
+  for (const runtime of listExpiredTerminalDagActorRuntimes({ now, limit: options.limit })) {
+    if (deleteExpiredDagActorRuntime({
+      run_id: runtime.run_id,
+      actor_id: runtime.actor_id,
+      now,
+    }).deleted) {
+      report.runtimes_deleted++;
     }
   }
   return report;
