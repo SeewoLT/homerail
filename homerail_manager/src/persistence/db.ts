@@ -1919,6 +1919,32 @@ function validateVoiceArtifactSchemaV32(db: SqliteDatabase): void {
   }
 }
 
+function validateDagRunHotPathIndexesV33(db: SqliteDatabase): void {
+  const expected = new Map<string, readonly string[]>([
+    ["idx_dag_runs_updated", ["updated_at", "run_id"]],
+    ["idx_dag_runs_status_updated", ["status", "updated_at", "run_id"]],
+  ]);
+  const indexes = new Set(
+    (db.prepare("PRAGMA index_list(dag_runs)").all() as Array<{ name: string }>)
+      .map((entry) => entry.name),
+  );
+  for (const [name, expectedColumns] of expected) {
+    if (!indexes.has(name)) {
+      throw new Error(`Schema migration 33 is incomplete: index ${name} is missing`);
+    }
+    const actualColumns = (db.prepare(`PRAGMA index_info(${name})`).all() as Array<{
+      seqno: number;
+      name: string;
+    }>).sort((left, right) => left.seqno - right.seqno).map((entry) => entry.name);
+    if (
+      actualColumns.length !== expectedColumns.length
+      || actualColumns.some((column, position) => column !== expectedColumns[position])
+    ) {
+      throw new Error(`Schema migration 33 is incomplete: index ${name} has invalid columns`);
+    }
+  }
+}
+
 function validateGenerativeUiSchemaV3(db: SqliteDatabase): void {
   const requiredColumns: Record<string, readonly string[]> = {
     generative_ui_documents: [
@@ -4081,6 +4107,18 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
     validate: validateVoiceArtifactSchemaV32,
+  },
+  {
+    version: 33,
+    up: (db) => {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_dag_runs_updated
+          ON dag_runs(updated_at DESC, run_id);
+        CREATE INDEX IF NOT EXISTS idx_dag_runs_status_updated
+          ON dag_runs(status, updated_at DESC, run_id);
+      `);
+    },
+    validate: validateDagRunHotPathIndexesV33,
   },
 ];
 

@@ -2,7 +2,7 @@ import * as http from "node:http";
 import {
   loadRunMetadata,
   loadRunSnapshot,
-  listPersistedRunIds,
+  listPersistedRunSummaries,
   loadNodeUsages,
 } from "../persistence/store.js";
 import type { PersistedEvent, PersistedRunMetadata, PersistedRunSnapshot, NodeUsageRecord } from "../persistence/types.js";
@@ -416,20 +416,7 @@ export function inspectionRoutesHandler(
 
   // GET /api/runs
   if (pathname === "/api/runs" && req.method === "GET") {
-    const runIds = listPersistedRunIds();
-    const runs = runIds
-      .map((id) => loadRunMetadata(id))
-      .filter((m): m is NonNullable<typeof m> => !!m)
-      .map((m) => ({
-        runId: m.runId,
-        workflowId: m.workflowId,
-        workflowName: m.workflowName,
-        nodeCount: m.nodeCount,
-        status: m.status,
-        currentRound: m.currentRound,
-        createdAt: m.createdAt,
-        completedAt: m.completedAt,
-      }));
+    const runs = listPersistedRunSummaries();
     _ok(res, `Found ${runs.length} runs`, { runs, total: runs.length });
     return true;
   }

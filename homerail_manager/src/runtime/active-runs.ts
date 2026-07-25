@@ -55,7 +55,7 @@ import {
   serializeRunMetadata,
   loadRunMetadata,
   loadRunSnapshot,
-  listPersistedRunIds,
+  listPersistedRunIdsByStatus,
 } from "../persistence/store.js";
 import type {
   PersistedGraphData,
@@ -1196,7 +1196,7 @@ export interface ColdRecoverySummary {
  * in-memory store. Safe to call at startup. Idempotent. */
 export function recoverAllActiveRuns(): ColdRecoverySummary {
   const summary: ColdRecoverySummary = { recovered: [], failed: [], skipped: [] };
-  for (const runId of listPersistedRunIds()) {
+  for (const runId of listPersistedRunIdsByStatus(["active", "waiting"])) {
     try {
       const metadata = loadRunMetadata(runId);
       if (!metadata) {

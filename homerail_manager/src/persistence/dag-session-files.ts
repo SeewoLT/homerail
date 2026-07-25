@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getSessionStoreRoot } from "../config/env.js";
 import { redactTelemetry } from "homerail-protocol";
@@ -134,8 +134,10 @@ export function appendSessionTranscriptEntry(
     timestamp: typeof entry.timestamp === "number" ? entry.timestamp : Date.now(),
   };
   const path = transcriptPath(sessionId, baseDir);
-  const previous = existsSync(path) ? readFileSync(path, "utf-8") : "";
-  writeFileSync(path, `${previous}${JSON.stringify(normalized)}\n`, "utf-8");
+  appendFileSync(path, `${JSON.stringify(normalized)}\n`, {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
   if (!existsSync(sessionPath(sessionId, baseDir))) {
     writeFileSync(
       sessionPath(sessionId, baseDir),

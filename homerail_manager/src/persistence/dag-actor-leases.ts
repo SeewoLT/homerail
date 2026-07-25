@@ -764,6 +764,25 @@ export function listExpiredDagActorLeases(input: {
   `).all(now, limit) as DagActorLeaseRow[]).map(leaseFromRow);
 }
 
+export function listExpiredTerminalDagActorRuntimes(input: {
+  now?: number;
+  limit?: number;
+} = {}): DagActorLeaseRecord[] {
+  const now = assertNow(input.now);
+  const limit = normalizeListLimit(input.limit);
+  return (getDb().prepare(`
+    SELECT runtime.*
+    FROM dag_actor_runtimes runtime
+    INNER JOIN dag_runs run ON run.run_id = runtime.run_id
+    WHERE runtime.state IN ('dormant', 'retired')
+      AND runtime.pinned = 0
+      AND runtime.retained_until <= ?
+      AND run.status IN ('completed', 'cancelled', 'failed')
+    ORDER BY runtime.retained_until, runtime.run_id, runtime.actor_id
+    LIMIT ?
+  `).all(now, limit) as DagActorLeaseRow[]).map(leaseFromRow);
+}
+
 function normalizeCheckpointStringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.length > MAX_DAG_ACTOR_CHECKPOINT_ITEMS) {
     throw new Error(`${label} must contain at most ${MAX_DAG_ACTOR_CHECKPOINT_ITEMS} strings`);
