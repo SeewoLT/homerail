@@ -21,6 +21,7 @@ import { _clearWorkers, registerWorker } from "../src/worker/registry.js";
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   _clearWorkers();
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -122,6 +123,72 @@ it("reports image inventory failures instead of leaving the check pending", asyn
   expect(status.images).toEqual([]);
 });
 
+it("keeps Docker ready when info is unavailable but version reports a Linux daemon", async () => {
+  const fingerprint = dagWorkerSourceFingerprint(currentRepoRoot())!;
+  const runner: DagEnvironmentCommandRunner = vi.fn(async (_command, args) => {
+    if (args[0] === "version") return dockerVersion();
+    if (args[0] === "info") throw new Error("docker info unavailable");
+    if (args[1] === "ls") {
+      return {
+        stdout: JSON.stringify({ Repository: "homerail-worker", Tag: "latest", Labels: "" }),
+        stderr: "",
+      };
+    }
+    if (args[1] === "inspect") return imageInspection(fingerprint);
+    throw new Error(`Unexpected Docker arguments: ${args.join(" ")}`);
+  });
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    repoRoot: currentRepoRoot(),
+    statusPath: statusPath(),
+  });
+
+  const status = await controller.check();
+
+  expect(status.docker).toMatchObject({
+    status: "ready",
+    os_type: "linux",
+    architecture: "amd64",
+  });
+  expect(status.worker_image.status).toBe("ready");
+});
+
+it("requires Docker's Linux engine when the daemon reports Windows containers", async () => {
+  const runner: DagEnvironmentCommandRunner = vi.fn(async (_command, args) => {
+    if (args[0] === "version") {
+      return {
+        stdout: JSON.stringify({
+          Client: { Version: "28.1.0" },
+          Server: { Version: "28.1.0", Os: "windows", Arch: "amd64" },
+        }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "info") {
+      return {
+        stdout: JSON.stringify({ OSType: "windows", Architecture: "amd64" }),
+        stderr: "",
+      };
+    }
+    throw new Error(`Unexpected Docker arguments: ${args.join(" ")}`);
+  });
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    platform: "win32",
+    repoRoot: currentRepoRoot(),
+    statusPath: statusPath(),
+  });
+
+  const status = await controller.check();
+
+  expect(status.docker).toMatchObject({
+    status: "error",
+    reason_code: "docker_linux_engine_required",
+    os_type: "windows",
+  });
+  expect(status.worker_image.reason_code).toBe("docker_linux_engine_required");
+});
+
 it("lists only HomeRail images and marks the selected image current", async () => {
   const fingerprint = dagWorkerSourceFingerprint(currentRepoRoot());
   expect(fingerprint).toBeTruthy();
@@ -134,6 +201,8 @@ it("lists only HomeRail images and marks the selected image current", async () =
         stdout: [
           JSON.stringify({ Repository: "homerail-worker", Tag: "latest", Labels: `${HOMERAIL_WORKER_SOURCE_LABEL}=${fingerprint}` }),
           JSON.stringify({ Repository: "postgres", Tag: "16", Labels: "" }),
+          JSON.stringify({ Repository: "unrelated", Tag: "latest", Labels: "org.homerail.worker.example=true" }),
+          JSON.stringify({ Repository: "versioned-unrelated", Tag: "latest", Labels: `${HOMERAIL_WORKER_VERSION_LABEL}=1.2.3` }),
         ].join("\n"),
         stderr: "",
       };
@@ -159,6 +228,16 @@ it("lists only HomeRail images and marks the selected image current", async () =
   });
   expect(status.worker_image).toMatchObject({ status: "ready", compatibility: "current" });
   expect(spawnImpl).not.toHaveBeenCalled();
+  expect(runner).not.toHaveBeenCalledWith(
+    "docker",
+    ["image", "inspect", "unrelated:latest"],
+    expect.anything(),
+  );
+  expect(runner).not.toHaveBeenCalledWith(
+    "docker",
+    ["image", "inspect", "versioned-unrelated:latest"],
+    expect.anything(),
+  );
 });
 
 it("reports image and connected Worker compatibility independently", async () => {
@@ -272,10 +351,61 @@ it("queues one asynchronous build, streams output, and probes the resulting imag
   child.emit("close", 0, null);
 
   await vi.waitFor(() => expect(controller.getStatus().worker_image.status).toBe("ready"));
+  child.emit("error", new Error("late child error"));
   const status = controller.getStatus();
   expect(status.build?.status).toBe("succeeded");
   expect(status.build?.logs.join("\n")).toContain("step one");
   expect(status.images[0]?.compatibility).toBe("current");
+});
+
+it("fails a queued build immediately when Docker is unavailable", async () => {
+  const runner: DagEnvironmentCommandRunner = vi.fn(async () => {
+    const error = Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" });
+    throw error;
+  });
+  const spawnImpl = vi.fn();
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    spawnImpl: spawnImpl as never,
+    repoRoot: currentRepoRoot(),
+    statusPath: statusPath(),
+  });
+
+  controller.startBuild();
+
+  await vi.waitFor(() => expect(controller.getStatus().build?.status).toBe("failed"));
+  expect(controller.getStatus().worker_image.reason_code).toBe("worker_image_build_failed");
+  expect(spawnImpl).not.toHaveBeenCalled();
+});
+
+it("times out a stuck Docker build and preserves the failed terminal state", async () => {
+  const runner: DagEnvironmentCommandRunner = vi.fn(async (_command, args) => {
+    if (args[0] === "version") return dockerVersion();
+    if (args[0] === "info") return dockerInfo();
+    if (args[1] === "ls") return { stdout: "", stderr: "" };
+    if (args[1] === "inspect") throw new Error("No such image");
+    throw new Error(`Unexpected Docker arguments: ${args.join(" ")}`);
+  });
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: vi.fn(() => true),
+  });
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    spawnImpl: vi.fn(() => child as never),
+    buildTimeoutMs: 10,
+    repoRoot: currentRepoRoot(),
+    statusPath: statusPath(),
+  });
+
+  controller.startBuild();
+
+  await vi.waitFor(() => expect(controller.getStatus().build?.status).toBe("failed"));
+  expect(controller.getStatus().build?.error).toContain("timed out");
+  expect(child.kill).toHaveBeenCalledTimes(1);
+  child.emit("close", 0, null);
+  expect(controller.getStatus().build?.status).toBe("failed");
 });
 
 it("persists a failed build and accepts a later retry that reaches ready", async () => {
@@ -383,4 +513,30 @@ it("publishes each persisted revision on the existing DAG event bus", async () =
   } finally {
     unsubscribe();
   }
+});
+
+it("checks immediately and then at the configured monitoring interval", async () => {
+  vi.useFakeTimers();
+  let versionChecks = 0;
+  const runner: DagEnvironmentCommandRunner = vi.fn(async (_command, args) => {
+    if (args[0] === "version") {
+      versionChecks += 1;
+      return dockerVersion();
+    }
+    if (args[0] === "info") return dockerInfo();
+    if (args[1] === "ls") return { stdout: "", stderr: "" };
+    if (args[1] === "inspect") throw new Error("No such image");
+    throw new Error(`Unexpected Docker arguments: ${args.join(" ")}`);
+  });
+  const controller = new DagEnvironmentController({
+    commandRunner: runner,
+    repoRoot: currentRepoRoot(),
+    statusPath: statusPath(),
+  });
+
+  controller.startMonitoring(1_000);
+  await vi.waitFor(() => expect(versionChecks).toBe(1));
+  await vi.advanceTimersByTimeAsync(1_000);
+  await vi.waitFor(() => expect(versionChecks).toBe(2));
+  controller.stopMonitoring();
 });

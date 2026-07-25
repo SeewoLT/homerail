@@ -112,6 +112,9 @@ versions, and build or rebuild `homerail-worker:latest` asynchronously:
 hr start
 ```
 
+`hr start --rebuild-worker-image` queues the same asynchronous build after
+Manager starts; it no longer blocks Manager startup while Docker builds.
+
 Check readiness. `hr doctor` reports Manager reachability, Node availability,
 the active model setting, and whether the Manager Agent harness can resolve a
 runtime:

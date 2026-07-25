@@ -29,6 +29,7 @@ const SOURCE_INPUTS = [
   "homerail_protocol/src",
 ] as const;
 const MAX_BUILD_LOG_LINES = 240;
+const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
 
 export type DagEnvironmentReasonCode =
   | "docker_cli_missing"
@@ -147,6 +148,7 @@ export interface DagEnvironmentControllerOptions {
   repoRoot?: string;
   statusPath?: string;
   workerImage?: string;
+  buildTimeoutMs?: number;
 }
 
 class CommandFailure extends Error {
@@ -293,6 +295,12 @@ function parseJsonLines(raw: string): Array<Record<string, unknown>> {
   return values;
 }
 
+function hasDockerLabel(labels: string, key: string): boolean {
+  return labels
+    .split(",")
+    .some((entry) => entry === key || entry.startsWith(`${key}=`));
+}
+
 function compatibleWithSource(
   protocolVersion: string | undefined,
   fingerprint: string | undefined,
@@ -353,6 +361,7 @@ export class DagEnvironmentController {
   private readonly repoRoot: string;
   private readonly statusPath: string;
   private readonly workerImage: string;
+  private readonly buildTimeoutMs: number;
   private status: DagEnvironmentStatus;
   private checkPromise: Promise<DagEnvironmentStatus> | null = null;
   private monitorTimer: ReturnType<typeof setInterval> | null = null;
@@ -369,6 +378,7 @@ export class DagEnvironmentController {
     this.workerImage = nonEmpty(options.workerImage)
       ?? nonEmpty(this.env.HOMERAIL_WORKER_IMAGE)
       ?? HOMERAIL_WORKER_IMAGE;
+    this.buildTimeoutMs = Math.max(1, options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS);
     this.status = this.readPersistedStatus();
   }
 
@@ -634,7 +644,8 @@ export class DagEnvironmentController {
         && (
           repository === "homerail-worker"
           || repository.endsWith("/homerail-worker")
-          || labels.includes("org.homerail.worker.")
+          || hasDockerLabel(labels, HOMERAIL_WORKER_SOURCE_LABEL)
+          || hasDockerLabel(labels, HOMERAIL_WORKER_PROTOCOL_LABEL)
         )
       ) {
         refs.add(`${repository}:${tag}`);
@@ -724,7 +735,7 @@ export class DagEnvironmentController {
 
     await this.check();
     if (this.status.docker.status !== "ready") {
-      this.failBuild(this.status.docker.message);
+      this.failBuild(this.status.docker.message, "worker_image_build_failed", operationId);
       return;
     }
     this.status.worker_image = {
@@ -739,7 +750,11 @@ export class DagEnvironmentController {
     const fingerprint = dagWorkerSourceFingerprint(this.repoRoot);
     const workerVersion = readPackageVersion(this.repoRoot);
     if (!fingerprint || !workerVersion) {
-      this.failBuild("HomeRail Worker source files are unavailable in this installation.", "worker_source_unavailable");
+      this.failBuild(
+        "HomeRail Worker source files are unavailable in this installation.",
+        "worker_source_unavailable",
+        operationId,
+      );
       return;
     }
     const revision = nonEmpty(this.env.HOMERAIL_BUILD_REVISION)
@@ -771,24 +786,54 @@ export class DagEnvironmentController {
         windowsHide: true,
       });
     } catch (error) {
-      this.failBuild(error instanceof Error ? error.message : String(error));
+      this.failBuild(
+        error instanceof Error ? error.message : String(error),
+        "worker_image_build_failed",
+        operationId,
+      );
       return;
     }
     this.appendBuildLog(`Building ${this.workerImage} from ${this.repoRoot}`);
     child.stdout?.on("data", (chunk) => this.appendBuildLog(String(chunk)));
     child.stderr?.on("data", (chunk) => this.appendBuildLog(String(chunk)));
-    child.once("error", (error) => this.failBuild(error.message));
+    const buildTimeout = setTimeout(() => {
+      if (!this.isBuildActive(operationId)) return;
+      const timeoutMinutes = Math.max(1, Math.round(this.buildTimeoutMs / 60_000));
+      const message = `Docker build timed out after ${timeoutMinutes} minute${timeoutMinutes === 1 ? "" : "s"}.`;
+      this.failBuild(message, "worker_image_build_failed", operationId);
+      try {
+        child.kill();
+      } catch {
+        // The process may already have exited while the timeout callback ran.
+      }
+    }, this.buildTimeoutMs);
+    buildTimeout.unref?.();
+    child.once("error", (error) => {
+      clearTimeout(buildTimeout);
+      this.failBuild(error.message, "worker_image_build_failed", operationId);
+    });
     child.once("close", (code, signal) => {
-      if (this.status.build?.operation_id !== operationId || this.status.build.status === "failed") return;
+      clearTimeout(buildTimeout);
+      const activeBuild = this.status.build;
+      if (
+        activeBuild?.operation_id !== operationId
+        || (activeBuild.status !== "queued" && activeBuild.status !== "running")
+      ) return;
       if (code !== 0) {
-        this.failBuild(code === null ? `Docker build stopped by ${signal ?? "an unknown signal"}` : `Docker build exited with code ${code}`);
+        this.failBuild(
+          code === null
+            ? `Docker build stopped by ${signal ?? "an unknown signal"}`
+            : `Docker build exited with code ${code}`,
+          "worker_image_build_failed",
+          operationId,
+        );
         return;
       }
       this.status.build = {
-        ...this.status.build,
+        ...activeBuild,
         status: "succeeded",
         finished_at: this.now(),
-        logs: [...this.status.build.logs, "Worker image build completed."],
+        logs: [...activeBuild.logs, "Worker image build completed."],
       };
       this.flushBuildCommitTimer();
       this.commit();
@@ -813,8 +858,13 @@ export class DagEnvironmentController {
   private failBuild(
     message: string,
     reasonCode: DagEnvironmentReasonCode = "worker_image_build_failed",
+    operationId?: string,
   ): void {
-    if (!this.status.build || this.status.build.status === "failed") return;
+    if (
+      !this.status.build
+      || (operationId && this.status.build.operation_id !== operationId)
+      || (this.status.build.status !== "queued" && this.status.build.status !== "running")
+    ) return;
     this.status.build = {
       ...this.status.build,
       status: "failed",
@@ -833,6 +883,11 @@ export class DagEnvironmentController {
     };
     this.flushBuildCommitTimer();
     this.commit();
+  }
+
+  private isBuildActive(operationId: string): boolean {
+    return this.status.build?.operation_id === operationId
+      && (this.status.build.status === "queued" || this.status.build.status === "running");
   }
 
   private flushBuildCommitTimer(): void {

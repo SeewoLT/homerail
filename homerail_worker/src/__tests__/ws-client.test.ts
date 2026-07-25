@@ -105,6 +105,25 @@ describe("WsClient", () => {
     });
   });
 
+  it("trims runtime identity values and omits empty fields", () => {
+    const client = new WsClient({
+      url: "ws://localhost:9999",
+      workerId: "partially-versioned-worker",
+      runtimeIdentity: {
+        worker_version: " 1.2.3 ",
+        protocol_version: " ",
+        source_fingerprint: "",
+      },
+    });
+    const sendSpy = vi.spyOn(client, "send").mockImplementation(() => {});
+
+    (client as unknown as { register: () => void }).register();
+
+    expect(JSON.parse(sendSpy.mock.calls[0][0]).data.runtime_identity).toEqual({
+      worker_version: "1.2.3",
+    });
+  });
+
   it("handles pong response", () => {
     const client = new WsClient({
       url: "ws://localhost:9999",

@@ -118,8 +118,15 @@ export class WsClient extends EventEmitter {
   }
 
   private register(): void {
-    const runtimeIdentity = Object.values(this.opts.runtimeIdentity).some(Boolean)
-      ? { runtime_identity: this.opts.runtimeIdentity }
+    const identity = Object.fromEntries(
+      Object.entries(this.opts.runtimeIdentity)
+        .filter((entry): entry is [string, string] => (
+          typeof entry[1] === "string" && Boolean(entry[1].trim())
+        ))
+        .map(([key, value]) => [key, value.trim()]),
+    );
+    const runtimeIdentity = Object.keys(identity).length > 0
+      ? { runtime_identity: identity }
       : {};
     this.send(
       JSON.stringify({
