@@ -53,6 +53,14 @@ The installation also provides:
 - a LAN-facing HTTPS UI;
 - a dedicated Manager port bound to the Docker bridge interface;
 
+The deployment verifies that systemd user lingering is enabled for the runner
+account. This lets the production service start after a reboot without an
+interactive login. If the production volume or Docker bridge is not ready when
+the user manager starts, the service waits for the atomic `current` release and
+keeps retrying at a bounded interval instead of exhausting systemd's start
+limit. A delayed data mount therefore does not leave Manager permanently
+stopped after a power interruption.
+
 This Manager is also the single durable automation control plane. PR Review and
 Auto Fix use separate Actions runner processes so they can execute concurrently,
 but both submit to this service and retain their DAG history in its database.
