@@ -804,6 +804,8 @@ edges:
       "/api/runs/run-1/manager/commands",
       "/api/dag/workflows/sync",
       "/api/dag/profiles/sync",
+      "/api/dag/environment/check",
+      "/api/dag/environment/build",
     ]) {
       expect(requiresDagMutationAuthorization(pathname, "POST"), pathname).toBe(true);
     }

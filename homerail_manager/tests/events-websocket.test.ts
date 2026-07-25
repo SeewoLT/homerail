@@ -132,6 +132,28 @@ describe("/ws/events", () => {
     ws.close();
   });
 
+  it("streams revisioned DAG environment status updates", async () => {
+    const port = await listen(server);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/events`);
+
+    await nextMessage(ws);
+    const eventPromise = nextMessage(ws);
+    emit("dag:resource_status_updated", {
+      revision: 7,
+      updated_at: Date.now(),
+      status: { revision: 7 },
+    });
+    const event = await eventPromise;
+
+    expect(event.type).toBe("dag:resource_status_updated");
+    expect(event.payload).toMatchObject({
+      revision: 7,
+      status: { revision: 7 },
+    });
+
+    ws.close();
+  });
+
   it("closes malformed browser event sockets without crashing the manager", async () => {
     const port = await listen(server);
 

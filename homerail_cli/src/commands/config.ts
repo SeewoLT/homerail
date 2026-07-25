@@ -149,7 +149,6 @@ async function runConfigWizard(_globalOpts: GlobalOpts): Promise<void> {
     manager: { ...defaultLocalConfig().manager, ...(current.manager ?? {}) },
     node: { ...defaultLocalConfig().node, ...(current.node ?? {}) },
     model: { ...defaultLocalConfig().model, ...(current.model ?? {}) },
-    runtime: { ...defaultLocalConfig().runtime, ...(current.runtime ?? {}) },
   };
 
   console.log("HomeRail local config");
@@ -186,9 +185,6 @@ async function runConfigWizard(_globalOpts: GlobalOpts): Promise<void> {
     else delete next.ui.publicUrl;
 
     next.model = { setDefault: true };
-
-    next.runtime = next.runtime ?? {};
-    next.runtime.buildWorkerImage = await promptYesNo(rl, "Build missing worker image during `hr start`", next.runtime.buildWorkerImage !== false);
 
     saveLocalConfig(next);
   } finally {
@@ -229,17 +225,6 @@ async function promptChoice(
     return defaultValue;
   }
   return choices[parsed - 1]!;
-}
-
-async function promptYesNo(
-  rl: readline.Interface,
-  label: string,
-  defaultValue: boolean,
-): Promise<boolean> {
-  const answer = await rl.question(`${label} [${defaultValue ? "Y/n" : "y/N"}]: `);
-  const normalized = answer.trim().toLowerCase();
-  if (!normalized) return defaultValue;
-  return ["y", "yes", "true", "1"].includes(normalized);
 }
 
 function isSecretKey(key: string): boolean {

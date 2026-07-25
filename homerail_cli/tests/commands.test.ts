@@ -1,23 +1,16 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough, Readable } from "node:stream";
-import type { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { Readable } from "node:stream";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createProgram } from "../src/index.js";
 import { readLineFromStdin, redactSecret } from "../src/commands/llm-settings.js";
 import {
   agentUiDevServerCommand,
-  dockerMissingMessage,
   isMissingModelCredential,
   mergeManagerAdminOrigins,
   shouldAbortStartForModelConfig,
   shouldServeStaticAgentUi,
-  runWorkerImageDockerBuild,
-  workerImageBuildReason,
-  workerImageDockerBuildSpawnOptions,
-  workerImageSourceFingerprint,
 } from "../src/commands/runtime.js";
 import { createLaunchAgentPlist, installRuntimeService, uninstallRuntimeService } from "../src/local-service-lifecycle.js";
 
@@ -1710,36 +1703,6 @@ describe("doctor command", () => {
 });
 
 describe("runtime command", () => {
-  it("detects missing, forced, and stale worker images from the source fingerprint", () => {
-    expect(workerImageBuildReason(false, undefined, "source")).toBe("missing");
-    expect(workerImageBuildReason(true, "source", "source", true)).toBe("forced");
-    expect(workerImageBuildReason(true, "", "source")).toBe("stale");
-    expect(workerImageBuildReason(true, "<no value>", "source")).toBe("stale");
-    expect(workerImageBuildReason(true, "old", "source")).toBe("stale");
-    expect(workerImageBuildReason(true, "source", "source")).toBeNull();
-  });
-
-  it("changes the worker image source fingerprint when worker sources change", () => {
-    const repoRoot = join(tempHome, "repo");
-    mkdirSync(join(repoRoot, "homerail_worker", "src"), { recursive: true });
-    mkdirSync(join(repoRoot, "homerail_protocol", "src"), { recursive: true });
-    writeFileSync(join(repoRoot, "homerail_worker", "Dockerfile"), "FROM node:22-slim\n");
-    writeFileSync(join(repoRoot, "homerail_worker", "package.json"), "{}\n");
-    writeFileSync(join(repoRoot, "homerail_worker", "tsconfig.json"), "{}\n");
-    writeFileSync(join(repoRoot, "homerail_worker", "src", "index.ts"), "export const worker = 1;\n");
-    writeFileSync(join(repoRoot, "homerail_protocol", "package.json"), "{}\n");
-    writeFileSync(join(repoRoot, "homerail_protocol", "tsconfig.json"), "{}\n");
-    writeFileSync(join(repoRoot, "homerail_protocol", "src", "index.ts"), "export const protocol = 1;\n");
-
-    const first = workerImageSourceFingerprint(repoRoot);
-    writeFileSync(join(repoRoot, "homerail_worker", "src", "index.ts"), "export const worker = 2;\n");
-    const second = workerImageSourceFingerprint(repoRoot);
-
-    expect(first).toMatch(/^[a-f0-9]{16}$/);
-    expect(second).toMatch(/^[a-f0-9]{16}$/);
-    expect(second).not.toBe(first);
-  });
-
   it("does not expose fixed host Worker startup through homerail start", () => {
     const program = createProgram();
     const startCommand = program.commands.find((command) => command.name() === "start");
@@ -2031,35 +1994,6 @@ describe("runtime command", () => {
     expect(existsSync(installed.status.config_path)).toBe(false);
   });
 
-  it("explains missing Docker before worker image build", () => {
-    expect(dockerMissingMessage("docker")).toContain("Docker CLI was not found");
-    expect(dockerMissingMessage("docker")).toContain("HOMERAIL_DOCKER_BIN");
-    expect(dockerMissingMessage()).toContain("hr start --no-build-worker-image");
-  });
-
-  it("builds the worker image without inheriting a Windows console", () => {
-    const options = workerImageDockerBuildSpawnOptions();
-    expect(options.stdio).toEqual(["ignore", "pipe", "pipe"]);
-    expect(options.shell).toBe(false);
-    expect(options.windowsHide).toBe(true);
-    expect(options).not.toHaveProperty("maxBuffer");
-    expect(options.env?.HOMERAIL_HOME).toBe(tempHome);
-  });
-
-  it("lets process environment override local secrets for child services", () => {
-    const secretDir = join(tempHome, "secrets");
-    mkdirSync(secretDir, { recursive: true });
-    writeFileSync(join(secretDir, "env"), "HOMERAIL_TEST_PRECEDENCE=from-secret\n", { mode: 0o600 });
-    const previous = process.env.HOMERAIL_TEST_PRECEDENCE;
-    process.env.HOMERAIL_TEST_PRECEDENCE = "from-environment";
-    try {
-      expect(workerImageDockerBuildSpawnOptions().env?.HOMERAIL_TEST_PRECEDENCE)
-        .toBe("from-environment");
-    } finally {
-      restoreEnv("HOMERAIL_TEST_PRECEDENCE", previous);
-    }
-  });
-
   it("derives exact UI proxy Origins while preserving explicit trusted Origins", () => {
     expect(mergeManagerAdminOrigins(
       "https://admin.example.test",
@@ -2067,55 +2001,6 @@ describe("runtime command", () => {
     )).toBe("http://localhost:19193,https://admin.example.test,https://ui.example.test");
     expect(() => mergeManagerAdminOrigins("https://bad.example.test/path", []))
       .toThrow(/without paths/);
-  });
-
-  it("streams worker image build output without buffering it", async () => {
-    class FakeChildProcess extends EventEmitter {
-      stdin = new PassThrough();
-      stdout = new PassThrough();
-      stderr = new PassThrough();
-    }
-    const child = new FakeChildProcess();
-    let stdout = "";
-    let stderr = "";
-    const build = runWorkerImageDockerBuild(
-      "docker",
-      ["build", "."],
-      (() => child as unknown as ChildProcessWithoutNullStreams) as typeof spawn,
-      (chunk) => { stdout += chunk.toString(); },
-      (chunk) => { stderr += chunk.toString(); },
-    );
-
-    child.stdout.write("build output\n");
-    child.stderr.write("build warning\n");
-    child.emit("close", 0, null);
-
-    await build;
-    expect(stdout).toBe("build output\n");
-    expect(stderr).toBe("build warning\n");
-  });
-
-  it("reports worker image build exit failures after streaming output", async () => {
-    class FakeChildProcess extends EventEmitter {
-      stdin = new PassThrough();
-      stdout = new PassThrough();
-      stderr = new PassThrough();
-    }
-    const child = new FakeChildProcess();
-    let stderr = "";
-    const build = runWorkerImageDockerBuild(
-      "docker",
-      ["build", "."],
-      (() => child as unknown as ChildProcessWithoutNullStreams) as typeof spawn,
-      () => {},
-      (chunk) => { stderr += chunk.toString(); },
-    );
-
-    child.stderr.write("docker failed\n");
-    child.emit("close", 17, null);
-
-    await expect(build).rejects.toThrow("failed to build homerail-worker:latest (exit code 17)");
-    expect(stderr).toBe("docker failed\n");
   });
 
   it("launches the Agent UI dev server directly through Node", () => {

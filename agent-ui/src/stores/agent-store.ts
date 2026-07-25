@@ -42,6 +42,7 @@ export const useAgentStore = defineStore('agent', () => {
   const sidebarCollapsed = ref(false)
   const rightPanelCollapsed = ref(false)
   const settingsPageOpen = ref(false)
+  const settingsRequestedTab = ref<string | null>(null)
   const voiceCockpitOpen = ref(false)
   const runtimeOverlayOpen = ref(false)
   const onboardingOpen = ref(false)
@@ -569,6 +570,7 @@ export const useAgentStore = defineStore('agent', () => {
     sidebarCollapsed,
     rightPanelCollapsed,
     settingsPageOpen,
+    settingsRequestedTab,
     voiceCockpitOpen,
     runtimeOverlayOpen,
     onboardingOpen,

@@ -4,9 +4,8 @@ import * as http from "node:http";
 import * as https from "node:https";
 import * as net from "node:net";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { HomeRailClient } from "../client.js";
 import type { BaseResponse } from "../client.js";
 import {
@@ -29,7 +28,6 @@ import {
   managerWsUrl,
 } from "../local-config.js";
 import { applyStoredModelConfig } from "./config.js";
-import { dockerNotFoundDetail, resolveDockerBinary } from "../docker-bin.js";
 import {
   buildLocalRuntimeServiceStatuses,
   getRuntimeServiceControlStatus,
@@ -46,10 +44,8 @@ interface GlobalOpts {
 }
 
 interface StartOpts {
-  /** Set to false by commander when `--no-build-worker-image` is passed. */
+  /** Legacy compatibility guard for an explicit asynchronous rebuild. */
   buildWorkerImage?: boolean;
-  /** @deprecated legacy field name; prefer buildWorkerImage. */
-  noBuildWorkerImage?: boolean;
   rebuildWorkerImage?: boolean;
   ui?: boolean;
   host?: string;
@@ -160,23 +156,7 @@ interface ManagerServiceState {
 
 type RuntimeServiceName = "manager" | "node" | "worker" | "ui" | "ui-https";
 
-export const WORKER_IMAGE_SOURCE_LABEL = "org.homerail.worker.source_fingerprint";
-const WORKER_IMAGE_TAG = "homerail-worker:latest";
 const MANAGER_ADMIN_ORIGINS_ENV = "HOMERAIL_MANAGER_ADMIN_ORIGINS";
-type WorkerImageRuntimeStatus = "checking" | "building" | "ready" | "error" | "skipped";
-const WORKER_IMAGE_SOURCE_INPUTS = [
-  "homerail_worker/Dockerfile",
-  "homerail_worker/package.json",
-  "homerail_worker/package-lock.json",
-  "homerail_worker/tsconfig.json",
-  "homerail_worker/src",
-  "homerail_protocol/package.json",
-  "homerail_protocol/package-lock.json",
-  "homerail_protocol/tsconfig.json",
-  "homerail_protocol/src",
-];
-
-export type WorkerImageBuildReason = "forced" | "missing" | "stale";
 
 /** Merge operator-provided exact Origins with the two UI proxy origins. */
 export function mergeManagerAdminOrigins(
@@ -224,19 +204,12 @@ export function isMissingModelCredential(detail: string): boolean {
   return /\bAPI key is required\b/i.test(detail);
 }
 
-export function dockerMissingMessage(binary = resolveDockerBinary()): string {
-  return [
-    `Docker is required to build homerail-worker:latest, but the Docker CLI was not found (${dockerNotFoundDetail(binary)}).`,
-    "Install Docker Desktop on the host that runs HomeRail, or prebuild homerail-worker:latest and rerun `hr start --no-build-worker-image`.",
-  ].join(" ");
-}
-
 export function registerRuntimeCommands(program: Command): void {
   program
     .command("start")
     .description("Start the local Manager and Node runtime together")
-    .option("--no-build-worker-image", "Skip building homerail-worker:latest when missing")
-    .option("--rebuild-worker-image", "Force rebuilding homerail-worker:latest before DAG provisioning")
+    .option("--no-build-worker-image", "Do not queue a Worker rebuild (legacy compatibility)")
+    .option("--rebuild-worker-image", "Queue an asynchronous Worker image rebuild after Manager starts")
     .option("--host <host>", "Manager bind host")
     .option("--public", "Bind Manager publicly and bind Agent UI to the machine access IP")
     .option("--public-url <url>", "Public Manager access URL advertised to Agent UI")
@@ -284,8 +257,8 @@ export function registerRuntimeCommands(program: Command): void {
     .command("restart")
     .description("Restart local Manager and Node runtime services")
     .option("--manager-only", "Restart only Manager; preserve Node, Worker, and Agent UI processes")
-    .option("--no-build-worker-image", "Skip building homerail-worker:latest when missing")
-    .option("--rebuild-worker-image", "Force rebuilding homerail-worker:latest before DAG provisioning")
+    .option("--no-build-worker-image", "Do not queue a Worker rebuild (legacy compatibility)")
+    .option("--rebuild-worker-image", "Queue an asynchronous Worker image rebuild after Manager starts")
     .option("--host <host>", "Manager bind host")
     .option("--public", "Bind Manager publicly and bind Agent UI to the machine access IP")
     .option("--public-url <url>", "Public Manager access URL advertised to Agent UI")
@@ -572,22 +545,16 @@ async function startRuntime(
     printMessage(`Agent UI: ${uiStatus.uiPidRunning ? "PASS" : "FAIL"} ${uiStatus.uiUrl}`);
   }
 
-  // commander maps --no-build-worker-image to opts.buildWorkerImage === false.
-  const shouldBuildImage = opts.buildWorkerImage === false ? false : cfg.runtime?.buildWorkerImage !== false;
-  if (shouldBuildImage) {
-    try {
-      await ensureWorkerImage(Boolean(opts.rebuildWorkerImage));
-    } catch (err) {
-      writeWorkerImageRuntimeStatus("error", {
-        error: err instanceof Error ? err.message : String(err),
-        message: "DAG worker image could not be prepared.",
-      });
-      throw err;
+  // Worker images are owned by the running Manager and the Settings UI.
+  // Manager startup must never wait for a Docker build. Keep the explicit
+  // compatibility flag, but route it through the same asynchronous API used
+  // by the UI.
+  if (opts.rebuildWorkerImage && opts.buildWorkerImage !== false) {
+    const accepted = await client.post<BaseResponse>("/api/dag/environment/build", {});
+    if (!accepted.success) {
+      throw new Error(accepted.error || accepted.message || "Worker image build was not accepted");
     }
-  } else {
-    writeWorkerImageRuntimeStatus("skipped", {
-      message: "DAG worker image build was skipped for this startup.",
-    });
+    printMessage("Worker image rebuild queued; follow progress in Settings → Runtime environment.");
   }
 
   const runtimeClient = new HomeRailClient({ baseUrl: client.baseUrl, timeoutMs: globalOpts.requestTimeout });
@@ -1218,43 +1185,6 @@ function managerStatePath(): string {
   return path.join(dir, "manager.json");
 }
 
-function dagResourceStatusPath(): string {
-  const dir = path.join(getHomerailHome(), "runtime");
-  fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, "dag-resources.json");
-}
-
-function writeWorkerImageRuntimeStatus(
-  status: WorkerImageRuntimeStatus,
-  patch: { reason?: WorkerImageBuildReason; message: string; error?: string },
-): void {
-  const now = Date.now();
-  const filePath = dagResourceStatusPath();
-  let startedAt = now;
-  try {
-    const previous = JSON.parse(fs.readFileSync(filePath, "utf-8")) as { worker_image?: { started_at?: unknown } };
-    if (typeof previous.worker_image?.started_at === "number" && (status === "checking" || status === "building")) {
-      startedAt = previous.worker_image.started_at;
-    }
-  } catch {
-    // Missing or malformed resource status is replaced below.
-  }
-  const body = {
-    worker_image: {
-      status,
-      image: WORKER_IMAGE_TAG,
-      reason: patch.reason,
-      message: patch.message,
-      started_at: status === "checking" || status === "building" ? startedAt : undefined,
-      updated_at: now,
-      error: patch.error,
-    },
-  };
-  const tmpPath = `${filePath}.tmp`;
-  fs.writeFileSync(tmpPath, `${JSON.stringify(body, null, 2)}\n`);
-  fs.renameSync(tmpPath, filePath);
-}
-
 function writeManagerState(state: ManagerServiceState): void {
   const filePath = managerStatePath();
   const tmpPath = `${filePath}.tmp`;
@@ -1331,151 +1261,6 @@ function readUiState(name: "ui" | "ui-https" = "ui"): UiServiceState | undefined
     // Missing or malformed state is treated as absent.
   }
   return undefined;
-}
-
-function addPathToHash(hash: ReturnType<typeof createHash>, repoRoot: string, relativePath: string): void {
-  const absolutePath = path.join(repoRoot, relativePath);
-  if (!fs.existsSync(absolutePath)) return;
-  const stat = fs.statSync(absolutePath);
-  if (stat.isDirectory()) {
-    for (const name of fs.readdirSync(absolutePath).sort()) {
-      addPathToHash(hash, repoRoot, path.join(relativePath, name));
-    }
-    return;
-  }
-  if (!stat.isFile()) return;
-  hash.update(relativePath.split(path.sep).join("/"));
-  hash.update("\0");
-  hash.update(fs.readFileSync(absolutePath));
-  hash.update("\0");
-}
-
-export function workerImageSourceFingerprint(repoRoot = resolveRepoRoot()): string {
-  const hash = createHash("sha256");
-  for (const relativePath of WORKER_IMAGE_SOURCE_INPUTS) {
-    addPathToHash(hash, repoRoot, relativePath);
-  }
-  return hash.digest("hex").slice(0, 16);
-}
-
-export function workerImageBuildReason(
-  imageExists: boolean,
-  imageFingerprint: string | undefined,
-  sourceFingerprint: string,
-  forceRebuild = false,
-): WorkerImageBuildReason | null {
-  if (forceRebuild) return "forced";
-  if (!imageExists) return "missing";
-  const cleanImageFingerprint = (imageFingerprint ?? "").trim();
-  if (!cleanImageFingerprint || cleanImageFingerprint === "<no value>") return "stale";
-  if (cleanImageFingerprint !== sourceFingerprint) return "stale";
-  return null;
-}
-
-export function workerImageDockerBuildSpawnOptions(): SpawnOptions {
-  return {
-    cwd: resolveRepoRoot(),
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...loadLocalSecrets(), ...process.env, HOMERAIL_HOME: getHomerailHome() },
-    shell: false,
-    windowsHide: true,
-  };
-}
-
-export function runWorkerImageDockerBuild(
-  dockerBin: string,
-  args: string[],
-  spawnImpl: typeof spawn = spawn,
-  writeStdout: (chunk: Buffer | string) => void = (chunk) => { process.stdout.write(chunk); },
-  writeStderr: (chunk: Buffer | string) => void = (chunk) => { process.stderr.write(chunk); },
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawnImpl(dockerBin, args, workerImageDockerBuildSpawnOptions());
-    } catch (error) {
-      reject(error);
-      return;
-    }
-
-    let settled = false;
-    const finish = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      if (error) reject(error);
-      else resolve();
-    };
-    child.stdout?.on("data", writeStdout);
-    child.stderr?.on("data", writeStderr);
-    child.once("error", (error) => finish(error));
-    child.once("close", (code, signal) => {
-      if (code === 0) {
-        finish();
-        return;
-      }
-      const detail = code === null
-        ? signal ? `signal ${signal}` : "unknown exit status"
-        : `exit code ${code}`;
-      finish(new Error(`failed to build ${WORKER_IMAGE_TAG} (${detail})`));
-    });
-  });
-}
-
-async function ensureWorkerImage(forceRebuild = false): Promise<void> {
-  const dockerBin = resolveDockerBinary();
-  writeWorkerImageRuntimeStatus("checking", {
-    message: "Checking DAG worker image before DAG runs are enabled.",
-  });
-  const dockerVersion = spawnSync(dockerBin, ["--version"], {
-    encoding: "utf-8",
-    windowsHide: true,
-  });
-  if (dockerVersion.error && (dockerVersion.error as NodeJS.ErrnoException).code === "ENOENT") {
-    throw new Error(dockerMissingMessage(dockerBin));
-  }
-  if (dockerVersion.status !== 0) {
-    const detail = (dockerVersion.stderr || dockerVersion.stdout || "docker --version failed").trim();
-    throw new Error(`Docker is required to build homerail-worker:latest: ${detail}`);
-  }
-
-  const sourceFingerprint = workerImageSourceFingerprint();
-  const inspect = spawnSync(dockerBin, [
-    "image",
-    "inspect",
-    "--format",
-    `{{ index .Config.Labels "${WORKER_IMAGE_SOURCE_LABEL}" }}`,
-    WORKER_IMAGE_TAG,
-  ], {
-    encoding: "utf-8",
-    windowsHide: true,
-  });
-  const reason = workerImageBuildReason(inspect.status === 0, inspect.stdout, sourceFingerprint, forceRebuild);
-  if (!reason) {
-    writeWorkerImageRuntimeStatus("ready", {
-      message: `${WORKER_IMAGE_TAG} is ready for DAG runs.`,
-    });
-    return;
-  }
-  const label = reason === "forced" ? "Rebuilding" : reason === "missing" ? "Building missing" : "Rebuilding stale";
-  console.log(`${label} worker image: ${WORKER_IMAGE_TAG}`);
-  writeWorkerImageRuntimeStatus("building", {
-    reason,
-    message: `${label} DAG worker image. DAG runs are temporarily unavailable until this finishes.`,
-  });
-  await runWorkerImageDockerBuild(dockerBin, [
-    "build",
-    "-f",
-    "homerail_worker/Dockerfile",
-    "--label",
-    `${WORKER_IMAGE_SOURCE_LABEL}=${sourceFingerprint}`,
-    "-t",
-    WORKER_IMAGE_TAG,
-    ".",
-  ]);
-  writeWorkerImageRuntimeStatus("ready", {
-    reason,
-    message: `${WORKER_IMAGE_TAG} is ready for DAG runs.`,
-  });
 }
 
 function ensureBuiltArtifact(relativePath: string): void {

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as net from "node:net";
@@ -21,6 +21,79 @@ afterEach(async () => {
 });
 
 describe("static Agent UI mutation proxy", () => {
+  it("proxies the Manager event WebSocket used by runtime environment updates", async () => {
+    let upgradedPath = "";
+    const manager = http.createServer();
+    manager.on("upgrade", (req, socket) => {
+      upgradedPath = req.url || "";
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: websocket\r\n" +
+        "\r\n",
+      );
+      socket.end();
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    await startStaticUi({
+      port: uiPort,
+      host: "127.0.0.1",
+      origin: uiOrigin,
+      managerUrl,
+    });
+
+    const response = await websocketUpgrade(uiPort, "/ws/events");
+    expect(response).toContain("HTTP/1.1 101 Switching Protocols");
+    expect(upgradedPath).toBe("/ws/events");
+  }, 15_000);
+
+  it("builds and proxies Manager events through the packaged UI artifacts", async () => {
+    buildPackagedUiArtifacts();
+    const packagedUiRoot = path.resolve("..", "agent-ui", "dist");
+    const packagedServer = path.resolve("dist", "static-ui-server.js");
+    expect(fs.existsSync(packagedServer)).toBe(true);
+    expect(fs.existsSync(path.join(packagedUiRoot, "index.html"))).toBe(true);
+
+    let upgradedPath = "";
+    const manager = http.createServer();
+    manager.on("upgrade", (req, socket) => {
+      upgradedPath = req.url || "";
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: websocket\r\n" +
+        "\r\n",
+      );
+      socket.end();
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    await startStaticUi({
+      port: uiPort,
+      host: "127.0.0.1",
+      origin: uiOrigin,
+      managerUrl,
+      root: packagedUiRoot,
+      entry: "dist",
+    });
+
+    const page = await fetch(uiOrigin);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('data-hr-appearance="cockpit"');
+    const manifest = await fetch(`${uiOrigin}/homerail-build.json`);
+    expect(manifest.status).toBe(200);
+    expect(await manifest.json()).toMatchObject({ app: "homerail-agent-ui" });
+
+    const response = await websocketUpgrade(uiPort, "/ws/events", uiOrigin);
+    expect(response).toContain("HTTP/1.1 101 Switching Protocols");
+    expect(upgradedPath).toBe("/ws/events");
+  }, 180_000);
+
   it("proxies the same-origin ASR realtime WebSocket to the Manager", async () => {
     let upgradedPath = "";
     const manager = http.createServer();
@@ -184,15 +257,20 @@ async function startStaticUi(options: {
   managerUrl: string;
   root?: string;
   mutationToken?: string;
+  entry?: "source" | "dist";
 }): Promise<void> {
   const root = options.root ?? fs.mkdtempSync(path.join(os.tmpdir(), "homerail-static-ui-trust-"));
   if (!options.root) {
     tempDirs.push(root);
     fs.writeFileSync(path.join(root, "index.html"), "<!doctype html><title>test</title>");
   }
-  const tsxCli = path.resolve("node_modules/tsx/dist/cli.mjs");
-  const script = path.resolve("src/static-ui-server.ts");
-  const child = spawn(process.execPath, [tsxCli, script], {
+  const args = options.entry === "dist"
+    ? [path.resolve("dist/static-ui-server.js")]
+    : [
+        path.resolve("node_modules/tsx/dist/cli.mjs"),
+        path.resolve("src/static-ui-server.ts"),
+      ];
+  const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -219,6 +297,19 @@ async function startStaticUi(options: {
   });
 }
 
+function buildPackagedUiArtifacts(): void {
+  const npmCli = process.env.npm_execpath;
+  if (!npmCli) throw new Error("npm_execpath is required to build packaged UI test artifacts");
+  for (const cwd of [process.cwd(), path.resolve("..", "agent-ui")]) {
+    execFileSync(process.execPath, [npmCli, "run", "build"], {
+      cwd,
+      env: process.env,
+      stdio: "pipe",
+      timeout: 120_000,
+    });
+  }
+}
+
 async function listen(server: http.Server, host: string): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, host, resolve));
   const address = server.address();
@@ -236,7 +327,7 @@ async function reservePort(host = "127.0.0.1"): Promise<number> {
   return port;
 }
 
-async function websocketUpgrade(port: number, requestPath: string): Promise<string> {
+async function websocketUpgrade(port: number, requestPath: string, origin?: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const socket = net.createConnection({ host: "127.0.0.1", port });
     let response = "";
@@ -253,6 +344,7 @@ async function websocketUpgrade(port: number, requestPath: string): Promise<stri
         "Upgrade: websocket\r\n" +
         "Sec-WebSocket-Version: 13\r\n" +
         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+        (origin ? `Origin: ${origin}\r\n` : "") +
         "\r\n",
       );
     });

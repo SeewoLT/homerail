@@ -74,6 +74,8 @@
     "preparing": "Preparing DAG resources",
     "preparingDescription": "Preparing runtime resources for the DAG. It will be ready shortly.",
     "skipped": "Worker image build was skipped, so Docker DAG runs may be temporarily unavailable.",
-    "status": "DAG resource status"
+    "status": "DAG resource status",
+    "manage": "Manage DAG runtime",
+    "manageDescription": "Open Settings to check Docker or build the Worker image."
   }
 }

@@ -28,3 +28,4 @@ export * from "./plugins/index.js";
 export * from "./telemetry-redaction.js";
 export * from "./pr-closeout.js";
 export * from "./pr-review.js";
+export * from "./runtime-environment.js";

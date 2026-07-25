@@ -10,12 +10,14 @@ import {
   recoverDagActorSurfacePatches,
   recoverDagLiveSurfaceProjections,
 } from "./generative-ui/dag-live-surface-projector.js";
+import { getDagEnvironmentController } from "./server/dag-environment.js";
 
 initEventLogging();
 
 const port = getPort();
 const host = getHost();
 const server = createServer(port);
+const dagEnvironment = getDagEnvironmentController();
 
 // Cold recovery: replay persisted active runs into the in-memory store before
 // the server accepts traffic. The first-worker hook (wired in createServer)
@@ -37,6 +39,9 @@ const pluginStagingRecovered = cleanupPluginPackageStaging();
 markRecoveryComplete();
 
 server.listen(port, host, () => {
+  // Probing starts only after the Manager is already accepting traffic. Docker
+  // is a managed runtime dependency, never a Manager startup dependency.
+  dagEnvironment.startMonitoring();
   console.error(`homerail_manager listening on ${host}:${port}`);
   console.error(
     `cold recovery: recovered=${recovery.recovered.length} failed=${recovery.failed.length} skipped=${recovery.skipped.length}`,
@@ -65,6 +70,7 @@ let shuttingDown = false;
 function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  dagEnvironment.shutdown();
   const forcedExit = setTimeout(() => process.exit(1), 5_000);
   forcedExit.unref();
   void shutdownHostShellManagerAgents().finally(() => {

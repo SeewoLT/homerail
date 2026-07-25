@@ -86,6 +86,18 @@ async function close(server: http.Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
+function writeReadyDagResources(home: string): void {
+  const runtimeDir = path.join(home, "runtime");
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.writeFileSync(path.join(runtimeDir, "dag-resources.json"), JSON.stringify({
+    worker_image: {
+      status: "ready",
+      image: "homerail-worker:latest",
+      message: "Worker image is ready for the unrelated API test.",
+    },
+  }));
+}
+
 describe("DAG patterns API", () => {
   let server: http.Server;
   let baseUrl: string;
@@ -100,6 +112,7 @@ describe("DAG patterns API", () => {
     oldApprovalToken = process.env.HOMERAIL_DAG_APPROVAL_TOKEN;
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-dag-pattern-api-"));
     process.env.HOMERAIL_HOME = tmpHome;
+    writeReadyDagResources(tmpHome);
     closeDb();
     server = createServer(0, undefined, undefined, false);
     baseUrl = `http://127.0.0.1:${await listen(server)}`;

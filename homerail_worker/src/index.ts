@@ -4,6 +4,7 @@
  * @version 0.1.0
  */
 
+import * as fs from "node:fs";
 import { WsClient } from "./ws-client.js";
 import { runPrompt } from "./prompt-runner.js";
 import type { PromptJob, PromptRunResult } from "./prompt-runner.js";
@@ -12,6 +13,7 @@ import {
   type MaterializedCredentialProjection,
 } from "./credential-projection.js";
 import {
+  PROTOCOL_VERSION,
   DAG_ACTOR_LIVE_COMMAND_CAPABILITY,
   DAG_TRANSPORT_FENCE_CAPABILITY,
   DAG_TRANSPORT_FENCE_V1_CAPABILITY,
@@ -68,6 +70,25 @@ const CAPABILITIES = Array.from(new Set([
   DAG_TRANSPORT_FENCE_CAPABILITY,
   DAG_ACTOR_SURFACE_PATCH_V1_CAPABILITY,
 ]));
+
+function localWorkerVersion(): string | undefined {
+  try {
+    const packageUrl = new URL("../package.json", import.meta.url);
+    const parsed = JSON.parse(fs.readFileSync(packageUrl, "utf8")) as { version?: unknown };
+    return typeof parsed.version === "string" && parsed.version.trim() ? parsed.version.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Runtime identity is immutable for one Worker process. Updating the Worker
+// requires rebuilding the image and restarting the process.
+const WORKER_RUNTIME_IDENTITY = {
+  worker_version: process.env.HOMERAIL_WORKER_VERSION?.trim() || localWorkerVersion(),
+  protocol_version: process.env.HOMERAIL_WORKER_PROTOCOL_VERSION?.trim() || PROTOCOL_VERSION,
+  source_fingerprint: process.env.HOMERAIL_WORKER_SOURCE_FINGERPRINT?.trim() || undefined,
+  image_revision: process.env.HOMERAIL_WORKER_IMAGE_REVISION?.trim() || undefined,
+};
 const configuredLiveSteerQueueSize = Number(process.env.HOMERAIL_LIVE_STEER_QUEUE_MAX ?? 32);
 const LIVE_STEER_QUEUE_SIZE = Number.isSafeInteger(configuredLiveSteerQueueSize)
   && configuredLiveSteerQueueSize > 0
@@ -83,6 +104,7 @@ const client = new WsClient({
   url: MANAGER_WS_URL,
   workerId: WORKER_ID,
   capabilities: CAPABILITIES,
+  runtimeIdentity: WORKER_RUNTIME_IDENTITY,
   token: TOKEN,
   allowInsecureRemote: ALLOW_INSECURE_REMOTE_WS,
 });

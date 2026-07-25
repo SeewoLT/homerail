@@ -6,12 +6,14 @@
 
 import WebSocket from "ws";
 import { EventEmitter } from "node:events";
+import type { WorkerRuntimeIdentity } from "homerail-protocol";
 import { assertSecureControlPlaneUrl } from "./control-plane-security.js";
 
 export interface WsClientOptions {
   url: string;
   workerId: string;
   capabilities?: string[];
+  runtimeIdentity?: WorkerRuntimeIdentity;
   token?: string;
   allowInsecureRemote?: boolean;
   heartbeatIntervalMs?: number;
@@ -41,6 +43,7 @@ export class WsClient extends EventEmitter {
       url: opts.url,
       workerId: opts.workerId,
       capabilities: opts.capabilities ?? [],
+      runtimeIdentity: opts.runtimeIdentity ?? {},
       token: opts.token?.trim() ?? "",
       allowInsecureRemote: opts.allowInsecureRemote ?? false,
       heartbeatIntervalMs: opts.heartbeatIntervalMs ?? 30_000,
@@ -115,6 +118,19 @@ export class WsClient extends EventEmitter {
   }
 
   private register(): void {
+    const identity = Object.fromEntries(
+      Object.entries(this.opts.runtimeIdentity)
+        .filter((entry): entry is [string, string] => (
+          typeof entry[1] === "string"
+          && Boolean(entry[1].trim())
+          && entry[1].trim() !== "unknown"
+          && entry[1].trim() !== "<no value>"
+        ))
+        .map(([key, value]) => [key, value.trim()]),
+    );
+    const runtimeIdentity = Object.keys(identity).length > 0
+      ? { runtime_identity: identity }
+      : {};
     this.send(
       JSON.stringify({
         type: "control",
@@ -122,6 +138,7 @@ export class WsClient extends EventEmitter {
         data: {
           worker_id: this.opts.workerId,
           capabilities: this.opts.capabilities,
+          ...runtimeIdentity,
         },
       }),
     );

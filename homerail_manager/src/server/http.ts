@@ -31,6 +31,8 @@ import {
 } from "./manager-agent-config.js";
 import { managerAgentReadinessRoutesHandler } from "./manager-agent-readiness.js";
 import { setupEventWebSocket } from "./events-websocket.js";
+import { dagEnvironmentRoutesHandler } from "./dag-environment-routes.js";
+import { getDagEnvironmentController } from "./dag-environment.js";
 import { generativeUiRoutesHandler } from "./generative-ui.js";
 import { pluginRoutesHandler } from "./plugins.js";
 import { pluginArtifactRoutesHandler } from "./plugin-artifacts.js";
@@ -421,6 +423,10 @@ export function createServer(
       return;
     }
 
+    if (dagEnvironmentRoutesHandler(req, res)) {
+      return;
+    }
+
     if (pluginRoutesHandler(req, res)) {
       return;
     }
@@ -523,6 +529,9 @@ export function createServer(
       consumeRecoveredDagActorLiveCommandFallbacks();
       dispatchRecoveredRuns(actualDispatcher);
       recoverDagActorLiveCommands();
+    },
+    onWorkerRegistryChanged: () => {
+      getDagEnvironmentController().refreshConnectedWorkers();
     },
   };
   const nodeWebsocketOptions: NodeWebSocketOptions = {

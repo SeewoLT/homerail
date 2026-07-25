@@ -16,6 +16,9 @@ export function runtimeStatusHandler() {
     worker_capabilities: Object.fromEntries(
       workers.map((w) => [w.worker_id, w.capabilities]),
     ),
+    worker_runtime_identities: Object.fromEntries(
+      workers.map((w) => [w.worker_id, w.runtime_identity ?? {}]),
+    ),
     node_ids: nodes.map((n) => n.node_id),
     node_capabilities: Object.fromEntries(
       nodes.map((n) => [n.node_id, n.capabilities]),
