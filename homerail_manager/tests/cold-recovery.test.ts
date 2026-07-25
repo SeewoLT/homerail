@@ -10,7 +10,7 @@ import type {
 } from "../src/orchestration/dag-dispatcher.js";
 import { parseDAGYaml } from "../src/orchestration/yaml-loader.js";
 import { _clearListeners, subscribe } from "../src/events/bus.js";
-import { closeDb } from "../src/persistence/db.js";
+import { closeDb, getDb } from "../src/persistence/db.js";
 import { getDagSessionIndex, listDagSessionIndex, upsertDagSessionIndex } from "../src/persistence/dag-session-index.js";
 import {
   _clearAllPersistence,
@@ -251,6 +251,10 @@ describe("manager cold recovery", () => {
     run.completedAt = Date.now();
     // Re-serialize to persist the terminal status.
     writeRunMetadata("run-completed", serializeRunMetadata(run));
+    // A terminal row must be filtered by the indexed status column before the
+    // recovery path attempts to parse its potentially very large metadata.
+    getDb().prepare("UPDATE dag_runs SET metadata = ? WHERE run_id = ?")
+      .run("{ intentionally invalid terminal metadata", "run-completed");
 
     _clearActiveRuns();
     const summary = recoverAllActiveRuns();
