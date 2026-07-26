@@ -367,8 +367,33 @@ describe("resolveCodexBinary", () => {
       .toBe("/Users/Alice Smith/bin/codex");
   });
 
+  it("rejects shell-backed Windows shim paths with command metacharacters", () => {
+    const command = "C:\\Users\\Alice & Bob\\AppData\\Roaming\\npm\\codex.cmd";
+
+    expect(() => codexCommandForSpawn(command, "win32"))
+      .toThrowError("Codex Windows shim path contains unsupported shell metacharacters");
+    expect(resolveCodexBinary(command, {
+      platform: "win32",
+      env: {},
+      homeDir: "C:\\Users\\Alice & Bob",
+      fileExists: fakeExistingFiles([command], "win32"),
+      readDirNames: () => [],
+    })).toBeNull();
+    expect(codexBinaryNotFoundMessage(command, {
+      platform: "win32",
+      env: {},
+      homeDir: "C:\\Users\\Alice & Bob",
+    })).toBe(
+      "Codex Windows shim path contains unsupported shell metacharacters. Choose a different install path or set HOMERAIL_CODEX_BIN.",
+    );
+  });
+
   it("terminates the full process tree for a shell-backed Windows shim", () => {
-    const taskkillCalls: Array<{ command: string; args: string[] }> = [];
+    const taskkillCalls: Array<{
+      command: string;
+      args: string[];
+      options: Record<string, unknown> | undefined;
+    }> = [];
     let directKillCalled = false;
     const child = {
       pid: 321,
@@ -381,8 +406,12 @@ describe("resolveCodexBinary", () => {
 
     terminateCodexProcess(child, true, {
       platform: "win32",
-      spawnSyncImpl: ((command, args) => {
-        taskkillCalls.push({ command, args: args ?? [] });
+      spawnSyncImpl: ((command, args, options) => {
+        taskkillCalls.push({
+          command,
+          args: args ?? [],
+          options: options as Record<string, unknown> | undefined,
+        });
         return {
           pid: 1,
           output: [null, null, null],
@@ -397,8 +426,39 @@ describe("resolveCodexBinary", () => {
     expect(taskkillCalls).toEqual([{
       command: "taskkill.exe",
       args: ["/pid", "321", "/T", "/F"],
+      options: {
+        stdio: "ignore",
+        timeout: 5_000,
+        windowsHide: true,
+      },
     }]);
     expect(directKillCalled).toBe(false);
+  });
+
+  it("falls back to a direct signal when Windows tree termination fails", () => {
+    const directKillCalls: string[] = [];
+    const child = {
+      pid: 654,
+      killed: false,
+      kill: (signal: string) => {
+        directKillCalls.push(signal);
+        return true;
+      },
+    } as unknown as ChildProcess;
+
+    terminateCodexProcess(child, true, {
+      platform: "win32",
+      spawnSyncImpl: (() => ({
+        pid: 1,
+        output: [null, null, null],
+        stdout: null,
+        stderr: null,
+        status: null,
+        signal: null,
+      })) as typeof import("node:child_process").spawnSync,
+    });
+
+    expect(directKillCalls).toEqual(["SIGTERM"]);
   });
 });
 
@@ -453,5 +513,35 @@ describe("resolveUsableCodexBinary", () => {
       },
     })?.command).toBe(explicit);
     expect(attempted).toEqual([]);
+  });
+
+  it("retains the failed probe when every default candidate is unusable", () => {
+    const stale = "/Users/alice/stale/codex";
+    const homebrew = "/opt/homebrew/bin/codex";
+    const attempted: string[] = [];
+
+    const resolution = resolveUsableCodexBinary("codex", {
+      platform: "darwin",
+      env: { PATH: "/Users/alice/stale:/usr/bin:/bin" },
+      homeDir: "/Users/alice",
+      fileExists: fakeExistingFiles([stale, homebrew], "posix"),
+      readDirNames: () => [],
+      runCommand: (command) => {
+        attempted.push(command);
+        return {
+          status: 1,
+          stdout: command === stale ? "stale failure\n" : "brew failure\n",
+        };
+      },
+    });
+
+    expect(resolution).toMatchObject({
+      command: stale,
+      probe: {
+        status: 1,
+        stdout: "stale failure\n",
+      },
+    });
+    expect(attempted).toEqual([stale, homebrew]);
   });
 });

@@ -120,6 +120,31 @@ describe("inspectCodexInstallation", () => {
     expect(runCommand.mock.calls[0]?.[1]).not.toEqual(["--version"]);
   });
 
+  it("reuses an unsuccessful binary-resolution probe without spawning again", () => {
+    const runCommand = vi.fn();
+    const installation = inspectCodexInstallation({
+      requested: "codex",
+      resolveBinary: () => ({
+        command: "/Users/alice/stale/codex",
+        requested: "codex",
+        needsShell: false,
+        probe: {
+          status: 1,
+          stdout: "",
+        },
+      }),
+      runCommand,
+      authPresent: () => true,
+    });
+
+    expect(installation).toMatchObject({
+      available: false,
+      live_voice: { supported: false, reason: "unusable" },
+      diagnostics: [{ code: "codex_binary_unusable" }],
+    });
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
   it("rejects an unparseable version", () => {
     const { installation, runCommand } = inspect(
       "custom-codex development",

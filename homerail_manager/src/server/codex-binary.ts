@@ -8,6 +8,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const DEFAULT_CODEX_BIN = "codex";
+const WINDOWS_SHELL_UNSAFE_PATH_PATTERN = /["^&|<>()%!]/;
+const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000;
 
 export interface CodexBinaryResolution {
   command: string;
@@ -71,10 +73,21 @@ function windowsCommandNeedsShell(command: string, platform = process.platform):
   return isWindows(platform) && /\.(cmd|bat)$/i.test(command);
 }
 
+function windowsShellCommandIsSafe(
+  command: string,
+  platform: NodeJS.Platform,
+): boolean {
+  return !windowsCommandNeedsShell(command, platform)
+    || !WINDOWS_SHELL_UNSAFE_PATH_PATTERN.test(command);
+}
+
 export function codexCommandForSpawn(
   command: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
+  if (!windowsShellCommandIsSafe(command, platform)) {
+    throw new Error("Codex Windows shim path contains unsupported shell metacharacters");
+  }
   if (!windowsCommandNeedsShell(command, platform) || !/\s/.test(command)) return command;
   return `"${command}"`;
 }
@@ -91,6 +104,7 @@ export function terminateCodexProcess(
       ["/pid", String(child.pid), "/T", "/F"],
       {
         stdio: "ignore",
+        timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
         windowsHide: true,
       },
     );
@@ -317,6 +331,7 @@ export function resolveCodexBinaryCandidates(
 
   const seen = new Set<string>();
   return candidates.flatMap((command) => {
+    if (!windowsShellCommandIsSafe(command, options.platform)) return [];
     const key = isWindows(options.platform) ? command.toLowerCase() : command;
     if (seen.has(key)) return [];
     seen.add(key);
@@ -357,19 +372,24 @@ export function resolveUsableCodexBinary(
       platform: options.platform,
       nodeExecPath: options.nodeExecPath,
     }));
+  let fallbackProbe: CodexBinaryProbeResult | undefined;
   for (const candidate of candidates) {
     const probe = runCommand(candidate.command, ["--version"]);
+    const storedProbe = {
+      status: probe.status,
+      stdout: probe.stdout,
+    };
+    fallbackProbe ??= storedProbe;
     if (probe.status === 0) {
       return {
         ...candidate,
-        probe: {
-          status: probe.status,
-          stdout: probe.stdout,
-        },
+        probe: storedProbe,
       };
     }
   }
-  return candidates[0] ?? null;
+  return candidates[0] && fallbackProbe
+    ? { ...candidates[0], probe: fallbackProbe }
+    : candidates[0] ?? null;
 }
 
 export function redactCodexDiagnosticText(value: string): string {
@@ -402,6 +422,9 @@ export function codexBinaryNotFoundMessage(
 ): string {
   const options = resolveOptions(resolveOptionsInput);
   const trimmed = requestedCodexBinary(options, requested);
+  if (!windowsShellCommandIsSafe(trimmed, options.platform)) {
+    return "Codex Windows shim path contains unsupported shell metacharacters. Choose a different install path or set HOMERAIL_CODEX_BIN.";
+  }
   if (isPathLike(trimmed, options.platform)) {
     return `Codex binary not found at: ${codexBinaryDisplayPath(trimmed, options)}. Install codex or set HOMERAIL_CODEX_BIN.`;
   }
