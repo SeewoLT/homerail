@@ -32,6 +32,22 @@ const currentPublicVersion = JSON.parse(
   fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
 ).version;
 
+function workflowStep(workflow, name) {
+  const marker = `      - name: ${name}\n`;
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1, `missing workflow step: ${name}`);
+  const next = workflow.indexOf("\n      - name: ", start + marker.length);
+  return workflow.slice(start, next === -1 ? undefined : next);
+}
+
+function candidateStep(name) {
+  return workflowStep(candidateWorkflow, name);
+}
+
+function publishStep(name) {
+  return workflowStep(publishWorkflow, name);
+}
+
 test("release versions follow the unified Codex-style SemVer train", () => {
   assert.deepEqual(classifyReleaseVersion("0.1.0-alpha.1"), {
     version: "0.1.0-alpha.1",
@@ -184,7 +200,7 @@ test("candidate build is manual, owner-only, main-only, and creates no public re
   assert.match(candidateWorkflow, /cancel-in-progress: false/);
 });
 
-test("candidate uses protected signing without Deployment records", () => {
+test("candidate uses protected release environment without Deployment records", () => {
   assert.match(
     candidateWorkflow,
     /environment:\n\s+name: desktop-beta-signing\n\s+deployment: false/,
@@ -198,10 +214,8 @@ test("candidate uses protected signing without Deployment records", () => {
   assert.doesNotMatch(candidateWorkflow, /runs-on:.*self-hosted/);
 });
 
-test("candidate signs, notarizes, verifies, and creates channel metadata", () => {
+test("candidate signs macOS, explicitly leaves Windows Alpha unsigned, and creates metadata", () => {
   for (const secret of [
-    "WIN_CSC_LINK",
-    "WIN_CSC_KEY_PASSWORD",
     "MAC_CSC_LINK",
     "MAC_CSC_KEY_PASSWORD",
     "APPLE_API_KEY_P8",
@@ -211,22 +225,53 @@ test("candidate signs, notarizes, verifies, and creates channel metadata", () =>
   ]) {
     assert.match(candidateWorkflow, new RegExp(`secrets\\.${secret}`));
   }
-  assert.equal((candidateWorkflow.match(/--config\.forceCodeSigning=true/g) ?? []).length, 2);
-  assert.match(candidateWorkflow, /--config\.mac\.notarize=true/);
+  assert.doesNotMatch(candidateWorkflow, /WIN_CSC_LINK|WIN_CSC_KEY_PASSWORD/);
+  assert.doesNotMatch(candidateWorkflow, /Build signed candidate/);
+
+  const prepareGuard = candidateStep("Require Alpha while Windows signing is unavailable");
+  assert.match(prepareGuard, /\[\[ "\$RELEASE_CHANNEL" != "alpha" \]\]/);
+  assert.match(prepareGuard, /Beta and Stable require trusted Windows Authenticode signing/);
+
+  const windowsGuard = candidateStep("Require Alpha for unsigned Windows installer");
+  assert.match(windowsGuard, /if: runner\.os == 'Windows'/);
+  assert.match(windowsGuard, /if \(\$env:RELEASE_CHANNEL -ne 'alpha'\)/);
+  assert.match(windowsGuard, /Beta and Stable require trusted Authenticode signing/);
+
+  const windowsBuild = candidateStep("Build unsigned Windows Alpha installer");
+  assert.match(windowsBuild, /--config\.win\.signExecutable=false/);
+  assert.match(windowsBuild, /--config\.win\.verifyUpdateCodeSignature=false/);
+  assert.match(windowsBuild, /--config\.publish\.channel=/);
+  assert.doesNotMatch(windowsBuild, /forceCodeSigning|WIN_CSC/);
+  assert.equal(
+    (candidateWorkflow.match(/--config\.win\.signExecutable=false/g) ?? []).length,
+    1,
+  );
+  assert.equal(
+    (
+      candidateWorkflow.match(/--config\.win\.verifyUpdateCodeSignature=false/g)
+      ?? []
+    ).length,
+    1,
+  );
+
+  const macBuild = candidateStep("Build, sign, and notarize macOS app");
+  assert.match(macBuild, /--config\.forceCodeSigning=true/);
+  assert.match(macBuild, /--config\.mac\.notarize=true/);
+  assert.equal((candidateWorkflow.match(/--config\.forceCodeSigning=true/g) ?? []).length, 1);
   assert.equal((candidateWorkflow.match(/--config\.publish\.channel=/g) ?? []).length, 2);
   assert.match(candidateWorkflow, /verify:update-metadata/);
   assert.match(candidateWorkflow, /metadata_release_channel=stable/);
   assert.match(candidateWorkflow, /'latest\.yml', 'alpha\.yml', 'beta\.yml'/);
   assert.match(candidateWorkflow, /"latest-mac\.yml" "alpha-mac\.yml" "beta-mac\.yml"/);
   assert.match(candidateWorkflow, /asset_name="\$\{asset#\.\/\}"/);
-  assert.match(candidateWorkflow, /Get-AuthenticodeSignature/);
-  assert.match(candidateWorkflow, /codesign --verify --deep --strict/);
-  assert.match(candidateWorkflow, /xcrun stapler validate/);
-  assert.match(candidateWorkflow, /spctl --assess/);
+  const macVerification = candidateStep("Verify macOS package, signature, and notarization");
+  assert.match(macVerification, /codesign --verify --deep --strict/);
+  assert.match(macVerification, /xcrun stapler validate/);
+  assert.match(macVerification, /spctl --assess/);
   assert.match(candidateWorkflow, /release-candidate\.mjs create/);
 });
 
-test("Windows candidate runs Node 24 CI before signing and smoke-tests NSIS", () => {
+test("Windows candidate runs Node 24 CI before building and smoke-testing unsigned Alpha", () => {
   assert.match(candidateWorkflow, /RELEASE_NODE_VERSION: 24\.18\.0/);
   assert.match(candidateWorkflow, /name: Run public Windows Node 24 CI/);
   assert.match(candidateWorkflow, /npm --prefix homerail-source run ci/);
@@ -237,31 +282,103 @@ test("Windows candidate runs Node 24 CI before signing and smoke-tests NSIS", ()
   assert.match(candidateWorkflow, /VITEST_MAX_WORKERS: "1"/);
   assert.match(candidateWorkflow, /VITEST_TEST_TIMEOUT: "15000"/);
   assert.match(candidateWorkflow, /VITEST_HOOK_TIMEOUT: "30000"/);
-  assert.match(candidateWorkflow, /if \(\$signature\.Status -ne 'Valid'\)/);
-  assert.match(candidateWorkflow, /-ArgumentList @\('\/S', "\/D=\$installRoot"\)/);
-  assert.match(candidateWorkflow, /--user-data-dir=\$electronUserData/);
-  assert.match(candidateWorkflow, /Installed CLI version .* does not match/);
-  assert.match(candidateWorkflow, /Silent NSIS uninstall left HomeRail\.exe installed/);
-  assert.match(candidateWorkflow, /\$_\.Name -match '\\\.\(exe\|blockmap\)\$'/);
+
+  const packageVerificationStep = candidateStep("Verify unsigned Windows Alpha package");
+  assert.match(packageVerificationStep, /npm --prefix desktop run verify:package/);
+  assert.match(packageVerificationStep, /if \(\$LASTEXITCODE -ne 0\)/);
+  assert.match(packageVerificationStep, /\$installers\.Count -ne 1/);
+  assert.match(
+    packageVerificationStep,
+    /Get-AuthenticodeSignature -LiteralPath \$installer\.FullName/,
+  );
+  assert.match(packageVerificationStep, /\$signature\.StatusMessage/);
+  assert.match(packageVerificationStep, /if \(\$signature\.Status -ne 'NotSigned'\)/);
+  assert.match(
+    packageVerificationStep,
+    /if \(\$null -ne \$signature\.SignerCertificate\)/,
+  );
+  assert.match(
+    packageVerificationStep,
+    /desktop\/dist-electron\/win-unpacked\/resources\/app-update\.yml/,
+  );
+  assert.match(
+    packageVerificationStep,
+    /\[System\.IO\.File\]::ReadAllText\([\s\S]*Resolve-Path[\s\S]*\.Path/,
+  );
+  assert.ok(
+    packageVerificationStep.includes(
+      "if ($appUpdateYaml -match '(?m)^\\s*publisherName\\s*:')",
+    ),
+  );
+  assert.match(packageVerificationStep, /must not contain publisherName/);
+  for (const expectedUpdateTarget of [
+    "provider: github",
+    "owner: xiaotianfotos",
+    "repo: homerail",
+    "channel: alpha",
+  ]) {
+    assert.match(packageVerificationStep, new RegExp(expectedUpdateTarget));
+  }
+  assert.match(packageVerificationStep, /\[regex\]::Escape\(\$expectedLine\)/);
+  assert.match(packageVerificationStep, /\$appUpdateYaml -notmatch \$pattern/);
+
+  const checksumStep = candidateStep("Write Windows checksums");
+  assert.match(checksumStep, /Get-FileHash -Algorithm SHA256/);
+  assert.match(checksumStep, /SHA256SUMS-windows\.txt/);
+  assert.match(checksumStep, /\$_\.Name -match '\\\.\(exe\|blockmap\)\$'/);
+  assert.match(checksumStep, /"\$env:RELEASE_CHANNEL\.yml"/);
+
+  const installSmokeStep = candidateStep("Smoke-test silent Windows installation");
+  assert.match(installSmokeStep, /-ArgumentList @\('\/S', "\/D=\$installRoot"\)/);
+  assert.match(installSmokeStep, /--user-data-dir=\$electronUserData/);
+  assert.match(installSmokeStep, /Installed CLI version .* does not match/);
+  assert.match(installSmokeStep, /Start-Sleep -Seconds 12/);
+  assert.match(installSmokeStep, /Silent NSIS uninstall left HomeRail\.exe installed/);
+
+  const uploadStep = candidateStep("Upload Windows candidate assets");
+  assert.match(uploadStep, /desktop\/dist-electron\/\*\.exe/);
+  assert.match(uploadStep, /desktop\/dist-electron\/\*\.blockmap/);
+  assert.match(uploadStep, /desktop\/dist-electron\/\*\.yml/);
+  assert.match(uploadStep, /desktop\/dist-electron\/SHA256SUMS-windows\.txt/);
+  assert.match(uploadStep, /if-no-files-found: error/);
 
   const install = candidateWorkflow.indexOf("Install locked dependencies");
   const publicCi = candidateWorkflow.indexOf("Run public Windows Node 24 CI");
   const publicCliVersion = candidateWorkflow.indexOf("Verify public Windows CLI release version");
   const desktopCi = candidateWorkflow.indexOf("Run Desktop Windows CI");
-  const build = candidateWorkflow.indexOf("Build and sign Windows installer");
+  const guard = candidateWorkflow.indexOf("Require Alpha for unsigned Windows installer");
+  const build = candidateWorkflow.indexOf("Build unsigned Windows Alpha installer");
   const metadata = candidateWorkflow.indexOf("Prepare and verify Windows update metadata");
-  const packageVerification = candidateWorkflow.indexOf("Verify Windows package and signature");
+  const packageVerification = candidateWorkflow.indexOf("Verify unsigned Windows Alpha package");
   const checksums = candidateWorkflow.indexOf("Write Windows checksums");
   const installSmoke = candidateWorkflow.indexOf("Smoke-test silent Windows installation");
+  const upload = candidateWorkflow.indexOf("Upload Windows candidate assets");
+  for (const index of [
+    install,
+    publicCi,
+    publicCliVersion,
+    desktopCi,
+    guard,
+    build,
+    metadata,
+    packageVerification,
+    checksums,
+    installSmoke,
+    upload,
+  ]) {
+    assert.notEqual(index, -1);
+  }
   assert.ok(
     install < publicCi
       && publicCi < publicCliVersion
       && publicCliVersion < desktopCi
-      && desktopCi < build
+      && desktopCi < guard
+      && guard < build
       && build < metadata
       && metadata < packageVerification
       && packageVerification < checksums
-      && checksums < installSmoke,
+      && checksums < installSmoke
+      && installSmoke < upload,
   );
 });
 
@@ -284,6 +401,43 @@ test("publish consumes a successful candidate without rebuilding it", () => {
   assert.match(publishWorkflow, /--verify-tag/);
   assert.match(publishWorkflow, /--prerelease/);
   assert.doesNotMatch(publishWorkflow, /npm (?:ci|run)|electron-builder|forceCodeSigning/);
+
+  const candidateVerification = publishStep(
+    "Verify candidate identity, assets, and checksums",
+  );
+  const manifestRead = candidateVerification.indexOf(
+    'JSON.parse(fs.readFileSync("candidate/release-manifest.json", "utf8"))',
+  );
+  const alphaGuard = candidateVerification.indexOf(
+    'if (manifest.channel !== "alpha")',
+  );
+  const tagCheck = publishWorkflow.indexOf(
+    "Refuse to replace an existing tag or release",
+  );
+  const tagCreation = publishWorkflow.indexOf("Create immutable annotated tag");
+  const releaseCreation = publishWorkflow.indexOf(
+    "Publish exact candidate as a GitHub release",
+  );
+  assert.match(
+    candidateVerification,
+    /only Alpha candidates may be published while Windows installers are unsigned/,
+  );
+  for (const index of [
+    manifestRead,
+    alphaGuard,
+    tagCheck,
+    tagCreation,
+    releaseCreation,
+  ]) {
+    assert.notEqual(index, -1);
+  }
+  assert.ok(
+    manifestRead < alphaGuard
+      && publishWorkflow.indexOf("Verify candidate identity, assets, and checksums")
+        < tagCheck
+      && tagCheck < tagCreation
+      && tagCreation < releaseCreation,
+  );
 });
 
 test("release docs preserve candidate, publish, update-test, and fix-forward boundaries", () => {
@@ -298,6 +452,27 @@ test("release docs preserve candidate, publish, update-test, and fix-forward bou
   assert.match(releaseDocs, /byte-identical Alpha and Beta compatibility metadata/);
   assert.match(releaseDocs, /complete public Node 24 CI suite/);
   assert.match(releaseDocs, /does not replace.*real Windows machine/s);
+  assert.match(releaseDocs, /SmartScreen/);
+  assert.match(releaseDocs, /Unknown Publisher/);
+  assert.match(releaseDocs, /GitHub Release[\s\S]*SHA-512/);
+  assert.match(releaseDocs, /weaker than trusted Authenticode/i);
+  assert.match(releaseDocs, /only permitted for Alpha/i);
+  assert.match(releaseDocs, /Beta and Stable[\s\S]*trusted Windows signing/i);
+  assert.match(releaseDocs, /SignPath Foundation/);
+  assert.match(releaseDocs, /not been applied for or\s+approved/i);
+  assert.match(
+    releaseDocs,
+    /first update from an unsigned Alpha to a signed installer[\s\S]*does not verify that installer with Authenticode/i,
+  );
+  assert.match(
+    releaseDocs,
+    /signed\s+version is installed[\s\S]*app-update\.yml[\s\S]*publisherName/i,
+  );
+  assert.match(
+    releaseDocs,
+    /only on the Windows Alpha\s+electron-builder command/i,
+  );
+  assert.doesNotMatch(releaseDocs, /WIN_CSC_LINK|WIN_CSC_KEY_PASSWORD/);
 });
 
 test("candidate pins a merged Desktop commit before installing or signing", () => {
@@ -415,6 +590,19 @@ test("candidate manifest is reproducibly verified and detects artifact tampering
     ];
     const create = spawnSync(process.execPath, createArgs, { encoding: "utf8" });
     assert.equal(create.status, 0, create.stderr);
+
+    const releaseNotes = fs.readFileSync(
+      path.join(candidateDir, "release-notes.md"),
+      "utf8",
+    );
+    assert.match(releaseNotes, /Windows: explicitly unsigned Alpha installer/);
+    assert.match(releaseNotes, /macOS: Developer ID signed and Apple-notarized/);
+    assert.match(releaseNotes, /platform-specific release gates/);
+    assert.doesNotMatch(releaseNotes, /This is a signed HomeRail Desktop/);
+    assert.doesNotMatch(
+      releaseNotes,
+      /passed build-time signature, notarization, package/,
+    );
 
     const verify = spawnSync(
       process.execPath,
