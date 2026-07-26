@@ -505,7 +505,9 @@ jobs:
           path: |
             desktop/dist-electron/*.exe
             desktop/dist-electron/*.blockmap
-            desktop/dist-electron/*.yml
+            desktop/dist-electron/latest.yml
+            desktop/dist-electron/alpha.yml
+            desktop/dist-electron/beta.yml
             desktop/dist-electron/SHA256SUMS-windows.txt
           if-no-files-found: error
           retention-days: 30
@@ -519,7 +521,9 @@ jobs:
             desktop/dist-electron/*.dmg
             desktop/dist-electron/*.zip
             desktop/dist-electron/*.blockmap
-            desktop/dist-electron/*.yml
+            desktop/dist-electron/latest-mac.yml
+            desktop/dist-electron/alpha-mac.yml
+            desktop/dist-electron/beta-mac.yml
             desktop/dist-electron/SHA256SUMS-macos.txt
           if-no-files-found: error
           retention-days: 30
