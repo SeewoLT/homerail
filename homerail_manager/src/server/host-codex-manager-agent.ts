@@ -10,7 +10,7 @@ import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
 import {
   codexBinaryNotFoundMessage,
   codexCommandEnvironment,
-  resolveCodexBinary,
+  resolveUsableCodexBinary,
 } from "./codex-binary.js";
 import {
   readWidgetFile,
@@ -3082,7 +3082,7 @@ class HostCodexAppServerAdapter {
   }
 
   private async validateBinary(): Promise<void> {
-    const resolved = resolveCodexBinary(this.codexBin);
+    const resolved = resolveUsableCodexBinary(this.codexBin);
     if (resolved) {
       this.codexBin = resolved.command;
       this.codexNeedsShell = resolved.needsShell;

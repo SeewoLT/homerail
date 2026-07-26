@@ -3,7 +3,7 @@ import { createInterface, type Interface as ReadlineInterface } from "node:readl
 import {
   codexBinaryNotFoundMessage,
   codexCommandEnvironment,
-  resolveCodexBinary,
+  resolveUsableCodexBinary,
 } from "./codex-binary.js";
 import { managerAgentChildEnv } from "./host-codex-manager-agent.js";
 import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
@@ -63,7 +63,7 @@ export class CodexAppServerClient {
       ?? process.env.HOMERAIL_CODEX_BIN
       ?? process.env.CODEX_BIN_PATH
       ?? "codex";
-    const resolved = resolveCodexBinary(requested);
+    const resolved = resolveUsableCodexBinary(requested);
     if (!resolved) throw new Error(codexBinaryNotFoundMessage(requested));
 
     this.closing = false;

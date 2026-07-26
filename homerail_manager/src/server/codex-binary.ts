@@ -32,6 +32,14 @@ export interface CodexCommandEnvironmentOptions {
   nodeExecPath?: string;
 }
 
+export interface CodexUsableBinaryResolveOptions extends CodexBinaryResolveOptions {
+  nodeExecPath?: string;
+  runCommand?: (
+    command: string,
+    args: string[],
+  ) => Pick<SpawnSyncReturns<string>, "status">;
+}
+
 function isWindows(platform: NodeJS.Platform): boolean {
   return platform === "win32";
 }
@@ -93,20 +101,21 @@ function existingDirectoryEntries(
   }
 }
 
-function findExecutableOnPath(command: string, options: Required<CodexBinaryResolveOptions>): string | null {
+function findExecutablesOnPath(command: string, options: Required<CodexBinaryResolveOptions>): string[] {
   const pathEnv = options.env.PATH ?? options.env.Path ?? options.env.path ?? "";
   const paths = pathApi(options.platform);
   const names = windowsExecutableNames(command, options.platform);
+  const found: string[] = [];
   for (const rawDir of pathEnv.split(paths.delimiter)) {
     const dir = rawDir.trim().replace(/^"(.*)"$/, "$1");
     if (!dir) continue;
     for (const name of names) {
       const candidate = paths.join(dir, name);
-      const found = existingFile(candidate, options.fileExists);
-      if (found) return found;
+      const existing = existingFile(candidate, options.fileExists);
+      if (existing) found.push(existing);
     }
   }
-  return null;
+  return found;
 }
 
 function codexCandidatesInDirectory(
@@ -225,35 +234,78 @@ export function resolveCodexBinary(
   requested?: string,
   resolveOptionsInput: CodexBinaryResolveOptions = {},
 ): CodexBinaryResolution | null {
+  return resolveCodexBinaryCandidates(requested, resolveOptionsInput)[0] ?? null;
+}
+
+export function resolveCodexBinaryCandidates(
+  requested?: string,
+  resolveOptionsInput: CodexBinaryResolveOptions = {},
+): CodexBinaryResolution[] {
   const options = resolveOptions(resolveOptionsInput);
   const trimmed = requestedCodexBinary(options, requested);
+  const candidates: string[] = [];
 
   if (isPathLike(trimmed, options.platform)) {
     for (const candidate of pathCandidates(trimmed, options.platform)) {
       const found = existingFile(candidate, options.fileExists);
-      if (found) return { command: found, requested: trimmed, needsShell: windowsCommandNeedsShell(found, options.platform) };
+      if (found) candidates.push(found);
     }
-    return null;
+  } else {
+    candidates.push(...findExecutablesOnPath(trimmed, options));
+    if (trimmed === DEFAULT_CODEX_BIN) {
+      for (const candidate of commonCodexCandidates(options)) {
+        const found = existingFile(candidate, options.fileExists);
+        if (found) candidates.push(found);
+      }
+    }
   }
 
-  const fromPath = findExecutableOnPath(trimmed, options);
-  if (fromPath) {
-    return {
-      command: fromPath,
+  const seen = new Set<string>();
+  return candidates.flatMap((command) => {
+    const key = isWindows(options.platform) ? command.toLowerCase() : command;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [{
+      command,
       requested: trimmed,
-      needsShell: windowsCommandNeedsShell(fromPath, options.platform),
-    };
+      needsShell: windowsCommandNeedsShell(command, options.platform),
+    }];
+  });
+}
+
+function hasExplicitCodexBinaryRequest(
+  requested: string | undefined,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  if (typeof requested === "string" && requested.trim() && requested.trim() !== DEFAULT_CODEX_BIN) {
+    return true;
+  }
+  return [env.HOMERAIL_CODEX_BIN, env.CODEX_BIN_PATH]
+    .some((value) => typeof value === "string" && Boolean(value.trim()));
+}
+
+export function resolveUsableCodexBinary(
+  requested?: string,
+  options: CodexUsableBinaryResolveOptions = {},
+): CodexBinaryResolution | null {
+  const candidates = resolveCodexBinaryCandidates(requested, options);
+  if (candidates.length === 0) return null;
+
+  const env = options.env ?? process.env;
+  if (hasExplicitCodexBinaryRequest(requested, env)) {
+    return candidates[0] ?? null;
   }
 
-  if (trimmed !== DEFAULT_CODEX_BIN) {
-    return null;
+  const runCommand = options.runCommand
+    ?? ((command: string, args: string[]) => runCodexCommandSync(command, args, {
+      env,
+      platform: options.platform,
+      nodeExecPath: options.nodeExecPath,
+    }));
+  for (const candidate of candidates) {
+    if (runCommand(candidate.command, ["--version"]).status === 0) return candidate;
   }
-
-  for (const candidate of commonCodexCandidates(options)) {
-    const found = existingFile(candidate, options.fileExists);
-    if (found) return { command: found, requested: trimmed, needsShell: windowsCommandNeedsShell(found, options.platform) };
-  }
-  return null;
+  return candidates[0] ?? null;
 }
 
 export function redactCodexDiagnosticText(value: string): string {

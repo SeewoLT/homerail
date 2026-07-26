@@ -5,7 +5,7 @@ import type { SpawnSyncReturns } from "node:child_process";
 import {
   codexBinaryDisplayPath,
   redactCodexDiagnosticText,
-  resolveCodexBinary,
+  resolveUsableCodexBinary,
   runCodexCommandSync,
   type CodexBinaryResolution,
 } from "./codex-binary.js";
@@ -202,7 +202,7 @@ export function inspectCodexInstallation(
     env.CODEX_BIN_PATH,
   ].find((value) => typeof value === "string" && value.trim())?.trim() ?? "codex";
   const resolveBinary = options.resolveBinary
-    ?? ((value?: string) => resolveCodexBinary(value, { env, homeDir }));
+    ?? ((value?: string) => resolveUsableCodexBinary(value, { env, homeDir }));
   const runCommand = options.runCommand
     ?? ((command, args) => runCodexCommandSync(command, args, { env }));
   const loggedIn = (options.authPresent

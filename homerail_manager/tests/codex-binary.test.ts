@@ -7,6 +7,7 @@ import {
   codexBinaryNotFoundMessage,
   codexCommandEnvironment,
   resolveCodexBinary,
+  resolveUsableCodexBinary,
   runCodexCommandSync,
 } from "../src/server/codex-binary.js";
 
@@ -330,5 +331,51 @@ describe("resolveCodexBinary", () => {
         PATH: `${path.posix.dirname(command)}:/Applications/HomeRail.app/Contents/Resources/node-bin:/usr/bin:/bin`,
       }),
     });
+  });
+});
+
+describe("resolveUsableCodexBinary", () => {
+  it("skips an unusable default PATH candidate and selects a later working install", () => {
+    const stale = "/Users/alice/stale/codex";
+    const homebrew = "/opt/homebrew/bin/codex";
+    const attempted: string[] = [];
+
+    expect(resolveUsableCodexBinary("codex", {
+      platform: "darwin",
+      env: { PATH: "/Users/alice/stale:/usr/bin:/bin" },
+      homeDir: "/Users/alice",
+      fileExists: fakeExistingFiles([stale, homebrew], "posix"),
+      readDirNames: () => [],
+      runCommand: (command, args) => {
+        attempted.push(`${command} ${args.join(" ")}`);
+        return { status: command === homebrew ? 0 : 1 };
+      },
+    })?.command).toBe(homebrew);
+    expect(attempted).toEqual([
+      `${stale} --version`,
+      `${homebrew} --version`,
+    ]);
+  });
+
+  it("does not bypass an unusable explicit override", () => {
+    const explicit = "/Users/alice/custom/codex";
+    const homebrew = "/opt/homebrew/bin/codex";
+    const attempted: string[] = [];
+
+    expect(resolveUsableCodexBinary(undefined, {
+      platform: "darwin",
+      env: {
+        HOMERAIL_CODEX_BIN: explicit,
+        PATH: "/usr/bin:/bin",
+      },
+      homeDir: "/Users/alice",
+      fileExists: fakeExistingFiles([explicit, homebrew], "posix"),
+      readDirNames: () => [],
+      runCommand: (command) => {
+        attempted.push(command);
+        return { status: command === homebrew ? 0 : 1 };
+      },
+    })?.command).toBe(explicit);
+    expect(attempted).toEqual([]);
   });
 });

@@ -8,7 +8,7 @@ import {
 import {
   codexBinaryNotFoundMessage,
   codexCommandEnvironment,
-  resolveCodexBinary,
+  resolveUsableCodexBinary,
   type CodexBinaryResolution,
 } from "./codex-binary.js";
 import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
@@ -273,7 +273,7 @@ export async function listCodexModels(
   options: CodexModelListOptions = {},
 ): Promise<CodexModelCatalog> {
   const resolution = options.resolution === undefined
-    ? resolveCodexBinary(undefined, { env: options.env ?? process.env })
+    ? resolveUsableCodexBinary(undefined, { env: options.env ?? process.env })
     : options.resolution;
   if (!resolution) throw new Error(codexBinaryNotFoundMessage(undefined, { env: options.env ?? process.env }));
   return queryCodexModels(resolution, options);
