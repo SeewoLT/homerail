@@ -257,7 +257,8 @@ export function managerAgentReadiness(
         code: binaryDiagnostic?.code ?? "codex_unavailable",
         message: binaryDiagnostic?.message ?? "Codex CLI is not available",
       });
-    } else if (!codex.logged_in) {
+    }
+    if (!codex.logged_in) {
       blockers.push({ code: "codex_auth_missing", message: "Codex is not logged in" });
     }
   } else if (runtimeConfig.runtime_placement === "host_shell") {

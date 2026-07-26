@@ -90,6 +90,36 @@ describe("inspectCodexInstallation", () => {
     });
   });
 
+  it("reuses the successful binary-resolution version probe", () => {
+    const runCommand = vi.fn(() => result(
+      0,
+      "realtime_conversation under development false\n",
+    ));
+    const installation = inspectCodexInstallation({
+      requested: "codex",
+      resolveBinary: () => ({
+        command: "/opt/homebrew/bin/codex",
+        requested: "codex",
+        needsShell: false,
+        probe: {
+          status: 0,
+          stdout: "codex-cli 0.145.0\n",
+        },
+      }),
+      runCommand,
+      authPresent: () => true,
+      statMtimeMs: () => 42,
+    });
+
+    expect(installation).toMatchObject({
+      available: true,
+      semantic_version: "0.145.0",
+      live_voice: { supported: true },
+    });
+    expect(runCommand).toHaveBeenCalledTimes(1);
+    expect(runCommand.mock.calls[0]?.[1]).not.toEqual(["--version"]);
+  });
+
   it("rejects an unparseable version", () => {
     const { installation, runCommand } = inspect(
       "custom-codex development",

@@ -224,7 +224,7 @@ export function inspectCodexInstallation(
     };
   }
 
-  const versionResult = runCommand(resolved.command, ["--version"]);
+  const versionResult = resolved.probe ?? runCommand(resolved.command, ["--version"]);
   const rawVersion = (versionResult.stdout || "").trim().split(/\r?\n/)[0]?.slice(0, 512) || "";
   const binary = codexBinaryDisplayPath(resolved.command, { homeDir });
   if (versionResult.status !== 0) {

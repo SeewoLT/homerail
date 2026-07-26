@@ -282,6 +282,27 @@ describe("resolveCodexBinary", () => {
     expect(env.OPENAI_API_KEY).toBe("sk-do-not-log-this-value");
   });
 
+  it("merges every Windows PATH key before normalizing its casing", () => {
+    const env = codexCommandEnvironment(
+      "C:\\Users\\Alice\\AppData\\Roaming\\npm\\codex.cmd",
+      {
+        PATH: "C:\\Windows\\System32",
+        Path: "C:\\Users\\Alice\\bin;C:\\Windows\\System32",
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      },
+      {
+        platform: "win32",
+        nodeExecPath: "C:\\Program Files\\HomeRail\\node.exe",
+      },
+    );
+
+    expect(env.PATH).toBe(
+      "C:\\Users\\Alice\\AppData\\Roaming\\npm;C:\\Program Files\\HomeRail;C:\\Windows\\System32;C:\\Users\\Alice\\bin",
+    );
+    expect(env.Path).toBeUndefined();
+    expect(env.PATHEXT).toBe(".COM;.EXE;.BAT;.CMD");
+  });
+
   it("returns a failed result instead of throwing when spawnSync throws", () => {
     const error = new Error("spawn exploded");
     let spawnOptions: Record<string, unknown> | undefined;
@@ -387,7 +408,7 @@ describe("resolveUsableCodexBinary", () => {
     const homebrew = "/opt/homebrew/bin/codex";
     const attempted: string[] = [];
 
-    expect(resolveUsableCodexBinary("codex", {
+    const resolution = resolveUsableCodexBinary("codex", {
       platform: "darwin",
       env: { PATH: "/Users/alice/stale:/usr/bin:/bin" },
       homeDir: "/Users/alice",
@@ -395,9 +416,17 @@ describe("resolveUsableCodexBinary", () => {
       readDirNames: () => [],
       runCommand: (command, args) => {
         attempted.push(`${command} ${args.join(" ")}`);
-        return { status: command === homebrew ? 0 : 1 };
+        return {
+          status: command === homebrew ? 0 : 1,
+          stdout: command === homebrew ? "codex-cli 0.145.0\n" : "",
+        };
       },
-    })?.command).toBe(homebrew);
+    });
+    expect(resolution?.command).toBe(homebrew);
+    expect(resolution?.probe).toEqual({
+      status: 0,
+      stdout: "codex-cli 0.145.0\n",
+    });
     expect(attempted).toEqual([
       `${stale} --version`,
       `${homebrew} --version`,

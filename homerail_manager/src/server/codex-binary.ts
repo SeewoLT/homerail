@@ -13,6 +13,12 @@ export interface CodexBinaryResolution {
   command: string;
   requested: string;
   needsShell: boolean;
+  probe?: CodexBinaryProbeResult;
+}
+
+export interface CodexBinaryProbeResult {
+  status: number | null;
+  stdout?: string;
 }
 
 export interface CodexBinaryResolveOptions {
@@ -46,7 +52,7 @@ export interface CodexUsableBinaryResolveOptions extends CodexBinaryResolveOptio
   runCommand?: (
     command: string,
     args: string[],
-  ) => Pick<SpawnSyncReturns<string>, "status">;
+  ) => CodexBinaryProbeResult;
 }
 
 function isWindows(platform: NodeJS.Platform): boolean {
@@ -138,12 +144,24 @@ function existingDirectoryEntries(
   }
 }
 
+function pathEnvironmentEntries(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): string[] {
+  const paths = pathApi(platform);
+  const values = isWindows(platform)
+    ? Object.entries(env)
+      .filter(([key, value]) => key.toLowerCase() === "path" && typeof value === "string")
+      .map(([, value]) => value as string)
+    : [env.PATH ?? env.Path ?? env.path ?? ""];
+  return values.flatMap((value) => value.split(paths.delimiter));
+}
+
 function findExecutablesOnPath(command: string, options: Required<CodexBinaryResolveOptions>): string[] {
-  const pathEnv = options.env.PATH ?? options.env.Path ?? options.env.path ?? "";
   const paths = pathApi(options.platform);
   const names = windowsExecutableNames(command, options.platform);
   const found: string[] = [];
-  for (const rawDir of pathEnv.split(paths.delimiter)) {
+  for (const rawDir of pathEnvironmentEntries(options.env, options.platform)) {
     const dir = rawDir.trim().replace(/^"(.*)"$/, "$1");
     if (!dir) continue;
     for (const name of names) {
@@ -340,7 +358,16 @@ export function resolveUsableCodexBinary(
       nodeExecPath: options.nodeExecPath,
     }));
   for (const candidate of candidates) {
-    if (runCommand(candidate.command, ["--version"]).status === 0) return candidate;
+    const probe = runCommand(candidate.command, ["--version"]);
+    if (probe.status === 0) {
+      return {
+        ...candidate,
+        probe: {
+          status: probe.status,
+          stdout: probe.stdout,
+        },
+      };
+    }
   }
   return candidates[0] ?? null;
 }
@@ -388,11 +415,10 @@ export function codexCommandEnvironment(
 ): NodeJS.ProcessEnv {
   const platform = options.platform ?? process.platform;
   const paths = pathApi(platform);
-  const existingPath = source.PATH ?? source.Path ?? source.path ?? "";
   const directories = [
     isPathLike(command, platform) ? paths.dirname(command) : undefined,
     paths.dirname(options.nodeExecPath ?? process.execPath),
-    ...existingPath.split(paths.delimiter),
+    ...pathEnvironmentEntries(source, platform),
   ].filter((directory): directory is string => Boolean(directory));
   const seen = new Set<string>();
   const normalized = directories.filter((directory) => {
