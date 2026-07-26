@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import * as http from "node:http";
+import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import type { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
@@ -147,6 +148,47 @@ describe("Codex model catalog", () => {
           service_tiers: [],
         },
       ],
+    });
+  });
+
+  it("enriches a GUI-style minimal PATH before loading models from a Node-backed shim", async () => {
+    const child = new FakeChildProcess();
+    const command = "/Users/Alice Smith/.nvm/versions/node/v22/bin/codex";
+    let spawnOptions: Record<string, unknown> | undefined;
+    child.stdin.on("data", (chunk) => {
+      const request = JSON.parse(chunk.toString().trim()) as Record<string, unknown>;
+      if (request.id === 1) {
+        child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} })}\n`);
+      } else if (request.id === 2) {
+        child.stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          result: { data: [] },
+        })}\n`);
+      }
+    });
+
+    await expect(listCodexModels({
+      resolution: {
+        command,
+        requested: "codex",
+        needsShell: false,
+      },
+      env: { PATH: "/usr/bin:/bin" },
+      spawnImpl: ((_command, _args, options) => {
+        spawnOptions = options as Record<string, unknown>;
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as typeof spawn,
+      timeoutMs: 1_000,
+    })).resolves.toEqual({
+      binary: command,
+      models: [],
+    });
+
+    expect(spawnOptions).toMatchObject({
+      env: expect.objectContaining({
+        PATH: `${path.posix.dirname(command)}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+      }),
     });
   });
 

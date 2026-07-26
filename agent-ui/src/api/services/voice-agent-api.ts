@@ -277,6 +277,18 @@ export interface CodexStatus {
   available: boolean
   logged_in: boolean
   version?: string
+  semantic_version?: string
+  binary?: string
+  diagnostics?: Array<{
+    code:
+      | 'codex_binary_not_found'
+      | 'codex_binary_unusable'
+      | 'codex_auth_missing'
+      | 'codex_version_unparseable'
+      | 'codex_version_too_old'
+      | 'codex_live_voice_feature_missing'
+    message: string
+  }>
 }
 
 export interface CodexModelServiceTier {
@@ -332,7 +344,7 @@ export interface ManagerAgentReadiness {
         voices: CodexLiveVoiceV3Voice[]
         default_voice: CodexLiveVoiceV3Voice
         stage?: string
-        reason?: 'missing' | 'unparseable' | 'too_old' | 'feature_missing'
+        reason?: 'missing' | 'unusable' | 'unparseable' | 'too_old' | 'feature_missing'
       }
     }
     docker_node?: {

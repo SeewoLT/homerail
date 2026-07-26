@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import {
   codexBinaryNotFoundMessage,
+  codexCommandEnvironment,
   resolveCodexBinary,
 } from "./codex-binary.js";
 import { managerAgentChildEnv } from "./host-codex-manager-agent.js";
@@ -71,10 +72,10 @@ export class CodexAppServerClient {
       this.options.args ?? ["app-server"],
       {
         cwd: this.options.cwd,
-        env: {
+        env: codexCommandEnvironment(resolved.command, {
           ...managerAgentChildEnv(),
           ...this.options.env,
-        },
+        }),
         stdio: ["pipe", "pipe", "pipe"],
         shell: resolved.needsShell,
         windowsHide: true,

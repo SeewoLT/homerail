@@ -7,6 +7,7 @@ import {
 
 import {
   codexBinaryNotFoundMessage,
+  codexCommandEnvironment,
   resolveCodexBinary,
   type CodexBinaryResolution,
 } from "./codex-binary.js";
@@ -136,7 +137,7 @@ function queryCodexModels(
     try {
       const spawnOptions: SpawnOptionsWithoutStdio = {
         cwd: options.cwd ?? process.cwd(),
-        env: options.env ?? process.env,
+        env: codexCommandEnvironment(resolution.command, options.env ?? process.env),
         shell: resolution.needsShell,
         windowsHide: true,
       };

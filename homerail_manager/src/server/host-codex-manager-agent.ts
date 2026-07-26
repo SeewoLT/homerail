@@ -7,7 +7,11 @@ import { createInterface, type Interface as ReadlineInterface } from "node:readl
 import { ensureDefaultWorkspacePath, getHomerailHome } from "../config/env.js";
 import { repoRoot, resolveAssetDirectory } from "../assets/root.js";
 import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
-import { codexBinaryNotFoundMessage, resolveCodexBinary } from "./codex-binary.js";
+import {
+  codexBinaryNotFoundMessage,
+  codexCommandEnvironment,
+  resolveCodexBinary,
+} from "./codex-binary.js";
 import {
   readWidgetFile,
   removeWidgetFile,
@@ -2810,7 +2814,7 @@ class HostCodexAppServerAdapter {
     Object.assign(env, context.environmentVariables ?? {});
     if (context.apiKey) env.OPENAI_API_KEY = context.apiKey;
     if (context.baseUrl) env.OPENAI_BASE_URL = context.baseUrl;
-    return env;
+    return codexCommandEnvironment(this.codexBin, env);
   }
 
   private async sendRequest(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {

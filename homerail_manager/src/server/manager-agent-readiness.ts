@@ -18,6 +18,7 @@ import { readDagResourceStatus, type DagResourceStatus } from "./dag-resource-st
 import {
   inspectCodexInstallation,
   type CodexLiveVoiceCapability,
+  type CodexInstallationDiagnostic,
 } from "./codex-live-voice-capability.js";
 import {
   ensurePreferredManagerAgentConfig,
@@ -37,6 +38,7 @@ export interface CodexCheck {
   semantic_version?: string;
   binary?: string;
   live_voice: CodexLiveVoiceCapability;
+  diagnostics: CodexInstallationDiagnostic[];
 }
 
 export interface ManagerAgentReadiness {
@@ -82,25 +84,7 @@ function methodNotAllowed(res: http.ServerResponse): void {
 }
 
 function codexStatus(): CodexCheck {
-  const installation = inspectCodexInstallation();
-  let loggedIn = false;
-  try {
-    const authPath = path.join(os.homedir(), ".codex", "auth.json");
-    if (fs.existsSync(authPath)) {
-      const content = fs.readFileSync(authPath, "utf-8").trim();
-      loggedIn = content.length > 0 && content !== "{}";
-    }
-  } catch {
-    loggedIn = false;
-  }
-  return {
-    available: installation.available,
-    logged_in: loggedIn,
-    version: installation.version,
-    semantic_version: installation.semantic_version,
-    binary: installation.binary,
-    live_voice: installation.live_voice,
-  };
+  return inspectCodexInstallation();
 }
 
 /** Claude Agent SDK 的主机侧凭证是否存在：ANTHROPIC_API_KEY 环境变量，
@@ -266,9 +250,14 @@ export function managerAgentReadiness(
       && config.harness === "codex_appserver"
       && codex.live_voice.supported;
     if (!codex.available) {
-      blockers.push({ code: "codex_unavailable", message: "Codex CLI is not available" });
-    }
-    if (!codex.logged_in) {
+      const binaryDiagnostic = codex.diagnostics.find((item) => (
+        item.code === "codex_binary_not_found" || item.code === "codex_binary_unusable"
+      ));
+      blockers.push({
+        code: binaryDiagnostic?.code ?? "codex_unavailable",
+        message: binaryDiagnostic?.message ?? "Codex CLI is not available",
+      });
+    } else if (!codex.logged_in) {
       blockers.push({ code: "codex_auth_missing", message: "Codex is not logged in" });
     }
   } else if (runtimeConfig.runtime_placement === "host_shell") {
