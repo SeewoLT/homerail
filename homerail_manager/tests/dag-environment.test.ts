@@ -36,6 +36,16 @@ function currentRepoRoot(): string {
   return path.resolve(import.meta.dirname, "../..");
 }
 
+function currentWorkerVersion(): string {
+  const packageJson = JSON.parse(
+    fs.readFileSync(
+      path.join(currentRepoRoot(), "homerail_worker", "package.json"),
+      "utf8",
+    ),
+  ) as { version: string };
+  return packageJson.version;
+}
+
 function dockerVersion() {
   return {
     stdout: JSON.stringify({
@@ -56,7 +66,7 @@ function dockerInfo() {
 function imageInspection(
   fingerprint: string,
   protocol = PROTOCOL_VERSION,
-  workerVersion = "0.1.0",
+  workerVersion = currentWorkerVersion(),
 ) {
   return {
     stdout: JSON.stringify([{
@@ -388,6 +398,10 @@ it("queues one asynchronous build, streams output, and probes the resulting imag
   expect(second.build?.operation_id).toBe(first.build?.operation_id);
 
   await vi.waitFor(() => expect(spawnImpl).toHaveBeenCalledTimes(1));
+  expect(spawnImpl.mock.calls[0]?.[1]).toEqual(expect.arrayContaining([
+    "--build-arg", `HOMERAIL_WORKER_PROTOCOL_VERSION=${PROTOCOL_VERSION}`,
+    "--build-arg", `HOMERAIL_WORKER_VERSION=${currentWorkerVersion()}`,
+  ]));
   stdout.write("step one\n");
   built = true;
   child.emit("close", 0, null);
