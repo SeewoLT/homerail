@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getClient } from "../index.js";
 import type { BaseResponse } from "../client.js";
+import { parseSettingIdOption } from "../command-options.js";
 import { orchestrationsDir, resolveTemplatePath } from "./templates.js";
 
 export function registerRunCommand(program: Command): void {
@@ -14,7 +15,7 @@ export function registerRunCommand(program: Command): void {
     .option("--workflow <workflow_id>", "Run a DAG workflow synced in the Manager database")
     .option("--sync", "Sync the template to the Manager database before running it")
     .option("--profile <profile>", "Runtime profile id, or a profile YAML file to sync before running")
-    .option("--setting-id <id>", "Database LLM setting id for this DAG run")
+    .option("--setting-id <id>", "Database LLM setting id for this DAG run", parseSettingIdOption)
     .action(
       async (
         template: string | undefined,

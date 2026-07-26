@@ -8,6 +8,7 @@ import {
 } from "homerail-protocol";
 
 import type { BaseResponse, HomeRailClient } from "../client.js";
+import { parseSettingIdOption } from "../command-options.js";
 import { getClient } from "../index.js";
 import {
   manualCloseoutEnvelope,
@@ -351,7 +352,7 @@ export function registerDagRunTemplateCommands(dag: Command, program: Command): 
     .description("Resolve structured input, sync a tracked DAG template, and start a run")
     .requiredOption("--input <json>", "Structured template input JSON")
     .option("--profile <profile>", "Runtime profile id")
-    .option("--setting-id <id>", "Database LLM setting id")
+    .option("--setting-id <id>", "Database LLM setting id", parseSettingIdOption)
     .option("--run-id <id>", "Explicit run id")
     .option("--wait", "Wait for terminal status and declared artifacts", false)
     .option("--timeout <sec>", "Wait timeout in seconds", "1800")
