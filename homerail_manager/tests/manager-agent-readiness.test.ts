@@ -6,9 +6,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createServer } from "../src/server/http.js";
 import { _clearAllSettings, createSetting, upsertProvider } from "../src/persistence/llm-settings.js";
-import { clearManagerAgentConfig } from "../src/persistence/manager-agent-config.js";
+import {
+  clearManagerAgentConfig,
+  DEFAULT_MANAGER_AGENT_CONFIG,
+} from "../src/persistence/manager-agent-config.js";
 import { _clearNodes } from "../src/node/registry.js";
 import { registerFakeDockerNode } from "./helpers/fake-docker-node.js";
+import { managerAgentReadiness } from "../src/server/manager-agent-readiness.js";
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
@@ -78,6 +82,9 @@ describe("/api/manager-agent/readiness", () => {
   let oldHostShell: string | undefined;
   let oldRepoRoot: string | undefined;
   let oldAnthropicKey: string | undefined;
+  let oldCodexHome: string | undefined;
+  let oldCodexBin: string | undefined;
+  let oldOpenAiKey: string | undefined;
 
   beforeEach(() => {
     oldHome = process.env.HOMERAIL_HOME;
@@ -86,12 +93,18 @@ describe("/api/manager-agent/readiness", () => {
     oldHostShell = process.env.HOMERAIL_MANAGER_AGENT_SHELL;
     oldRepoRoot = process.env.HOMERAIL_REPO_ROOT;
     oldAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    oldCodexHome = process.env.CODEX_HOME;
+    oldCodexBin = process.env.HOMERAIL_CODEX_BIN;
+    oldOpenAiKey = process.env.OPENAI_API_KEY;
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-manager-agent-readiness-"));
     process.env.HOMERAIL_HOME = tmpHome;
     process.env.HOMERAIL_LOCAL_NODE_AUTOSTART = "0";
     delete process.env.HOMERAIL_MANAGER_AGENT_HOST_ENTRY;
     delete process.env.HOMERAIL_MANAGER_AGENT_SHELL;
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CODEX_HOME;
+    delete process.env.HOMERAIL_CODEX_BIN;
+    delete process.env.OPENAI_API_KEY;
     clearManagerAgentConfig();
     _clearAllSettings();
     _clearNodes();
@@ -114,6 +127,12 @@ describe("/api/manager-agent/readiness", () => {
     else process.env.HOMERAIL_REPO_ROOT = oldRepoRoot;
     if (oldAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = oldAnthropicKey;
+    if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = oldCodexHome;
+    if (oldCodexBin === undefined) delete process.env.HOMERAIL_CODEX_BIN;
+    else process.env.HOMERAIL_CODEX_BIN = oldCodexBin;
+    if (oldOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = oldOpenAiKey;
     await removeTempDir(tmpHome);
   });
 
@@ -133,6 +152,22 @@ describe("/api/manager-agent/readiness", () => {
     expect(body.data.blockers).toContainEqual(expect.objectContaining({
       code: "manager_config_invalid",
     }));
+  });
+
+  it("reports missing Codex binary and authentication as independent blockers", () => {
+    process.env.HOMERAIL_CODEX_BIN = path.join(tmpHome, "missing-codex");
+    process.env.CODEX_HOME = path.join(tmpHome, "missing-codex-home");
+
+    const readiness = managerAgentReadiness({
+      ...DEFAULT_MANAGER_AGENT_CONFIG,
+      harness: "codex_appserver",
+      model_name: "gpt-5.5",
+    });
+
+    expect(readiness.blockers.map((item) => item.code)).toEqual([
+      "codex_binary_not_found",
+      "codex_auth_missing",
+    ]);
   });
 
   it("reports missing host prerequisites without requiring a Docker node", async () => {

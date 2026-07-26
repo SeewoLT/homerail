@@ -2,7 +2,10 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import {
   codexBinaryNotFoundMessage,
-  resolveCodexBinary,
+  codexCommandForSpawn,
+  codexCommandEnvironment,
+  resolveUsableCodexBinary,
+  terminateCodexProcess,
 } from "./codex-binary.js";
 import { managerAgentChildEnv } from "./host-codex-manager-agent.js";
 import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
@@ -43,6 +46,7 @@ export class CodexAppServerClient {
   private pending = new Map<number, PendingRequest>();
   private listeners = new Set<(message: CodexAppServerMessage) => void>();
   private closing = false;
+  private childNeedsShell = false;
   private readonly requestTimeoutMs: number;
   private readonly options: CodexAppServerClientOptions;
 
@@ -62,19 +66,20 @@ export class CodexAppServerClient {
       ?? process.env.HOMERAIL_CODEX_BIN
       ?? process.env.CODEX_BIN_PATH
       ?? "codex";
-    const resolved = resolveCodexBinary(requested);
+    const resolved = resolveUsableCodexBinary(requested);
     if (!resolved) throw new Error(codexBinaryNotFoundMessage(requested));
 
     this.closing = false;
+    this.childNeedsShell = resolved.needsShell;
     this.child = spawn(
-      resolved.command,
+      codexCommandForSpawn(resolved.command),
       this.options.args ?? ["app-server"],
       {
         cwd: this.options.cwd,
-        env: {
+        env: codexCommandEnvironment(resolved.command, {
           ...managerAgentChildEnv(),
           ...this.options.env,
-        },
+        }),
         stdio: ["pipe", "pipe", "pipe"],
         shell: resolved.needsShell,
         windowsHide: true,
@@ -162,11 +167,12 @@ export class CodexAppServerClient {
     this.readline = null;
     try {
       this.child?.stdin?.end();
-      this.child?.kill("SIGTERM");
+      if (this.child) terminateCodexProcess(this.child, this.childNeedsShell);
     } catch {
       // Best effort.
     }
     this.child = null;
+    this.childNeedsShell = false;
     this.rejectPending("Codex app-server closed");
   }
 

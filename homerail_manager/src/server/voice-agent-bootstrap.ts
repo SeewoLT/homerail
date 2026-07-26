@@ -1,7 +1,6 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
-import * as os from "node:os";
 import * as path from "node:path";
 import { getDataRoot, getHomerailHome } from "../config/env.js";
 import { repoRoot } from "../assets/root.js";
@@ -44,7 +43,6 @@ import {
   validateAndSaveManagerAgentConfig,
   type ManagerAgentConfigRoutesOptions,
 } from "./manager-agent-config.js";
-import { resolveCodexBinary, runCodexCommandSync } from "./codex-binary.js";
 import {
   managerAgentRuntimePlacementForHarness,
   managerAgentPluginOwnedLegacyWidgetType,
@@ -2262,29 +2260,7 @@ export function voiceAgentBootstrapHandler(
 
   // Codex 可用性检测：检查 CLI 是否安装 + 是否有登录态
   if (method === "GET" && pathname === "/api/voice-agent/codex-status") {
-    const requested = process.env.HOMERAIL_CODEX_BIN || process.env.CODEX_BIN_PATH || "codex";
-    const resolved = resolveCodexBinary(requested);
-    let available = false;
-    let version: string | undefined;
-    if (resolved) {
-      const result = runCodexCommandSync(resolved.command, ["--version"]);
-      if (result.status === 0) {
-        available = true;
-        version = (result.stdout || "").trim().split("\n")[0] || undefined;
-      }
-    }
-    // 检查登录态：~/.codex/auth.json 存在且非空
-    let loggedIn = false;
-    try {
-      const authPath = path.join(os.homedir(), ".codex", "auth.json");
-      if (fs.existsSync(authPath)) {
-        const content = fs.readFileSync(authPath, "utf-8").trim();
-        loggedIn = content.length > 0 && content !== "{}";
-      }
-    } catch {
-      loggedIn = false;
-    }
-    ok(res, "Codex status checked", { available, logged_in: loggedIn, version, binary: resolved?.command ?? requested });
+    ok(res, "Codex status checked", inspectCodexInstallation());
     return true;
   }
 
