@@ -268,6 +268,11 @@ test("candidate signs macOS, explicitly leaves Windows Alpha unsigned, and creat
   assert.match(macVerification, /codesign --verify --deep --strict/);
   assert.match(macVerification, /xcrun stapler validate/);
   assert.match(macVerification, /spctl --assess/);
+  const macUpload = candidateStep("Upload macOS candidate assets");
+  for (const metadata of ["latest-mac.yml", "alpha-mac.yml", "beta-mac.yml"]) {
+    assert.match(macUpload, new RegExp(`desktop/dist-electron/${metadata}`));
+  }
+  assert.doesNotMatch(macUpload, /desktop\/dist-electron\/\*\.yml/);
   assert.match(candidateWorkflow, /release-candidate\.mjs create/);
 });
 
@@ -338,7 +343,10 @@ test("Windows candidate runs Node 24 CI before building and smoke-testing unsign
   const uploadStep = candidateStep("Upload Windows candidate assets");
   assert.match(uploadStep, /desktop\/dist-electron\/\*\.exe/);
   assert.match(uploadStep, /desktop\/dist-electron\/\*\.blockmap/);
-  assert.match(uploadStep, /desktop\/dist-electron\/\*\.yml/);
+  for (const metadata of ["latest.yml", "alpha.yml", "beta.yml"]) {
+    assert.match(uploadStep, new RegExp(`desktop/dist-electron/${metadata}`));
+  }
+  assert.doesNotMatch(uploadStep, /desktop\/dist-electron\/\*\.yml/);
   assert.match(uploadStep, /desktop\/dist-electron\/SHA256SUMS-windows\.txt/);
   assert.match(uploadStep, /if-no-files-found: error/);
 
