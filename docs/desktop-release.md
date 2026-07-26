@@ -17,13 +17,16 @@ later quality gates. Git tags use the updater-compatible form
 When npm publication is enabled, the matching dist-tags are `alpha`, `beta`,
 and `latest`. These Desktop workflows do not publish npm packages.
 
-The release process intentionally separates three milestones:
+The release process intentionally separates four milestones:
 
-1. **Candidate**: platform-policy-verified artifacts exist privately as one
+1. **Build gate**: the public repository checks out an exact unmerged private
+   Desktop commit and produces unsigned Windows/macOS artifacts for automated
+   packaging validation. These artifacts are not a release.
+2. **Candidate**: platform-policy-verified artifacts exist privately as one
    immutable GitHub Actions artifact.
-2. **Technical publish**: the exact candidate receives an annotated Git tag and
+3. **Technical publish**: the exact candidate receives an annotated Git tag and
    a public GitHub prerelease, making it visible to `electron-updater`.
-3. **Announcement**: installed-update testing passed and the release is ready
+4. **Announcement**: installed-update testing passed and the release is ready
    to recommend to the community.
 
 A GitHub draft release is not an update-testing surface because
@@ -71,13 +74,37 @@ Version changes are code changes and must be reviewed before building:
 
 1. Update every public package and package lock to the same version.
 2. Update `homerail_desktop/package.json` and its lock to the same version.
-3. Merge both version changes and record the full 40-character private Desktop
-   commit SHA.
-4. Wait for required CI on both repositories.
+3. Push the private Desktop branch and record its full 40-character commit SHA.
+4. Run the public **Desktop Build Gate** against that exact unmerged SHA.
+5. After the build passes and the maintainer authorizes human testing, test the
+   downloaded artifacts on the real Windows and macOS test machines.
+6. Merge the tested Desktop commit, then run the immutable Candidate workflow.
 
-The workflow never rewrites package versions while building. It fails if the
+The workflows never rewrite package versions while building. They fail if the
 requested version differs from any public or Desktop package manifest, or if the
-pinned Desktop commit is not already merged to `homerail_desktop/main`.
+pinned checkout differs from the requested SHA. The Build Gate deliberately
+accepts an unmerged private commit; the signed Candidate additionally requires
+that commit to be merged to `homerail_desktop/main`.
+
+## Build an unsigned pre-merge package gate
+
+Open **Actions → Desktop Build Gate → Run workflow** on public `homerail/main`.
+Enter the unified Alpha version and the full private Desktop branch SHA.
+
+The public workflow uses standard GitHub-hosted Windows, macOS, and Ubuntu
+runners. It checks out only that private commit with the read-only Desktop
+token, runs public and Desktop CI, exercises Docker's real context matcher,
+builds explicitly unsigned Windows and macOS packages, verifies package/update
+metadata, records checksums and size reports, and uploads separate 30-day
+artifacts. It creates no tag, Release, signing operation, or Deployment.
+
+Do not run equivalent hosted package jobs in the private Desktop repository.
+This keeps the authoritative build and its Actions usage in the public
+repository. Local packages are preflight evidence only and must not be treated
+as authoritative build-gate artifacts.
+
+Building does not authorize human testing. Wait for the maintainer's explicit
+approval before handing these artifacts to the Windows or macOS test machines.
 
 For the first public Alpha, use:
 

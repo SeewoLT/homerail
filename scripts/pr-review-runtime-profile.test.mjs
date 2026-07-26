@@ -113,3 +113,16 @@ test("formal PR Review submits to the durable stable Manager", () => {
   assert.doesNotMatch(workflow, /install:all|build:packages|run-pr-review-live-runner/);
   assert.doesNotMatch(workflow, /vars\.HOMERAIL_PR_REVIEW_(?:HOME_TEMPLATE|PRIMARY_MODEL|ARBITER_MODEL)/);
 });
+
+test("formal PR Review runs only when the maintainer dispatches it", () => {
+  const workflow = fs
+    .readFileSync(path.join(root, ".github/workflows/pr-review.yml"), "utf8")
+    .replace(/\r\n/g, "\n");
+  const eventBlock = workflow.slice(workflow.indexOf("on:\n"), workflow.indexOf("\npermissions:"));
+  assert.match(eventBlock, /workflow_dispatch:/);
+  assert.doesNotMatch(eventBlock, /pull_request:/);
+  assert.match(
+    workflow,
+    /if: github\.actor == 'xiaotianfotos' && github\.event_name == 'workflow_dispatch'/,
+  );
+});
