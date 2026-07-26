@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { parseSettingIdOption } from "../command-options.js";
 import { getClient } from "../index.js";
 import type { BaseResponse } from "../client.js";
 import { dockerReadiness } from "./doctor.js";
@@ -63,7 +64,7 @@ export function registerSmokeCommand(program: Command): void {
     .requiredOption("--template <path>", "DAG YAML path or .yaml.template path")
     .option("--prompt <text>", "Smoke prompt", DEFAULT_PROMPT)
     .option("--profile <profile>", "Runtime profile; only agent_type selection is supported", process.env.HOMERAIL_SMOKE_PROFILE)
-    .option("--setting-id <id>", "Database LLM setting id for this DAG run")
+    .option("--setting-id <id>", "Database LLM setting id for this DAG run", parseSettingIdOption)
     .option("--no-wait", "Only start the run; do not wait for terminal status")
     .option("--interval <sec>", "Polling interval while waiting", "3")
     .option("--timeout <sec>", "Maximum wait time", "300")
@@ -262,7 +263,7 @@ export function registerSmokeCommand(program: Command): void {
     .description("Ask the configured Manager Agent to start a deterministic DAG and verify the returned run")
     .option("--message <text>", "Manager Agent smoke prompt")
     .option("--project-id <id>", "Project id used for the Manager Agent session", "manager-agent-smoke")
-    .option("--setting-id <id>", "Override Manager LLM setting id for this smoke")
+    .option("--setting-id <id>", "Override Manager LLM setting id for this smoke", parseSettingIdOption)
     .option("--provider <id>", "Override Manager provider id for this smoke")
     .option("--model <name>", "Override Manager model name for this smoke")
     .option("--no-expect-run", "Do not require a run_id in the Manager Agent response")
