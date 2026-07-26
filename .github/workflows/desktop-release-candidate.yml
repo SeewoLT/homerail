@@ -69,6 +69,17 @@ jobs:
           printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
           printf 'prerelease=%s\n' "$prerelease" >> "$GITHUB_OUTPUT"
 
+      - name: Require Alpha while Windows signing is unavailable
+        shell: bash
+        env:
+          RELEASE_CHANNEL: ${{ steps.release.outputs.channel }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_CHANNEL" != "alpha" ]]; then
+            echo "Desktop Candidate currently supports Alpha only; Beta and Stable require trusted Windows Authenticode signing" >&2
+            exit 1
+          fi
+
       - name: Verify unified public package versions
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
@@ -78,7 +89,7 @@ jobs:
           --version "$RELEASE_VERSION"
 
   build:
-    name: Build signed candidate (${{ matrix.label }})
+    name: Build candidate (${{ matrix.label }})
     needs: prepare
     environment:
       name: desktop-beta-signing
@@ -191,15 +202,22 @@ jobs:
           HOMERAIL_HOME: ${{ runner.temp }}/homerail-candidate-desktop-ci
         run: npm run ci
 
-      - name: Build and sign Windows installer
+      - name: Require Alpha for unsigned Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_CHANNEL -ne 'alpha') {
+            throw "Unsigned Windows candidates are allowed only for Alpha; Beta and Stable require trusted Authenticode signing"
+          }
+
+      - name: Build unsigned Windows Alpha installer
         if: runner.os == 'Windows'
         working-directory: desktop
-        env:
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         run: >-
           npm run dist -- --win nsis --x64 --publish never
-          --config.forceCodeSigning=true
+          --config.win.signExecutable=false
+          --config.win.verifyUpdateCodeSignature=false
           --config.publish.channel="$env:RELEASE_CHANNEL"
 
       - name: Prepare and verify Windows update metadata
@@ -218,23 +236,53 @@ jobs:
             throw "Windows update metadata verification failed"
           }
 
-      - name: Verify Windows package and signature
+      - name: Verify unsigned Windows Alpha package
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           npm --prefix desktop run verify:package
-          $installers = @(Get-ChildItem -Path desktop/dist-electron -Filter *.exe -File)
-          if ($installers.Count -eq 0) { throw "No Windows installer was produced" }
-          foreach ($installer in $installers) {
-            $signature = Get-AuthenticodeSignature -FilePath $installer.FullName
-            if ($null -eq $signature.SignerCertificate) {
-              throw "Missing Authenticode signature: $($installer.Name)"
-            }
-            if ($signature.Status -ne 'Valid') {
-              throw "Invalid Authenticode signature on $($installer.Name): $($signature.Status)"
-            }
-            Write-Host "Signed installer: $($installer.Name) ($($signature.Status))"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows package verification failed"
           }
+
+          $installers = @(Get-ChildItem -Path desktop/dist-electron -Filter *.exe -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one Windows installer, found $($installers.Count)"
+          }
+
+          $installer = $installers[0]
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+          Write-Host "Authenticode status for $($installer.Name): $($signature.Status) ($($signature.StatusMessage))"
+          if ($signature.Status -ne 'NotSigned') {
+            throw "Windows Alpha installer must be explicitly unsigned; got $($signature.Status)"
+          }
+          if ($null -ne $signature.SignerCertificate) {
+            throw "Windows Alpha installer must not contain an Authenticode signer certificate"
+          }
+
+          $appUpdateConfig = 'desktop/dist-electron/win-unpacked/resources/app-update.yml'
+          if (-not (Test-Path -LiteralPath $appUpdateConfig -PathType Leaf)) {
+            throw "Packaged Windows updater config is missing: $appUpdateConfig"
+          }
+          $appUpdateYaml = [System.IO.File]::ReadAllText(
+            (Resolve-Path -LiteralPath $appUpdateConfig).Path
+          )
+          if ($appUpdateYaml -match '(?m)^\s*publisherName\s*:') {
+            throw "Unsigned Windows Alpha app-update.yml must not contain publisherName"
+          }
+          foreach ($expectedLine in @(
+            'provider: github',
+            'owner: xiaotianfotos',
+            'repo: homerail',
+            'channel: alpha'
+          )) {
+            $pattern = '(?m)^\s*' + [regex]::Escape($expectedLine) + '\s*$'
+            if ($appUpdateYaml -notmatch $pattern) {
+              throw "Unsigned Windows Alpha app-update.yml is missing expected update target: $expectedLine"
+            }
+          }
+          Write-Host "Verified explicitly unsigned Windows Alpha installer without updater publisherName"
 
       - name: Write Windows checksums
         if: runner.os == 'Windows'

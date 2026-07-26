@@ -275,18 +275,24 @@ function writeCandidate(args) {
   );
 
   const phase = manifest.prerelease ? `${args.channel} prerelease` : "stable release";
+  const windowsPolicyNote =
+    args.channel === "alpha"
+      ? "- Windows: explicitly unsigned Alpha installer, verified as unsigned under the Alpha release policy."
+      : `- Windows: trusted Authenticode signing is required for this ${phase}.`;
   fs.writeFileSync(
     path.join(candidateDir, "release-notes.md"),
     [
       `# HomeRail ${args.version}`,
       "",
-      `This is a signed HomeRail Desktop ${phase}.`,
+      `This HomeRail Desktop ${phase} passed its platform-specific release gates.`,
       "",
       `- HomeRail commit: \`${args["source-commit"]}\``,
       `- Desktop commit: \`${args["desktop-commit"]}\``,
       `- Candidate workflow run: \`${args["run-id"]}\``,
+      windowsPolicyNote,
+      "- macOS: Developer ID signed and Apple-notarized.",
       "",
-      "The candidate passed build-time signature, notarization, package, and checksum verification.",
+      "The candidate passed build-time package, update-metadata, checksum, and applicable platform signing-policy verification.",
       "Public announcement remains a separate decision after installed-update testing.",
       "",
     ].join("\n"),
