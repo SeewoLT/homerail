@@ -1,0 +1,340 @@
+name: Desktop Build Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Unified Alpha version, for example 0.1.0-alpha.2
+        type: string
+        required: true
+      desktop_sha:
+        description: Full homerail_desktop commit SHA to build
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-gate-${{ inputs.desktop_sha }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_NODE_VERSION: 24.18.0
+
+jobs:
+  prepare:
+    name: Validate build identity
+    if: github.actor == 'xiaotianfotos' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      channel: ${{ steps.identity.outputs.channel }}
+    steps:
+      - name: Check out HomeRail source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: homerail-source
+          persist-credentials: false
+
+      - name: Validate Alpha version and Desktop commit
+        id: identity
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          DESKTOP_SHA: ${{ inputs.desktop_sha }}
+        run: |
+          set -euo pipefail
+          numeric='(0|[1-9][0-9]*)'
+          core="${numeric}\.${numeric}\.${numeric}"
+          if [[ ! "$REQUESTED_VERSION" =~ ^${core}-alpha(\.${numeric})+$ ]]; then
+            echo "version must be an Alpha version such as 0.1.0-alpha.2" >&2
+            exit 1
+          fi
+          if [[ ! "$DESKTOP_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "desktop_sha must be a full lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+          printf 'channel=alpha\n' >> "$GITHUB_OUTPUT"
+
+      - name: Verify unified public package versions
+        env:
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: >-
+          node homerail-source/scripts/desktop-release/validate-unified-version.mjs
+          --public-root homerail-source
+          --version "$RELEASE_VERSION"
+
+  docker-context:
+    name: Verify Desktop Docker runtime context
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out pinned private Desktop source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: xiaotianfotos/homerail_desktop
+          ref: ${{ inputs.desktop_sha }}
+          token: ${{ secrets.HOMERAIL_DESKTOP_READ_TOKEN }}
+          path: desktop
+          persist-credentials: false
+
+      - name: Verify exact Desktop commit
+        shell: bash
+        env:
+          DESKTOP_SHA: ${{ inputs.desktop_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C desktop rev-parse HEAD)" = "$DESKTOP_SHA"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.RELEASE_NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install locked Desktop dependencies
+        run: npm --prefix desktop ci
+
+      - name: Run required real Docker matcher test
+        working-directory: desktop
+        env:
+          HOMERAIL_REQUIRE_DOCKER_CONTEXT_TEST: "1"
+        run: npm test -- scripts/runtime-docker-context.test.mjs
+
+  build:
+    name: Build unsigned package (${{ matrix.label }})
+    needs: [prepare, docker-context]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            os: windows-latest
+            platform: windows
+            artifact: desktop-build-gate-windows-x64
+          - label: macOS arm64
+            os: macos-15
+            platform: macos
+            artifact: desktop-build-gate-macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      HOMERAIL_SOURCE_DIR: ${{ github.workspace }}/homerail-source
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+    steps:
+      - name: Check out HomeRail runtime source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: homerail-source
+          persist-credentials: false
+
+      - name: Check out pinned private Desktop source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: xiaotianfotos/homerail_desktop
+          ref: ${{ inputs.desktop_sha }}
+          token: ${{ secrets.HOMERAIL_DESKTOP_READ_TOKEN }}
+          path: desktop
+          persist-credentials: false
+
+      - name: Verify exact Desktop commit
+        shell: bash
+        env:
+          DESKTOP_SHA: ${{ inputs.desktop_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C desktop rev-parse HEAD)" = "$DESKTOP_SHA"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.RELEASE_NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            homerail-source/homerail_protocol/package-lock.json
+            homerail-source/homerail_plugin_sdk/package-lock.json
+            homerail-source/homerail_manager/package-lock.json
+            homerail-source/homerail_node/package-lock.json
+            homerail-source/homerail_worker/package-lock.json
+            homerail-source/homerail_cli/package-lock.json
+            homerail-source/agent-ui/package-lock.json
+
+      - name: Verify unified public and Desktop versions
+        run: >-
+          node homerail-source/scripts/desktop-release/validate-unified-version.mjs
+          --public-root homerail-source
+          --desktop-root desktop
+          --version "$RELEASE_VERSION"
+
+      - name: Install locked dependencies
+        run: |
+          npm --prefix desktop ci
+          npm --prefix homerail-source run install:all
+
+      - name: Run public Windows Node 24 CI
+        if: runner.os == 'Windows'
+        env:
+          HOMERAIL_HOME: ${{ runner.temp }}/homerail-build-gate-public-ci
+          VITEST_MAX_WORKERS: "1"
+          VITEST_TEST_TIMEOUT: "15000"
+          VITEST_HOOK_TIMEOUT: "30000"
+        run: npm --prefix homerail-source run ci
+
+      - name: Run Desktop CI
+        working-directory: desktop
+        env:
+          HOMERAIL_HOME: ${{ runner.temp }}/homerail-build-gate-desktop-ci
+        run: npm run ci
+
+      - name: Build unsigned Windows Alpha installer
+        if: runner.os == 'Windows'
+        working-directory: desktop
+        run: >-
+          npm run dist -- --win nsis --x64 --publish never
+          --config.win.signExecutable=false
+          --config.win.verifyUpdateCodeSignature=false
+          --config.publish.channel="$env:RELEASE_CHANNEL"
+
+      - name: Verify unsigned Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm --prefix desktop run verify:update-metadata -- --dist dist-electron --channel alpha --platform windows
+          npm --prefix desktop run verify:package
+          $installers = @(Get-ChildItem desktop/dist-electron -Filter *.exe -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one Windows installer, found $($installers.Count)"
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installers[0].FullName
+          if ($signature.Status -ne 'NotSigned' -or $null -ne $signature.SignerCertificate) {
+            throw "Build-gate Windows installer must be unsigned"
+          }
+          $updateConfig = Get-Content desktop/dist-electron/win-unpacked/resources/app-update.yml -Raw
+          if ($updateConfig -match '(?m)^\s*publisherName\s*:') {
+            throw "Unsigned app-update.yml must not contain publisherName"
+          }
+
+      - name: Smoke-test packaged Windows Codex runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node desktop/scripts/windows-codex-runtime-smoke.mjs `
+            --runtime-root desktop/dist-electron/win-unpacked/resources/homerail-runtime `
+            --fixture-root "$env:RUNNER_TEMP\homerail-codex-shim-smoke"
+
+      - name: Write Windows checksums and size report
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm --silent --prefix desktop run size:report -- --dist dist-electron |
+            Set-Content -LiteralPath desktop/dist-electron/package-size-report.txt -Encoding utf8
+          npm --silent --prefix desktop run size:report -- --dist dist-electron --format json |
+            Set-Content -LiteralPath desktop/dist-electron/package-size-report.json -Encoding utf8
+          $files = @(Get-ChildItem desktop/dist-electron -File | Where-Object {
+            $_.Name -match '\.(exe|blockmap)$' -or $_.Name -eq 'alpha.yml'
+          } | Sort-Object Name)
+          if ($files.Count -eq 0) { throw "No Windows package assets were produced" }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          [IO.File]::WriteAllLines(
+            (Join-Path (Resolve-Path desktop/dist-electron) 'SHA256SUMS-windows.txt'),
+            $lines,
+            [Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Build unsigned macOS Alpha package
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: >-
+          npm run dist -- --mac dmg zip --arm64 --publish never
+          --config.forceCodeSigning=false
+          --config.mac.notarize=false
+          --config.publish.channel="$RELEASE_CHANNEL"
+
+      - name: Verify unsigned macOS package
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run verify:update-metadata -- --dist dist-electron --channel alpha --platform macos
+          npm run verify:package
+          app_path="$(find dist-electron -type d -name HomeRail.app -print -quit)"
+          test -n "$app_path"
+          signature_detail="$(codesign -dvvv "$app_path" 2>&1 || true)"
+          if grep -q '^Authority=' <<<"$signature_detail"; then
+            echo "Build-gate macOS app must not contain a trusted signing identity" >&2
+            exit 1
+          fi
+
+      - name: Write macOS checksums and size report
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --silent run size:report -- --dist dist-electron > dist-electron/package-size-report.txt
+          npm --silent run size:report -- --dist dist-electron --format json > dist-electron/package-size-report.json
+          cd dist-electron
+          find . -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.blockmap' -o -name 'alpha-mac.yml' \) -print0 \
+            | sort -z \
+            | xargs -0 shasum -a 256 > SHA256SUMS-macos.txt
+          test -s SHA256SUMS-macos.txt
+
+      - name: Upload Windows build-gate assets
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            desktop/dist-electron/*.exe
+            desktop/dist-electron/*.blockmap
+            desktop/dist-electron/alpha.yml
+            desktop/dist-electron/SHA256SUMS-windows.txt
+            desktop/dist-electron/package-size-report.*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload macOS build-gate assets
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            desktop/dist-electron/*.dmg
+            desktop/dist-electron/*.zip
+            desktop/dist-electron/*.blockmap
+            desktop/dist-electron/alpha-mac.yml
+            desktop/dist-electron/SHA256SUMS-macos.txt
+            desktop/dist-electron/package-size-report.*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Record build identity
+        shell: bash
+        env:
+          DESKTOP_SHA: ${{ inputs.desktop_sha }}
+        run: |
+          {
+            echo "## Desktop build gate"
+            echo
+            echo "- Version: \`$RELEASE_VERSION\`"
+            echo "- Public source: \`$GITHUB_SHA\`"
+            echo "- Private Desktop source: \`$DESKTOP_SHA\`"
+            echo "- Platform: \`${{ matrix.label }}\`"
+            echo
+            echo "These are unsigned pre-merge artifacts. They are not a release and must not be published."
+          } >> "$GITHUB_STEP_SUMMARY"
