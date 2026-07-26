@@ -801,16 +801,15 @@ describe("PR Review scenario assets", () => {
     });
   });
 
-  it("keeps the trusted automatic GitHub adapter thin and the privacy advisory non-blocking", () => {
+  it("keeps the trusted manual GitHub adapter thin and the privacy advisory non-blocking", () => {
     const workflow = fs.readFileSync(path.resolve(process.cwd(), "..", ".github", "workflows", "pr-review.yml"), "utf8");
     const runner = fs.readFileSync(path.resolve(process.cwd(), "..", "scripts", "run-stable-dag-runner.sh"), "utf8");
     const reviewRunner = fs.readFileSync(path.resolve(process.cwd(), "..", "scripts", "run-pr-review-stable-runner.sh"), "utf8");
     const parsed = parseYaml(workflow) as { jobs: { review: { env: Record<string, string>; steps: Array<{ name: string; env?: Record<string, string> }> } } };
     expect(workflow).toContain("workflow_dispatch:");
-    expect(workflow).toContain("pull_request:");
+    expect(workflow).not.toContain("pull_request:");
     expect(workflow).not.toContain("pull_request_target:");
     expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
-    expect(workflow).toContain("github.event.pull_request.head.repo.full_name == github.repository");
     expect(workflow).toContain("github.actor == 'xiaotianfotos'");
     expect(workflow).toContain("continue-on-error: true");
     expect(workflow).toContain("Privacy advisory (human inspection only)");

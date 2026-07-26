@@ -7,7 +7,13 @@ import { createInterface, type Interface as ReadlineInterface } from "node:readl
 import { ensureDefaultWorkspacePath, getHomerailHome } from "../config/env.js";
 import { repoRoot, resolveAssetDirectory } from "../assets/root.js";
 import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
-import { codexBinaryNotFoundMessage, resolveCodexBinary } from "./codex-binary.js";
+import {
+  codexBinaryNotFoundMessage,
+  codexCommandForSpawn,
+  codexCommandEnvironment,
+  resolveUsableCodexBinary,
+  terminateCodexProcess,
+} from "./codex-binary.js";
 import {
   readWidgetFile,
   removeWidgetFile,
@@ -2568,7 +2574,9 @@ class HostCodexAppServerAdapter {
       return;
     }
     try {
-      this.process = spawn(this.codexBin, _buildCodexAppServerArgsForTest(), {
+      this.process = spawn(codexCommandForSpawn(
+        this.codexBin,
+      ), _buildCodexAppServerArgsForTest(), {
         stdio: ["pipe", "pipe", "pipe"],
         env: this.buildEnv(context),
         cwd: context.workspace ?? process.cwd(),
@@ -2810,7 +2818,7 @@ class HostCodexAppServerAdapter {
     Object.assign(env, context.environmentVariables ?? {});
     if (context.apiKey) env.OPENAI_API_KEY = context.apiKey;
     if (context.baseUrl) env.OPENAI_BASE_URL = context.baseUrl;
-    return env;
+    return codexCommandEnvironment(this.codexBin, env);
   }
 
   private async sendRequest(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -2904,7 +2912,7 @@ class HostCodexAppServerAdapter {
     this.rl = null;
     try {
       this.process?.stdin?.end();
-      this.process?.kill("SIGTERM");
+      if (this.process) terminateCodexProcess(this.process, this.codexNeedsShell);
     } catch {
       // Ignore.
     }
@@ -3078,7 +3086,7 @@ class HostCodexAppServerAdapter {
   }
 
   private async validateBinary(): Promise<void> {
-    const resolved = resolveCodexBinary(this.codexBin);
+    const resolved = resolveUsableCodexBinary(this.codexBin);
     if (resolved) {
       this.codexBin = resolved.command;
       this.codexNeedsShell = resolved.needsShell;

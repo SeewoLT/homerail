@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
+import type { Command } from "commander";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createProgram } from "../src/index.js";
 import { readLineFromStdin, redactSecret } from "../src/commands/llm-settings.js";
@@ -227,6 +228,55 @@ describe("stop command", () => {
 });
 
 describe("run command", () => {
+  it("keeps the Manager default model selection when --setting-id is absent", async () => {
+    mockFetch({
+      success: true,
+      message: "Run started",
+      data: { run_id: "default-setting-run" },
+    });
+
+    const program = createProgram();
+    await program.parseAsync([
+      "node",
+      "hr",
+      "run",
+      "test-template",
+      "--prompt",
+      "use the default model",
+    ]);
+
+    const request = vi.mocked(globalThis.fetch).mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toEqual({
+      prompt: "use the default model",
+      yamlPath: "test-template",
+    });
+  });
+
+  it("normalizes a non-blank --setting-id before sending the run request", async () => {
+    mockFetch({
+      success: true,
+      message: "Run started",
+      data: { run_id: "explicit-setting-run" },
+    });
+
+    const program = createProgram();
+    await program.parseAsync([
+      "node",
+      "hr",
+      "run",
+      "test-template",
+      "--prompt",
+      "use the explicit model",
+      "--setting-id",
+      "  llm-setting-1  ",
+    ]);
+
+    const request = vi.mocked(globalThis.fetch).mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      llm_setting_id: "llm-setting-1",
+    });
+  });
+
   it("sends create-and-run request and prints run ID", async () => {
     mockFetch({
       success: true,
@@ -409,6 +459,40 @@ default:
 
     exitSpy.mockRestore();
     errSpy.mockRestore();
+  });
+});
+
+describe("--setting-id option guard", () => {
+  const cases: Array<[string, string[]]> = [
+    ["run", ["run", "test-template", "--prompt", "test", "--setting-id", ""]],
+    ["smoke dag", ["smoke", "dag", "--template", "test-template", "--setting-id", "   "]],
+    ["smoke manager-agent", ["smoke", "manager-agent", "--setting-id", "\t"]],
+    [
+      "dag run-template",
+      ["dag", "run-template", "pr-review", "--input", "{\"repo\":\"owner/repo\",\"pr\":1}", "--setting-id", "\n"],
+    ],
+  ];
+
+  it.each(cases)("rejects an explicit blank value for %s before any request", async (_name, args) => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const errorOutput: string[] = [];
+    const program = createProgram();
+    const overrideExit = (command: Command): void => {
+      command.exitOverride();
+      command.configureOutput({
+        writeErr: (value) => errorOutput.push(value),
+      });
+      command.commands.forEach(overrideExit);
+    };
+    overrideExit(program);
+
+    await expect(program.parseAsync(["node", "hr", ...args])).rejects.toMatchObject({
+      code: "commander.invalidArgument",
+      exitCode: 1,
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(errorOutput.join("")).toContain("--setting-id must not be empty or whitespace");
   });
 });
 

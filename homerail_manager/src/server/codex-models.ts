@@ -1,13 +1,15 @@
 import {
   spawn,
-  spawnSync,
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
 
 import {
   codexBinaryNotFoundMessage,
-  resolveCodexBinary,
+  codexCommandForSpawn,
+  codexCommandEnvironment,
+  resolveUsableCodexBinary,
+  terminateCodexProcess,
   type CodexBinaryResolution,
 } from "./codex-binary.js";
 import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
@@ -113,20 +115,6 @@ function errorMessage(value: unknown): string {
   return stringValue(raw?.message) || stringValue(value) || "Codex app-server request failed";
 }
 
-function terminateCodexProcess(
-  child: ChildProcessWithoutNullStreams,
-  resolution: CodexBinaryResolution,
-): void {
-  if (process.platform === "win32" && resolution.needsShell && child.pid) {
-    const result = spawnSync("taskkill.exe", ["/pid", String(child.pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    if (result.status === 0) return;
-  }
-  if (!child.killed) child.kill();
-}
-
 function queryCodexModels(
   resolution: CodexBinaryResolution,
   options: CodexModelListOptions,
@@ -136,11 +124,13 @@ function queryCodexModels(
     try {
       const spawnOptions: SpawnOptionsWithoutStdio = {
         cwd: options.cwd ?? process.cwd(),
-        env: options.env ?? process.env,
+        env: codexCommandEnvironment(resolution.command, options.env ?? process.env),
         shell: resolution.needsShell,
         windowsHide: true,
       };
-      child = (options.spawnImpl ?? spawn)(resolution.command, ["app-server"], {
+      child = (options.spawnImpl ?? spawn)(codexCommandForSpawn(
+        resolution.command,
+      ), ["app-server"], {
         ...spawnOptions,
         stdio: ["pipe", "pipe", "pipe"],
       }) as ChildProcessWithoutNullStreams;
@@ -165,7 +155,7 @@ function queryCodexModels(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      terminateCodexProcess(child, resolution);
+      terminateCodexProcess(child, resolution.needsShell);
       if (error) reject(error);
       else resolve(catalog ?? { binary: resolution.command, models: [] });
     }
@@ -272,7 +262,7 @@ export async function listCodexModels(
   options: CodexModelListOptions = {},
 ): Promise<CodexModelCatalog> {
   const resolution = options.resolution === undefined
-    ? resolveCodexBinary(undefined, { env: options.env ?? process.env })
+    ? resolveUsableCodexBinary(undefined, { env: options.env ?? process.env })
     : options.resolution;
   if (!resolution) throw new Error(codexBinaryNotFoundMessage(undefined, { env: options.env ?? process.env }));
   return queryCodexModels(resolution, options);

@@ -18,6 +18,12 @@ const candidateWorkflow = fs
     "utf8",
   )
   .replace(/\r\n/g, "\n");
+const buildGateWorkflow = fs
+  .readFileSync(
+    path.join(repoRoot, ".github", "workflows", "desktop-build-gate.yml"),
+    "utf8",
+  )
+  .replace(/\r\n/g, "\n");
 const publishWorkflow = fs
   .readFileSync(
     path.join(repoRoot, ".github", "workflows", "desktop-release-publish.yml"),
@@ -42,6 +48,10 @@ function workflowStep(workflow, name) {
 
 function candidateStep(name) {
   return workflowStep(candidateWorkflow, name);
+}
+
+function buildGateStep(name) {
+  return workflowStep(buildGateWorkflow, name);
 }
 
 function publishStep(name) {
@@ -198,6 +208,33 @@ test("candidate build is manual, owner-only, main-only, and creates no public re
   assert.match(candidateWorkflow, /name: desktop-release-candidate/);
   assert.match(candidateWorkflow, /retention-days: 30/);
   assert.match(candidateWorkflow, /cancel-in-progress: false/);
+});
+
+test("public Desktop build gate owns unsigned pre-merge hosted builds", () => {
+  assert.match(buildGateWorkflow, /workflow_dispatch:/);
+  assert.doesNotMatch(buildGateWorkflow, /^\s{2}(?:push|pull_request|schedule):/m);
+  assert.match(
+    buildGateWorkflow,
+    /github\.actor == 'xiaotianfotos' && github\.ref == 'refs\/heads\/main'/,
+  );
+  assert.match(buildGateWorkflow, /desktop_sha must be a full lowercase 40-character commit SHA/);
+  assert.match(buildGateWorkflow, /repository: xiaotianfotos\/homerail_desktop/);
+  assert.match(buildGateWorkflow, /ref: \$\{\{ inputs\.desktop_sha \}\}/);
+  assert.match(buildGateWorkflow, /secrets\.HOMERAIL_DESKTOP_READ_TOKEN/);
+  assert.doesNotMatch(buildGateWorkflow, /merge-base --is-ancestor/);
+  assert.doesNotMatch(buildGateWorkflow, /desktop-beta-signing|MAC_CSC|APPLE_API|gh release|git tag/);
+  assert.match(buildGateWorkflow, /os: windows-latest/);
+  assert.match(buildGateWorkflow, /os: macos-15/);
+  assert.match(buildGateWorkflow, /HOMERAIL_REQUIRE_DOCKER_CONTEXT_TEST: "1"/);
+  assert.match(buildGateWorkflow, /--config\.win\.signExecutable=false/);
+  assert.match(buildGateWorkflow, /CSC_IDENTITY_AUTO_DISCOVERY: "false"/);
+  assert.match(buildGateWorkflow, /retention-days: 30/);
+  assert.match(buildGateWorkflow, /These are unsigned pre-merge artifacts/);
+
+  const exactCommit = buildGateStep("Verify exact Desktop commit");
+  assert.match(exactCommit, /git -C desktop rev-parse HEAD/);
+  const windowsCodex = buildGateStep("Smoke-test packaged Windows Codex runtime");
+  assert.match(windowsCodex, /windows-codex-runtime-smoke\.mjs/);
 });
 
 test("candidate uses protected release environment without Deployment records", () => {

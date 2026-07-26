@@ -8,16 +8,25 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const children: ChildProcess[] = [];
 const servers: http.Server[] = [];
+const sockets = new Set<net.Socket>();
+const unexpectedSocketErrors: Error[] = [];
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  for (const socket of sockets) socket.destroy();
+  sockets.clear();
   for (const child of children.splice(0)) {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    await stopChild(child);
   }
   for (const server of servers.splice(0)) {
     if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const errors = unexpectedSocketErrors.splice(0);
+  if (errors.length > 0) {
+    throw new AggregateError(errors, "Unexpected WebSocket errors during static UI proxy teardown");
+  }
 });
 
 describe("static Agent UI mutation proxy", () => {
@@ -25,6 +34,7 @@ describe("static Agent UI mutation proxy", () => {
     let upgradedPath = "";
     const manager = http.createServer();
     manager.on("upgrade", (req, socket) => {
+      trackSocket(socket);
       upgradedPath = req.url || "";
       socket.write(
         "HTTP/1.1 101 Switching Protocols\r\n" +
@@ -60,6 +70,7 @@ describe("static Agent UI mutation proxy", () => {
     let upgradedPath = "";
     const manager = http.createServer();
     manager.on("upgrade", (req, socket) => {
+      trackSocket(socket);
       upgradedPath = req.url || "";
       socket.write(
         "HTTP/1.1 101 Switching Protocols\r\n" +
@@ -98,6 +109,7 @@ describe("static Agent UI mutation proxy", () => {
     let upgradedPath = "";
     const manager = http.createServer();
     manager.on("upgrade", (req, socket) => {
+      trackSocket(socket);
       upgradedPath = req.url || "";
       socket.write(
         "HTTP/1.1 101 Switching Protocols\r\n" +
@@ -121,6 +133,63 @@ describe("static Agent UI mutation proxy", () => {
     const response = await websocketUpgrade(uiPort, "/api/voice/asr/realtime");
     expect(response).toContain("HTTP/1.1 101 Switching Protocols");
     expect(upgradedPath).toBe("/api/voice/asr/realtime");
+  }, 15_000);
+
+  it("stays available when the Manager resets an upgraded WebSocket", async () => {
+    const manager = http.createServer();
+    manager.on("upgrade", (_req, socket) => {
+      trackSocket(socket);
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: websocket\r\n" +
+        "\r\n",
+        () => socket.resetAndDestroy(),
+      );
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    await startStaticUi({
+      port: uiPort,
+      host: "127.0.0.1",
+      origin: uiOrigin,
+      managerUrl,
+    });
+
+    expect(await websocketUpgradeHeaders(uiPort, "/ws/events")).toContain(
+      "HTTP/1.1 101 Switching Protocols",
+    );
+    await waitUntil(async () => (await fetch(uiOrigin)).status === 200);
+  }, 15_000);
+
+  it("stays available when the browser resets an upgraded WebSocket", async () => {
+    const manager = http.createServer();
+    manager.on("upgrade", (_req, socket) => {
+      trackSocket(socket);
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: websocket\r\n" +
+        "\r\n",
+      );
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    await startStaticUi({
+      port: uiPort,
+      host: "127.0.0.1",
+      origin: uiOrigin,
+      managerUrl,
+    });
+
+    expect(await websocketUpgradeHeaders(uiPort, "/ws/events", true)).toContain(
+      "HTTP/1.1 101 Switching Protocols",
+    );
+    await waitUntil(async () => (await fetch(uiOrigin)).status === 200);
   }, 15_000);
 
   it("rejects no-Origin/cross-origin requests and proxies exact self-Origin without credentials", async () => {
@@ -286,6 +355,7 @@ async function startStaticUi(options: {
   });
   children.push(child);
   let stderr = "";
+  child.stdout?.resume();
   child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
   await waitUntil(async () => {
     if (child.exitCode !== null) throw new Error(`static UI exited early: ${stderr}`);
@@ -329,7 +399,7 @@ async function reservePort(host = "127.0.0.1"): Promise<number> {
 
 async function websocketUpgrade(port: number, requestPath: string, origin?: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port });
+    const socket = trackSocket(net.createConnection({ host: "127.0.0.1", port }));
     let response = "";
     const timer = setTimeout(() => {
       socket.destroy();
@@ -358,6 +428,91 @@ async function websocketUpgrade(port: number, requestPath: string, origin?: stri
       reject(error);
     });
   });
+}
+
+async function websocketUpgradeHeaders(
+  port: number,
+  requestPath: string,
+  resetClient = false,
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const socket = trackSocket(net.createConnection({ host: "127.0.0.1", port }));
+    let response = "";
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        reject(error);
+        return;
+      }
+      if (resetClient) socket.resetAndDestroy();
+      resolve(response);
+    };
+    const timer = setTimeout(() => {
+      socket.destroy();
+      finish(new Error("WebSocket upgrade timed out"));
+    }, 5_000);
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      socket.write(
+        `GET ${requestPath} HTTP/1.1\r\n` +
+        `Host: 127.0.0.1:${port}\r\n` +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Sec-WebSocket-Version: 13\r\n" +
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+        "\r\n",
+      );
+    });
+    socket.on("data", (chunk) => {
+      response += chunk;
+      if (response.includes("\r\n\r\n")) finish();
+    });
+    socket.on("end", () => {
+      if (!settled) finish(new Error("WebSocket ended before upgrade headers"));
+    });
+    socket.on("error", (error) => {
+      if (!settled) finish(error);
+    });
+  });
+}
+
+function trackSocket(socket: net.Socket): net.Socket {
+  sockets.add(socket);
+  socket.once("close", () => sockets.delete(socket));
+  socket.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "ECONNRESET" && error.code !== "EPIPE") {
+      unexpectedSocketErrors.push(error);
+    }
+  });
+  return socket;
+}
+
+async function waitForChildClose(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise<boolean>((resolve) => {
+    const finish = (closed: boolean): void => {
+      clearTimeout(timer);
+      child.off("close", onClose);
+      resolve(closed);
+    };
+    const onClose = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once("close", onClose);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+  });
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  if (await waitForChildClose(child, 5_000)) return;
+  child.kill("SIGKILL");
+  if (!await waitForChildClose(child, 2_000)) {
+    throw new Error(`static UI child ${child.pid ?? "unknown"} did not exit`);
+  }
 }
 
 async function waitUntil(check: () => Promise<boolean>): Promise<void> {

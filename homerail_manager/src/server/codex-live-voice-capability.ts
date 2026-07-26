@@ -1,7 +1,11 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { SpawnSyncReturns } from "node:child_process";
 import {
-  resolveCodexBinary,
+  codexBinaryDisplayPath,
+  redactCodexDiagnosticText,
+  resolveUsableCodexBinary,
   runCodexCommandSync,
   type CodexBinaryResolution,
 } from "./codex-binary.js";
@@ -16,9 +20,23 @@ export const CODEX_LIVE_VOICE_FEATURE = "realtime_conversation";
 
 export type CodexLiveVoiceUnsupportedReason =
   | "missing"
+  | "unusable"
   | "unparseable"
   | "too_old"
   | "feature_missing";
+
+export type CodexInstallationDiagnosticCode =
+  | "codex_binary_not_found"
+  | "codex_binary_unusable"
+  | "codex_auth_missing"
+  | "codex_version_unparseable"
+  | "codex_version_too_old"
+  | "codex_live_voice_feature_missing";
+
+export interface CodexInstallationDiagnostic {
+  code: CodexInstallationDiagnosticCode;
+  message: string;
+}
 
 export interface CodexLiveVoiceCapability {
   supported: boolean;
@@ -34,20 +52,31 @@ export interface CodexLiveVoiceCapability {
 
 export interface CodexInstallationStatus {
   available: boolean;
+  logged_in: boolean;
   version?: string;
   semantic_version?: string;
   binary: string;
   live_voice: CodexLiveVoiceCapability;
+  diagnostics: CodexInstallationDiagnostic[];
 }
 
 export interface InspectCodexInstallationOptions {
   requested?: string;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
   resolveBinary?: (requested?: string) => CodexBinaryResolution | null;
   runCommand?: (
     command: string,
     args: string[],
   ) => SpawnSyncReturns<string>;
+  authPresent?: () => boolean;
   statMtimeMs?: (filePath: string) => number | undefined;
+}
+
+export interface CodexAuthenticationOptions {
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  readAuthFile?: (authPath: string) => string;
 }
 
 interface SemanticVersion {
@@ -64,6 +93,20 @@ interface CachedFeatureProbe {
 }
 
 const featureCache = new Map<string, CachedFeatureProbe>();
+const SAFE_FEATURE_STAGES = new Set([
+  "stable",
+  "experimental",
+  "under development",
+  "deprecated",
+  "removed",
+]);
+
+function diagnostic(
+  code: CodexInstallationDiagnosticCode,
+  message: string,
+): CodexInstallationDiagnostic {
+  return { code, message };
+}
 
 function emptyCapability(reason: CodexLiveVoiceUnsupportedReason): CodexLiveVoiceCapability {
   return {
@@ -109,9 +152,13 @@ function parseFeatureProbe(stdout: string): CachedFeatureProbe {
     const stageParts = maybeEnabled === "true" || maybeEnabled === "false"
       ? parts.slice(1, -1)
       : parts.slice(1);
-    const stage = stageParts.join(" ").trim() || undefined;
+    const rawStage = redactCodexDiagnosticText(stageParts.join(" ").trim()).slice(0, 80);
+    const normalizedStage = rawStage.toLowerCase();
+    const stage = SAFE_FEATURE_STAGES.has(normalizedStage)
+      ? rawStage
+      : undefined;
     return {
-      present: stage?.toLowerCase() !== "removed",
+      present: normalizedStage !== "removed",
       stage,
     };
   }
@@ -126,53 +173,104 @@ function defaultStatMtimeMs(filePath: string): number | undefined {
   }
 }
 
+export function codexAuthenticationPresent(options: CodexAuthenticationOptions = {}): boolean {
+  const env = options.env ?? process.env;
+  if (env.OPENAI_API_KEY?.trim()) return true;
+  const homeDir = options.homeDir ?? os.homedir();
+  const configuredHome = env.CODEX_HOME?.trim();
+  const codexHome = configuredHome
+    ? path.resolve(configuredHome.replace(/^~(?=$|[/\\])/, homeDir))
+    : path.join(homeDir, ".codex");
+  try {
+    const content = (options.readAuthFile ?? ((authPath) => fs.readFileSync(authPath, "utf-8")))(
+      path.join(codexHome, "auth.json"),
+    ).trim();
+    return content.length > 0 && content !== "{}";
+  } catch {
+    return false;
+  }
+}
+
 export function inspectCodexInstallation(
   options: InspectCodexInstallationOptions = {},
 ): CodexInstallationStatus {
-  const requested = options.requested
-    ?? process.env.HOMERAIL_CODEX_BIN
-    ?? process.env.CODEX_BIN_PATH
-    ?? "codex";
-  const resolveBinary = options.resolveBinary ?? ((value?: string) => resolveCodexBinary(value));
-  const runCommand = options.runCommand ?? ((command, args) => runCodexCommandSync(command, args));
+  const env = options.env ?? process.env;
+  const homeDir = options.homeDir ?? os.homedir();
+  const requested = [
+    options.requested,
+    env.HOMERAIL_CODEX_BIN,
+    env.CODEX_BIN_PATH,
+  ].find((value) => typeof value === "string" && value.trim())?.trim() ?? "codex";
+  const resolveBinary = options.resolveBinary
+    ?? ((value?: string) => resolveUsableCodexBinary(value, { env, homeDir }));
+  const runCommand = options.runCommand
+    ?? ((command, args) => runCodexCommandSync(command, args, { env }));
+  const loggedIn = (options.authPresent
+    ?? (() => codexAuthenticationPresent({ env, homeDir })))();
+  const authDiagnostics = loggedIn
+    ? []
+    : [diagnostic("codex_auth_missing", "Codex credentials were not found for this user.")];
   const resolved = resolveBinary(requested);
   if (!resolved) {
     return {
       available: false,
-      binary: requested,
+      logged_in: loggedIn,
+      binary: codexBinaryDisplayPath(requested, { homeDir }),
       live_voice: emptyCapability("missing"),
+      diagnostics: [
+        diagnostic("codex_binary_not_found", "Codex CLI was not found in the configured or standard install locations."),
+        ...authDiagnostics,
+      ],
     };
   }
 
-  const versionResult = runCommand(resolved.command, ["--version"]);
-  const version = (versionResult.stdout || "").trim().split(/\r?\n/)[0] || undefined;
+  const versionResult = resolved.probe ?? runCommand(resolved.command, ["--version"]);
+  const rawVersion = (versionResult.stdout || "").trim().split(/\r?\n/)[0]?.slice(0, 512) || "";
+  const binary = codexBinaryDisplayPath(resolved.command, { homeDir });
   if (versionResult.status !== 0) {
     return {
       available: false,
-      version,
-      binary: resolved.command,
-      live_voice: emptyCapability("missing"),
+      logged_in: loggedIn,
+      binary,
+      live_voice: emptyCapability("unusable"),
+      diagnostics: [
+        diagnostic("codex_binary_unusable", "Codex CLI was found but could not be executed."),
+        ...authDiagnostics,
+      ],
     };
   }
 
-  const semantic = parseCodexVersion(version ?? "");
+  const semantic = parseCodexVersion(rawVersion);
   if (!semantic) {
     return {
       available: true,
-      version,
-      binary: resolved.command,
+      logged_in: loggedIn,
+      binary,
       live_voice: emptyCapability("unparseable"),
+      diagnostics: [
+        ...authDiagnostics,
+        diagnostic("codex_version_unparseable", "Codex CLI returned an unsupported version format."),
+      ],
     };
   }
 
+  const version = `codex-cli ${semantic.raw}`;
   const minimum = parseCodexVersion(`codex-cli ${CODEX_LIVE_VOICE_MINIMUM_VERSION}`)!;
   if (!versionAtLeast(semantic, minimum)) {
     return {
       available: true,
+      logged_in: loggedIn,
       version,
       semantic_version: semantic.raw,
-      binary: resolved.command,
+      binary,
       live_voice: emptyCapability("too_old"),
+      diagnostics: [
+        ...authDiagnostics,
+        diagnostic(
+          "codex_version_too_old",
+          `Codex ${semantic.raw} is older than the Live Voice minimum ${CODEX_LIVE_VOICE_MINIMUM_VERSION}.`,
+        ),
+      ],
     };
   }
 
@@ -191,21 +289,30 @@ export function inspectCodexInstallation(
   if (!feature.present) {
     return {
       available: true,
+      logged_in: loggedIn,
       version,
       semantic_version: semantic.raw,
-      binary: resolved.command,
+      binary,
       live_voice: {
         ...emptyCapability("feature_missing"),
         ...(feature.stage ? { stage: feature.stage } : {}),
       },
+      diagnostics: [
+        ...authDiagnostics,
+        diagnostic(
+          "codex_live_voice_feature_missing",
+          `Codex does not expose the required ${CODEX_LIVE_VOICE_FEATURE} feature.`,
+        ),
+      ],
     };
   }
 
   return {
     available: true,
+    logged_in: loggedIn,
     version,
     semantic_version: semantic.raw,
-    binary: resolved.command,
+    binary,
     live_voice: {
       supported: true,
       minimum_version: CODEX_LIVE_VOICE_MINIMUM_VERSION,
@@ -216,6 +323,7 @@ export function inspectCodexInstallation(
       default_voice: DEFAULT_CODEX_LIVE_VOICE_V3_VOICE,
       ...(feature.stage ? { stage: feature.stage } : {}),
     },
+    diagnostics: authDiagnostics,
   };
 }
 
