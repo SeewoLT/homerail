@@ -1,6 +1,6 @@
 /**
  * Cross-version compatibility tests.
- * @version 0.1.0-alpha.1
+ * @version 0.1.0-alpha.2
  */
 
 import { describe, it, expect } from "vitest";
