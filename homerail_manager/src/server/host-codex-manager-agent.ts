@@ -12,6 +12,7 @@ import {
   codexCommandForSpawn,
   codexCommandEnvironment,
   resolveUsableCodexBinary,
+  terminateCodexProcess,
 } from "./codex-binary.js";
 import {
   readWidgetFile,
@@ -2911,7 +2912,7 @@ class HostCodexAppServerAdapter {
     this.rl = null;
     try {
       this.process?.stdin?.end();
-      this.process?.kill("SIGTERM");
+      if (this.process) terminateCodexProcess(this.process, this.codexNeedsShell);
     } catch {
       // Ignore.
     }

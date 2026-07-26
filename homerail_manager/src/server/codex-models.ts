@@ -1,6 +1,5 @@
 import {
   spawn,
-  spawnSync,
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
@@ -10,6 +9,7 @@ import {
   codexCommandForSpawn,
   codexCommandEnvironment,
   resolveUsableCodexBinary,
+  terminateCodexProcess,
   type CodexBinaryResolution,
 } from "./codex-binary.js";
 import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
@@ -115,20 +115,6 @@ function errorMessage(value: unknown): string {
   return stringValue(raw?.message) || stringValue(value) || "Codex app-server request failed";
 }
 
-function terminateCodexProcess(
-  child: ChildProcessWithoutNullStreams,
-  resolution: CodexBinaryResolution,
-): void {
-  if (process.platform === "win32" && resolution.needsShell && child.pid) {
-    const result = spawnSync("taskkill.exe", ["/pid", String(child.pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    if (result.status === 0) return;
-  }
-  if (!child.killed) child.kill();
-}
-
 function queryCodexModels(
   resolution: CodexBinaryResolution,
   options: CodexModelListOptions,
@@ -169,7 +155,7 @@ function queryCodexModels(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      terminateCodexProcess(child, resolution);
+      terminateCodexProcess(child, resolution.needsShell);
       if (error) reject(error);
       else resolve(catalog ?? { binary: resolution.command, models: [] });
     }

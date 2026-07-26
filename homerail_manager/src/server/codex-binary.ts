@@ -1,4 +1,8 @@
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import {
+  spawnSync,
+  type ChildProcess,
+  type SpawnSyncReturns,
+} from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,6 +36,11 @@ export interface CodexCommandEnvironmentOptions {
   nodeExecPath?: string;
 }
 
+export interface CodexProcessTerminateOptions {
+  platform?: NodeJS.Platform;
+  spawnSyncImpl?: typeof spawnSync;
+}
+
 export interface CodexUsableBinaryResolveOptions extends CodexBinaryResolveOptions {
   nodeExecPath?: string;
   runCommand?: (
@@ -62,6 +71,26 @@ export function codexCommandForSpawn(
 ): string {
   if (!windowsCommandNeedsShell(command, platform) || !/\s/.test(command)) return command;
   return `"${command}"`;
+}
+
+export function terminateCodexProcess(
+  child: ChildProcess,
+  needsShell: boolean,
+  options: CodexProcessTerminateOptions = {},
+): void {
+  const platform = options.platform ?? process.platform;
+  if (isWindows(platform) && needsShell && child.pid) {
+    const result = (options.spawnSyncImpl ?? spawnSync)(
+      "taskkill.exe",
+      ["/pid", String(child.pid), "/T", "/F"],
+      {
+        stdio: "ignore",
+        windowsHide: true,
+      },
+    );
+    if (result.status === 0) return;
+  }
+  if (!child.killed) child.kill("SIGTERM");
 }
 
 function windowsExecutableNames(command: string, platform: NodeJS.Platform): string[] {

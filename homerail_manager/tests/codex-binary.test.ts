@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ChildProcess } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,6 +11,7 @@ import {
   resolveCodexBinary,
   resolveUsableCodexBinary,
   runCodexCommandSync,
+  terminateCodexProcess,
 } from "../src/server/codex-binary.js";
 
 function fakeExistingFiles(
@@ -342,6 +344,40 @@ describe("resolveCodexBinary", () => {
       .toBe("C:\\Tools\\codex.cmd");
     expect(codexCommandForSpawn("/Users/Alice Smith/bin/codex", "darwin"))
       .toBe("/Users/Alice Smith/bin/codex");
+  });
+
+  it("terminates the full process tree for a shell-backed Windows shim", () => {
+    const taskkillCalls: Array<{ command: string; args: string[] }> = [];
+    let directKillCalled = false;
+    const child = {
+      pid: 321,
+      killed: false,
+      kill: () => {
+        directKillCalled = true;
+        return true;
+      },
+    } as unknown as ChildProcess;
+
+    terminateCodexProcess(child, true, {
+      platform: "win32",
+      spawnSyncImpl: ((command, args) => {
+        taskkillCalls.push({ command, args: args ?? [] });
+        return {
+          pid: 1,
+          output: [null, null, null],
+          stdout: null,
+          stderr: null,
+          status: 0,
+          signal: null,
+        };
+      }) as typeof import("node:child_process").spawnSync,
+    });
+
+    expect(taskkillCalls).toEqual([{
+      command: "taskkill.exe",
+      args: ["/pid", "321", "/T", "/F"],
+    }]);
+    expect(directKillCalled).toBe(false);
   });
 });
 

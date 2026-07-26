@@ -5,6 +5,7 @@ import {
   codexCommandForSpawn,
   codexCommandEnvironment,
   resolveUsableCodexBinary,
+  terminateCodexProcess,
 } from "./codex-binary.js";
 import { managerAgentChildEnv } from "./host-codex-manager-agent.js";
 import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
@@ -45,6 +46,7 @@ export class CodexAppServerClient {
   private pending = new Map<number, PendingRequest>();
   private listeners = new Set<(message: CodexAppServerMessage) => void>();
   private closing = false;
+  private childNeedsShell = false;
   private readonly requestTimeoutMs: number;
   private readonly options: CodexAppServerClientOptions;
 
@@ -68,6 +70,7 @@ export class CodexAppServerClient {
     if (!resolved) throw new Error(codexBinaryNotFoundMessage(requested));
 
     this.closing = false;
+    this.childNeedsShell = resolved.needsShell;
     this.child = spawn(
       codexCommandForSpawn(resolved.command),
       this.options.args ?? ["app-server"],
@@ -164,11 +167,12 @@ export class CodexAppServerClient {
     this.readline = null;
     try {
       this.child?.stdin?.end();
-      this.child?.kill("SIGTERM");
+      if (this.child) terminateCodexProcess(this.child, this.childNeedsShell);
     } catch {
       // Best effort.
     }
     this.child = null;
+    this.childNeedsShell = false;
     this.rejectPending("Codex app-server closed");
   }
 
