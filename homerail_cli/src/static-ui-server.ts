@@ -216,7 +216,19 @@ function handleWebSocket(req: http.IncomingMessage, socket: net.Socket, head: Bu
   // stream and Voice ASR's same-origin realtime endpoint.
   const target = new URL(MANAGER_WS);
   const request = target.protocol === "wss:" ? https.request : http.request;
-  const proxyReq = request(
+  let proxySocket: net.Socket | undefined;
+  let proxyReq: http.ClientRequest | undefined;
+  const destroyUpstream = (): void => {
+    if (proxySocket && !proxySocket.destroyed) {
+      proxySocket.destroy();
+      return;
+    }
+    if (proxyReq && !proxyReq.destroyed) proxyReq.destroy();
+  };
+  socket.on("error", destroyUpstream);
+  socket.on("close", destroyUpstream);
+
+  proxyReq = request(
     {
       method: "GET",
       protocol: target.protocol === "ws:" ? "http:" : "https:",
@@ -225,11 +237,22 @@ function handleWebSocket(req: http.IncomingMessage, socket: net.Socket, head: Bu
       path: req.url,
       headers: { ...req.headers, host: target.host },
     },
-    () => {
-      /* upgrades don't get a normal response */
+    (proxyRes) => {
+      proxyRes.resume();
+      if (!socket.destroyed) socket.destroy();
     },
   );
-  proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+  proxyReq.on("upgrade", (proxyRes, upgradedSocket, proxyHead) => {
+    proxySocket = upgradedSocket;
+    const destroyClient = (): void => {
+      if (!socket.destroyed) socket.destroy();
+    };
+    upgradedSocket.on("error", destroyClient);
+    upgradedSocket.on("close", destroyClient);
+    if (socket.destroyed) {
+      upgradedSocket.destroy();
+      return;
+    }
     socket.write(
       `HTTP/1.1 101 Switching Protocols\r\n` +
         Object.entries(proxyRes.headers)
@@ -237,11 +260,14 @@ function handleWebSocket(req: http.IncomingMessage, socket: net.Socket, head: Bu
           .join("\r\n") +
         "\r\n\r\n",
     );
-    proxySocket.write(proxyHead);
-    proxySocket.pipe(socket);
-    socket.pipe(proxySocket);
+    if (proxyHead.length > 0) socket.write(proxyHead);
+    if (head.length > 0) upgradedSocket.write(head);
+    upgradedSocket.pipe(socket);
+    socket.pipe(upgradedSocket);
   });
-  proxyReq.on("error", () => socket.destroy());
+  proxyReq.on("error", () => {
+    if (!socket.destroyed) socket.destroy();
+  });
   proxyReq.end();
 }
 
