@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import {
   codexBinaryNotFoundMessage,
+  codexCommandForSpawn,
   codexCommandEnvironment,
   resolveUsableCodexBinary,
 } from "./codex-binary.js";
@@ -68,7 +69,7 @@ export class CodexAppServerClient {
 
     this.closing = false;
     this.child = spawn(
-      resolved.command,
+      codexCommandForSpawn(resolved.command),
       this.options.args ?? ["app-server"],
       {
         cwd: this.options.cwd,

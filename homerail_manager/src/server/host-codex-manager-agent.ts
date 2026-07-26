@@ -9,6 +9,7 @@ import { repoRoot, resolveAssetDirectory } from "../assets/root.js";
 import { MANAGER_RUNTIME_VERSION } from "../runtime-version.js";
 import {
   codexBinaryNotFoundMessage,
+  codexCommandForSpawn,
   codexCommandEnvironment,
   resolveUsableCodexBinary,
 } from "./codex-binary.js";
@@ -2572,7 +2573,9 @@ class HostCodexAppServerAdapter {
       return;
     }
     try {
-      this.process = spawn(this.codexBin, _buildCodexAppServerArgsForTest(), {
+      this.process = spawn(codexCommandForSpawn(
+        this.codexBin,
+      ), _buildCodexAppServerArgsForTest(), {
         stdio: ["pipe", "pipe", "pipe"],
         env: this.buildEnv(context),
         cwd: context.workspace ?? process.cwd(),

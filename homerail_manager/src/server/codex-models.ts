@@ -7,6 +7,7 @@ import {
 
 import {
   codexBinaryNotFoundMessage,
+  codexCommandForSpawn,
   codexCommandEnvironment,
   resolveUsableCodexBinary,
   type CodexBinaryResolution,
@@ -141,7 +142,9 @@ function queryCodexModels(
         shell: resolution.needsShell,
         windowsHide: true,
       };
-      child = (options.spawnImpl ?? spawn)(resolution.command, ["app-server"], {
+      child = (options.spawnImpl ?? spawn)(codexCommandForSpawn(
+        resolution.command,
+      ), ["app-server"], {
         ...spawnOptions,
         stdio: ["pipe", "pipe", "pipe"],
       }) as ChildProcessWithoutNullStreams;

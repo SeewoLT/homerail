@@ -56,6 +56,14 @@ function windowsCommandNeedsShell(command: string, platform = process.platform):
   return isWindows(platform) && /\.(cmd|bat)$/i.test(command);
 }
 
+export function codexCommandForSpawn(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (!windowsCommandNeedsShell(command, platform) || !/\s/.test(command)) return command;
+  return `"${command}"`;
+}
+
 function windowsExecutableNames(command: string, platform: NodeJS.Platform): string[] {
   if (!isWindows(platform)) return [command];
   if (/\.(exe|cmd|bat)$/i.test(command)) return [command];
@@ -396,7 +404,10 @@ export function runCodexCommandSync(
   const options: CodexCommandRunOptions =
     typeof optionsOrTimeout === "number" ? { timeoutMs: optionsOrTimeout } : optionsOrTimeout;
   try {
-    return (options.spawnSyncImpl ?? spawnSync)(command, args, {
+    return (options.spawnSyncImpl ?? spawnSync)(codexCommandForSpawn(
+      command,
+      options.platform ?? process.platform,
+    ), args, {
       timeout: options.timeoutMs ?? 5_000,
       encoding: "utf-8",
       env: codexCommandEnvironment(command, options.env ?? process.env, {

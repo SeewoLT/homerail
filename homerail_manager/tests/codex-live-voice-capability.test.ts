@@ -1,4 +1,5 @@
 import type { SpawnSyncReturns } from "node:child_process";
+import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   _clearCodexLiveVoiceCapabilityCacheForTest,
@@ -255,7 +256,7 @@ describe("inspectCodexInstallation", () => {
     });
 
     const serialized = JSON.stringify(installation);
-    expect(installation.binary).toBe("~/[REDACTED]/codex");
+    expect(installation.binary).toBe(path.join("~", "[REDACTED]", "codex"));
     expect(installation.version).toBeUndefined();
     expect(serialized).not.toContain("path-secret");
     expect(serialized).not.toContain("stdout-secret");

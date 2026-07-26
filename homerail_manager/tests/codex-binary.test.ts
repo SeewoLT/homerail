@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   codexBinaryNotFoundMessage,
+  codexCommandForSpawn,
   codexCommandEnvironment,
   resolveCodexBinary,
   resolveUsableCodexBinary,
@@ -331,6 +332,16 @@ describe("resolveCodexBinary", () => {
         PATH: `${path.posix.dirname(command)}:/Applications/HomeRail.app/Contents/Resources/node-bin:/usr/bin:/bin`,
       }),
     });
+  });
+
+  it("quotes a shell-backed Windows shim path before spawning it", () => {
+    const command = "C:\\Users\\Alice Smith\\AppData\\Roaming\\npm\\codex.cmd";
+
+    expect(codexCommandForSpawn(command, "win32")).toBe(`"${command}"`);
+    expect(codexCommandForSpawn("C:\\Tools\\codex.cmd", "win32"))
+      .toBe("C:\\Tools\\codex.cmd");
+    expect(codexCommandForSpawn("/Users/Alice Smith/bin/codex", "darwin"))
+      .toBe("/Users/Alice Smith/bin/codex");
   });
 });
 

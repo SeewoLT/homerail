@@ -187,7 +187,11 @@ describe("Codex model catalog", () => {
 
     expect(spawnOptions).toMatchObject({
       env: expect.objectContaining({
-        PATH: `${path.posix.dirname(command)}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+        PATH: [
+          path.dirname(command),
+          path.dirname(process.execPath),
+          "/usr/bin:/bin",
+        ].join(path.delimiter),
       }),
     });
   });
