@@ -42,7 +42,8 @@ const hasActiveRuns = computed(() => activeRunCount.value > 0)
 const hasWaitingRuns = computed(() => waitingRunCount.value > 0)
 const runtimeRunCount = computed(() => activeRunCount.value + waitingRunCount.value)
 const desktopUpdateStatus = ref<DesktopUpdateStatus | null>(null)
-const updateInstalling = ref(false)
+const installRequestPending = ref(false)
+const retryRequestPending = ref(false)
 let removeUpdateListener: (() => void) | null = null
 
 const runtimeTitle = computed(() => {
@@ -56,12 +57,46 @@ const runtimeTitle = computed(() => {
   if (hasWaitingRuns.value) return t('shell.dashboard.waiting', { count: waitingRunCount.value })
   return t('shell.dashboard.title')
 })
-const downloadedUpdate = computed(() =>
-  Boolean(desktopUpdateStatus.value?.supported && desktopUpdateStatus.value.state === 'downloaded'),
+const installFailure = computed(() =>
+  Boolean(
+    desktopUpdateStatus.value?.supported
+    && desktopUpdateStatus.value.state === 'error'
+    && desktopUpdateStatus.value.installStartedAt,
+  ),
+)
+const updateInstalling = computed(() =>
+  installRequestPending.value || desktopUpdateStatus.value?.state === 'installing',
+)
+const updateActionPending = computed(() =>
+  updateInstalling.value || retryRequestPending.value,
+)
+const updateRetrySupported = computed(() =>
+  Boolean(desktopBridge()?.checkForUpdates),
+)
+const updateActionVisible = computed(() =>
+  Boolean(
+    desktopUpdateStatus.value?.supported
+    && (
+      desktopUpdateStatus.value.state === 'downloaded'
+      || desktopUpdateStatus.value.state === 'installing'
+      || installFailure.value
+    ),
+  ),
 )
 const updateButtonTitle = computed(() => {
+  if (retryRequestPending.value) return t('shell.updates.checking')
+  if (installFailure.value) {
+    return desktopUpdateStatus.value?.error || t('shell.updates.failed')
+  }
+  if (updateInstalling.value) return t('shell.updates.installing')
   const version = desktopUpdateStatus.value?.update?.version
   return version ? t('shell.updates.downloadedVersion', { version }) : t('shell.updates.downloaded')
+})
+const updateButtonText = computed(() => {
+  if (retryRequestPending.value) return t('shell.updates.checking')
+  if (installFailure.value) return t('shell.updates.retry')
+  if (updateInstalling.value) return t('shell.updates.installing')
+  return t('shell.updates.restart')
 })
 
 async function refreshActiveRuns(): Promise<void> {
@@ -110,12 +145,16 @@ function startDesktopUpdateWatcher(): void {
 
   removeUpdateListener = bridge.onUpdateStatus?.((status) => {
     desktopUpdateStatus.value = status
+    if (status.state === 'installing' || status.state === 'error') {
+      installRequestPending.value = false
+    }
+    retryRequestPending.value = false
   }) ?? null
 
   void bridge.updateStatus()
     .then((status) => {
       desktopUpdateStatus.value = status
-      if (status.state === 'downloaded' || !bridge.checkForUpdates) return
+      if (status.state === 'downloaded' || status.state === 'installing' || !bridge.checkForUpdates) return
       void bridge.checkForUpdates()
         .then((nextStatus) => {
           desktopUpdateStatus.value = nextStatus
@@ -134,16 +173,55 @@ function stopDesktopUpdateWatcher(): void {
 
 async function installDesktopUpdate(): Promise<void> {
   const bridge = desktopBridge()
-  if (!bridge?.installUpdate || updateInstalling.value) return
-  updateInstalling.value = true
+  const downloadedStatus = desktopUpdateStatus.value
+  if (
+    !bridge?.installUpdate
+    || updateInstalling.value
+    || downloadedStatus?.state !== 'downloaded'
+  ) return
+  installRequestPending.value = true
   try {
-    const status = await bridge.installUpdate()
-    if (status.state !== 'downloaded') {
-      updateInstalling.value = false
+    desktopUpdateStatus.value = await bridge.installUpdate()
+  } catch (error) {
+    desktopUpdateStatus.value = {
+      ...downloadedStatus,
+      state: 'error',
+      error: error instanceof Error ? error.message : String(error),
+      installStartedAt: Date.now(),
     }
-  } catch {
-    updateInstalling.value = false
+  } finally {
+    installRequestPending.value = false
   }
+}
+
+async function retryDesktopUpdateCheck(): Promise<void> {
+  const bridge = desktopBridge()
+  const failedStatus = desktopUpdateStatus.value
+  if (
+    !bridge?.checkForUpdates
+    || retryRequestPending.value
+    || failedStatus?.state !== 'error'
+    || !failedStatus.installStartedAt
+  ) return
+  retryRequestPending.value = true
+  try {
+    desktopUpdateStatus.value = await bridge.checkForUpdates()
+  } catch (error) {
+    desktopUpdateStatus.value = {
+      ...failedStatus,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  } finally {
+    retryRequestPending.value = false
+  }
+}
+
+function handleDesktopUpdateAction(): void {
+  if (installFailure.value) {
+    void retryDesktopUpdateCheck()
+    return
+  }
+  void installDesktopUpdate()
 }
 
 onMounted(() => {
@@ -197,14 +275,17 @@ onBeforeUnmount(() => {
     <div class="agent-mode-topbar__right flex flex-shrink-0 items-center gap-2">
       <slot name="right" />
       <button
-        v-if="downloadedUpdate"
+        v-if="updateActionVisible"
         class="flex h-9 items-center gap-2 rounded-full border border-[var(--hr-accent-border)] bg-[var(--hr-accent-soft)] px-3 text-sm font-medium text-[var(--hr-accent)] transition-colors hover:opacity-85"
         :title="updateButtonTitle"
         type="button"
-        @click="installDesktopUpdate"
+        data-testid="desktop-update-install"
+        :aria-busy="updateActionPending"
+        :disabled="updateActionPending || (installFailure && !updateRetrySupported)"
+        @click="handleDesktopUpdateAction"
       >
-        <RotateCcw class="h-4 w-4" :class="updateInstalling ? 'animate-spin' : ''" />
-        {{ t('shell.updates.restart') }}
+        <RotateCcw class="h-4 w-4" :class="updateActionPending ? 'animate-spin' : ''" />
+        {{ updateButtonText }}
       </button>
       <button
         v-if="showRuntime"

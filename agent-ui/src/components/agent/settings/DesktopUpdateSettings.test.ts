@@ -96,6 +96,41 @@ describe('DesktopUpdateSettings', () => {
     expect(setUpdateChannel).not.toHaveBeenCalled()
   })
 
+  it('shows download progress reported by the desktop updater', async () => {
+    mount({
+      updateStatus: vi.fn().mockResolvedValue(updateStatus({
+        state: 'downloading',
+        downloadProgress: {
+          percent: 37.4,
+          transferred: 374,
+          total: 1000,
+          bytesPerSecond: 128,
+        },
+      })),
+      setUpdateChannel: vi.fn(),
+    })
+    await flushUi()
+
+    expect(root?.querySelector('[data-testid="desktop-update-state"]')?.textContent)
+      .toContain('Downloading update… 37%')
+    const progress = root?.querySelector('[data-testid="desktop-update-progress"]')
+    expect(progress?.getAttribute('aria-valuenow')).toBe('37')
+  })
+
+  it('keeps channel switching disabled while the installer takes control', async () => {
+    const setUpdateChannel = vi.fn()
+    mount({
+      updateStatus: vi.fn().mockResolvedValue(updateStatus({ state: 'installing' })),
+      setUpdateChannel,
+    })
+    await flushUi()
+
+    const earlyAccess = root?.querySelector<HTMLButtonElement>('[data-testid="desktop-update-channel-early-access"]')
+    expect(earlyAccess?.disabled).toBe(true)
+    expect(root?.querySelector('[data-testid="desktop-update-state"]')?.textContent)
+      .toContain('Installing update')
+  })
+
   it('shows a channel switch failure instead of swallowing it', async () => {
     mount({
       updateStatus: vi.fn().mockResolvedValue(updateStatus()),
