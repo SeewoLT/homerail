@@ -132,6 +132,14 @@ function expectedPayloadPaths(manifest: HomerailPluginManifestV1): string[] {
     .sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
 }
 
+/**
+ * Bumped when a compiled SDK export changes its runtime return type or
+ * signature in a way that is invisible to TypeScript (types resolve from
+ * `src/`, runtime loads `dist/`). The Manager asserts this at startup so a
+ * stale `dist/` fails fast instead of rejecting activities mid-run.
+ */
+export const HOMERAIL_PLUGIN_SDK_ABI_VERSION = 1 as const;
+
 export function validatePluginSkill(
   skillId: string,
   contentValue: Buffer | string,

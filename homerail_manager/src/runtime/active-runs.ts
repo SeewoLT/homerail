@@ -1186,9 +1186,15 @@ export function restoreActiveRun(
   return { status: "restored", run, demotedFromRunning };
 }
 
+export interface ColdRecoveryFailure {
+  runId: string;
+  reason: string;
+  demotedNodes: string[];
+}
+
 export interface ColdRecoverySummary {
   recovered: string[];
-  failed: string[];
+  failed: ColdRecoveryFailure[];
   skipped: string[];
 }
 
@@ -1206,7 +1212,13 @@ export function recoverAllActiveRuns(): ColdRecoverySummary {
       const result = restoreActiveRun(metadata);
       if (result.status === "restored") {
         if (result.run.status === "failed") {
-          summary.failed.push(runId);
+          summary.failed.push({
+            runId,
+            reason: result.demotedFromRunning.length > 0
+              ? `orphaned running nodes demoted to failed: ${result.demotedFromRunning.join(", ")}`
+              : "run terminal after recovery (blocked by failed dependency)",
+            demotedNodes: result.demotedFromRunning,
+          });
         } else {
           summary.recovered.push(runId);
         }
