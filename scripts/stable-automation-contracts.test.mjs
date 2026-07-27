@@ -13,6 +13,12 @@ test("stable runner uses the deployed release and never starts a transient Manag
   assert.match(bootstrap, /HOMERAIL_STABLE_RELEASE=.*readlink -f.*current/);
   assert.match(bootstrap, /dag-mutation\.token/);
   assert.match(runner, /\$HOMERAIL_STABLE_RELEASE\/scripts\/configure-/);
+  assert.match(runner, /HOMERAIL_PR_REVIEW_TIMEOUT_SECONDS:-4200/);
+  assert.match(runner, /collect_run_evidence/);
+  assert.match(runner, /dag quick "\$run_id" --events 120/);
+  assert.match(runner, /dag chats "\$run_id" --tools 50 --raw-tools/);
+  assert.match(runner, /dag handoffs "\$run_id" --content-limit 8000/);
+  assert.match(runner, /--run-id "\$RUN_ID"/);
   assert.doesNotMatch(runner, /npm run install:all|build:packages|run-pr-review-live-runner|docker compose/);
   assert.match(reviewWorkflow, /adapter_mode=release/);
   assert.match(reviewWorkflow, /steps\.stable\.outputs\.release }}\/scripts\/run-pr-review-stable-runner\.sh/);
@@ -89,7 +95,7 @@ test("Auto Fix keeps model selection local and publishes only a human-gated Draf
     "inline Auto Fix input must be materialized before checkpoint hydration",
   );
   assert.match(stableRunner, /candidate-v2\.json candidate-v2\.patch candidate-v1\.json candidate-v1\.patch/);
-  assert.match(stableRunner, /stable_hr stop "\$HOMERAIL_STABLE_RUN_ID"/);
+  assert.match(stableRunner, /stable_hr stop "\$RUN_ID"/);
   assert.match(workflow, /Finalize durable candidate checkpoint/);
   assert.match(workflow, /steps\.publish\.outcome/);
   assert.doesNotMatch(stableRunner, /start --host|install:all|build:packages/);

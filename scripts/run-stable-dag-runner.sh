@@ -11,7 +11,9 @@ case "$TASK" in
     INPUT="${HOMERAIL_PR_REVIEW_INPUT:-}"
     INPUT_FILE="${HOMERAIL_PR_REVIEW_INPUT_FILE:-}"
     ARTIFACT_DIR="${HOMERAIL_PR_REVIEW_ARTIFACT_DIR:-${GITHUB_WORKSPACE:-$PWD}/artifacts/pr-review}"
-    TIMEOUT_SECONDS="${HOMERAIL_PR_REVIEW_TIMEOUT_SECONDS:-5400}"
+    # Leave twenty minutes inside the 90-minute Actions job for deterministic
+    # cancellation, artifact retrieval, diagnostics, and upload.
+    TIMEOUT_SECONDS="${HOMERAIL_PR_REVIEW_TIMEOUT_SECONDS:-4200}"
     PROFILE_SCRIPT="$HOMERAIL_STABLE_RELEASE/scripts/configure-pr-review-runtime-profile.mjs"
     ARTIFACT_NAMES=(pr-review.json pr-review.md pr-privacy-review.json)
     ;;
@@ -35,7 +37,7 @@ esac
 stable_hr dag sync "$TASK" >/dev/null
 PROFILE_ID="$("$HOMERAIL_STABLE_NODE" "$PROFILE_SCRIPT")"
 
-if [ -z "$INPUT_FILE" ] && [ "$TASK" = "auto-fix" ] && [ -n "$INPUT" ]; then
+if [ -z "$INPUT_FILE" ] && [ -n "$INPUT" ]; then
   INPUT_FILE="$ARTIFACT_DIR/input.json"
   mkdir -p "$ARTIFACT_DIR"
   printf '%s\n' "$INPUT" >"$INPUT_FILE"
@@ -66,16 +68,33 @@ COMMAND_TMP="$COMMAND_PATH.tmp"
 STDERR_PATH="$ARTIFACT_DIR/command.stderr.log"
 rm -f "$COMMAND_PATH" "$COMMAND_TMP" "$STDERR_PATH"
 
+RUN_ID="${HOMERAIL_STABLE_RUN_ID:-$(
+  "$HOMERAIL_STABLE_NODE" -e 'process.stdout.write(require("node:crypto").randomUUID())'
+)}"
+
+collect_run_evidence() {
+  local run_id="$1"
+  stable_hr dag quick "$run_id" --events 120 >"$ARTIFACT_DIR/dag-quick.txt" 2>&1 || true
+  stable_hr dag chats "$run_id" --tools 50 --raw-tools >"$ARTIFACT_DIR/dag-chats.txt" 2>&1 || true
+  stable_hr dag handoffs "$run_id" --content-limit 8000 >"$ARTIFACT_DIR/dag-handoffs.txt" 2>&1 || true
+  for artifact in "${ARTIFACT_NAMES[@]}"; do
+    stable_hr dag artifact "$run_id" "$artifact" --output "$ARTIFACT_DIR/$artifact" >/dev/null 2>&1 || true
+  done
+  if [ "$TASK" = "auto-fix" ]; then
+    for artifact in candidate-v2.json candidate-v2.patch candidate-v1.json candidate-v1.patch; do
+      stable_hr dag artifact "$run_id" "$artifact" --output "$ARTIFACT_DIR/$artifact" >/dev/null 2>&1 || true
+    done
+  fi
+}
+
 RUN_ARGS=(
   --json dag run-template "$TASK"
   --input "$INPUT"
   --profile "$PROFILE_ID"
   --wait
   --timeout "$TIMEOUT_SECONDS"
+  --run-id "$RUN_ID"
 )
-if [ -n "${HOMERAIL_STABLE_RUN_ID:-}" ]; then
-  RUN_ARGS+=(--run-id "$HOMERAIL_STABLE_RUN_ID")
-fi
 if ! stable_hr "${RUN_ARGS[@]}" \
   >"$COMMAND_TMP" 2> >(tee "$STDERR_PATH" >&2); then
   if [ -s "$COMMAND_TMP" ]; then
@@ -83,16 +102,13 @@ if ! stable_hr "${RUN_ARGS[@]}" \
   else
     rm -f "$COMMAND_TMP"
   fi
-  if [ "$TASK" = "auto-fix" ] && [ -n "${HOMERAIL_STABLE_RUN_ID:-}" ]; then
-    stable_hr stop "$HOMERAIL_STABLE_RUN_ID" >/dev/null 2>&1 || true
-    stable_hr dag quick "$HOMERAIL_STABLE_RUN_ID" --events 80 >"$ARTIFACT_DIR/dag-quick.txt" 2>&1 || true
-    stable_hr dag chats "$HOMERAIL_STABLE_RUN_ID" --tools 30 --raw-tools >"$ARTIFACT_DIR/dag-chats.txt" 2>&1 || true
-    stable_hr dag handoffs "$HOMERAIL_STABLE_RUN_ID" --content-limit 4000 >"$ARTIFACT_DIR/dag-handoffs.txt" 2>&1 || true
-    for artifact in candidate-v2.json candidate-v2.patch candidate-v1.json candidate-v1.patch; do
-      stable_hr dag artifact "$HOMERAIL_STABLE_RUN_ID" "$artifact" --output "$ARTIFACT_DIR/$artifact" >/dev/null 2>&1 || true
-    done
+  stable_hr stop "$RUN_ID" >/dev/null 2>&1 || true
+  collect_run_evidence "$RUN_ID"
+  printf '%s\n' "$RUN_ID" >"$ARTIFACT_DIR/run-id.txt"
+  printf '%s\n' "$HOMERAIL_STABLE_REVISION" >"$ARTIFACT_DIR/manager-revision.txt"
+  if [ "$TASK" = "auto-fix" ]; then
     for _attempt in 1 2 3 4 5; do
-      checkpoint_result="$("$HOMERAIL_STABLE_NODE" "$CHECKPOINT_SCRIPT" record "$INPUT_FILE" "$HOMERAIL_STABLE_RUN_ID" 2>/dev/null || true)"
+      checkpoint_result="$("$HOMERAIL_STABLE_NODE" "$CHECKPOINT_SCRIPT" record "$INPUT_FILE" "$RUN_ID" 2>/dev/null || true)"
       if [[ "$checkpoint_result" == *'"recorded":true'* ]]; then
         printf '%s\n' "$checkpoint_result" >"$ARTIFACT_DIR/checkpoint.json"
         break
@@ -105,7 +121,7 @@ fi
 mv "$COMMAND_TMP" "$COMMAND_PATH"
 [ -s "$STDERR_PATH" ] || rm -f "$STDERR_PATH"
 
-RUN_ID="$(
+COMPLETED_RUN_ID="$(
   "$HOMERAIL_STABLE_NODE" -e '
     const fs=require("fs");
     const value=JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
@@ -113,6 +129,11 @@ RUN_ID="$(
     process.stdout.write(value.run_id);
   ' "$COMMAND_PATH"
 )"
+if [ "$COMPLETED_RUN_ID" != "$RUN_ID" ]; then
+  echo "Stable DAG returned run id $COMPLETED_RUN_ID instead of requested id $RUN_ID." >&2
+  collect_run_evidence "$RUN_ID"
+  exit 1
+fi
 RUN_STATUS="$(
   "$HOMERAIL_STABLE_NODE" -e '
     const fs=require("fs");
@@ -122,15 +143,12 @@ RUN_STATUS="$(
 )"
 
 if [ "$RUN_STATUS" != "completed" ]; then
-  stable_hr dag quick "$RUN_ID" --events 80 >"$ARTIFACT_DIR/dag-quick.txt" 2>&1 || true
-  stable_hr dag chats "$RUN_ID" --tools 30 --raw-tools >"$ARTIFACT_DIR/dag-chats.txt" 2>&1 || true
-  stable_hr dag handoffs "$RUN_ID" --content-limit 4000 >"$ARTIFACT_DIR/dag-handoffs.txt" 2>&1 || true
+  collect_run_evidence "$RUN_ID"
   if [ "$TASK" = "auto-fix" ]; then
-    for artifact in candidate-v2.json candidate-v2.patch candidate-v1.json candidate-v1.patch; do
-      stable_hr dag artifact "$RUN_ID" "$artifact" --output "$ARTIFACT_DIR/$artifact" >/dev/null 2>&1 || true
-    done
     "$HOMERAIL_STABLE_NODE" "$CHECKPOINT_SCRIPT" record "$INPUT_FILE" "$RUN_ID" >"$ARTIFACT_DIR/checkpoint.json" || true
   fi
+  printf '%s\n' "$RUN_ID" >"$ARTIFACT_DIR/run-id.txt"
+  printf '%s\n' "$HOMERAIL_STABLE_REVISION" >"$ARTIFACT_DIR/manager-revision.txt"
   echo "$TASK DAG ended with status $RUN_STATUS (run $RUN_ID)." >&2
   exit 1
 fi

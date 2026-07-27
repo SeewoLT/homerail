@@ -45,6 +45,9 @@ function passingReviewReport(): Record<string, unknown> {
       reviewer,
       status: "complete",
       summary: `${reviewer} review complete`,
+      reviewed_files: ["src/run.ts"],
+      unreviewed_files: [],
+      evidence_truncated: false,
       findings: [],
     })),
   };
@@ -60,7 +63,7 @@ function installPrepareCommandStub(
   prepare.gateway_config.command = [
     "node",
     "-e",
-    "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const i=JSON.parse(s),r=Array.isArray(i.request)?i.request.at(-1):undefined,p=r?.input?.payload;if(!p)throw new Error('missing request');process.stdout.write(JSON.stringify({repo:p.repo,pr:p.pr,base:p.base,head:p.head,repository_path:'/workspace/repository',changed_files:['src/run.ts'],diff_stat:'1 file changed',diff_patch:'diff --git a/src/run.ts b/src/run.ts',diff_truncated:" + JSON.stringify(diffTruncated) + ",commit_metadata:[],commit_metadata_truncated:false}))})",
+    "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const i=JSON.parse(s),r=Array.isArray(i.request)?i.request.at(-1):undefined,p=r?.input?.payload;if(!p)throw new Error('missing request');process.stdout.write(JSON.stringify({repo:p.repo,pr:p.pr,base:p.base,head:p.head,repository_path:'/workspace/repository',changed_files:['src/run.ts'],diff_stat:'1 file changed',diff_patch:'diff --git a/src/run.ts b/src/run.ts',diff_chunks:[{index:1,path:'review-evidence/diff-0001.patch',bytes:39,files:['src/run.ts']}],diff_bytes:39,diff_truncated:" + JSON.stringify(diffTruncated) + ",commit_metadata:[],commit_metadata_truncated:false}))})",
   ];
 }
 
@@ -139,6 +142,9 @@ describe("PR Review scenario assets", () => {
       reviewer: "runtime",
       status: "complete",
       summary: "Runtime review complete",
+      reviewed_files: ["src/run.ts"],
+      unreviewed_files: [],
+      evidence_truncated: false,
       findings: [],
     };
     expect(validateJsonContract(result.canonical?.contracts.RuntimeReviewerResult, runtimeResult).valid).toBe(true);
@@ -184,12 +190,12 @@ describe("PR Review scenario assets", () => {
         config: {
           allowed_builtin_tools: ["Glob", "Grep", "LS", "Read"],
           allowed_dag_tools: ["handoff"],
-          workspace_access: { writable_paths: [], readonly_paths: ["repository"] },
+          workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
         },
       });
       expect(nodes.find((node) => node.id === `normalize_${reviewer}_review`)).toMatchObject({
         kind: "command",
-        depends_on: [`${reviewer}_review`],
+        depends_on: expect.arrayContaining([`${reviewer}_review`, "strip_privacy_context"]),
         inputs: expect.arrayContaining([expect.objectContaining({ name: "success", contract })]),
         outputs: [expect.objectContaining({ name: "reviewed", contract: "ReviewerResult" })],
         config: expect.objectContaining({
@@ -203,7 +209,7 @@ describe("PR Review scenario assets", () => {
     expect(nodes.find((node) => node.id === "privacy_review")?.config).toMatchObject({
       allowed_builtin_tools: ["Glob", "Grep", "LS", "Read"],
       allowed_dag_tools: ["handoff"],
-      workspace_access: { writable_paths: [], readonly_paths: ["repository"] },
+      workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
     });
     expect(nodes.find((node) => node.id === "strip_privacy_context")).toMatchObject({
       kind: "command",
@@ -232,7 +238,7 @@ describe("PR Review scenario assets", () => {
         config: expect.objectContaining({
           allowed_builtin_tools: ["Glob", "Grep", "LS", "Read"],
           allowed_dag_tools: ["handoff"],
-          workspace_access: { writable_paths: [], readonly_paths: ["repository"] },
+          workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
         }),
         inputs: expect.arrayContaining([
           expect.objectContaining({ name: "report", contract: "DraftReviewReport" }),
@@ -268,17 +274,17 @@ describe("PR Review scenario assets", () => {
     expect(nodes.find((node) => node.agent === "publisher")?.config).toMatchObject({
       allowed_builtin_tools: [],
       allowed_dag_tools: ["get_graph_context", "handoff"],
-      workspace_access: { writable_paths: [], readonly_paths: ["repository"] },
+      workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
     });
     for (const nodeId of ["synthesize", "coverage_vote", "refine"]) {
       expect(nodes.find((node) => node.id === nodeId)?.config).toMatchObject({
         allowed_builtin_tools: [],
-        workspace_access: { writable_paths: [], readonly_paths: ["repository"] },
+        workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
       });
     }
     for (const node of nodes.filter((node) => node.kind === "agent")) {
       expect(node.config).toMatchObject({
-        workspace_access: { writable_paths: [], readonly_paths: ["repository"] },
+        workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
       });
     }
     const agents = parseWorkflowSource(source).meta.agents ?? {};
@@ -394,6 +400,13 @@ describe("PR Review scenario assets", () => {
       changed_files: ["src/run.ts"],
       diff_stat: "1 file changed",
       diff_patch: "diff --git a/src/run.ts b/src/run.ts",
+      diff_chunks: [{
+        index: 1,
+        path: "review-evidence/diff-0001.patch",
+        bytes: 39,
+        files: ["src/run.ts"],
+      }],
+      diff_bytes: 39,
       diff_truncated: false,
     })).toMatchObject({ valid: true });
     expect(validateJsonContract(contracts.PreparedReviewContext, {
@@ -405,6 +418,13 @@ describe("PR Review scenario assets", () => {
       changed_files: ["src/run.ts"],
       diff_stat: "1 file changed",
       diff_patch: "diff --git a/src/run.ts b/src/run.ts",
+      diff_chunks: [{
+        index: 1,
+        path: "review-evidence/diff-0001.patch",
+        bytes: 39,
+        files: ["src/run.ts"],
+      }],
+      diff_bytes: 39,
       diff_truncated: false,
       commit_metadata: [],
       commit_metadata_truncated: false,
@@ -429,6 +449,13 @@ describe("PR Review scenario assets", () => {
       changed_files: ["src/run.ts"],
       diff_stat: "1 file changed",
       diff_patch: "diff --git a/src/run.ts b/src/run.ts\n... truncated",
+      diff_chunks: [{
+        index: 1,
+        path: "review-evidence/diff-0001.patch",
+        bytes: 39,
+        files: ["src/run.ts"],
+      }],
+      diff_bytes: 50_000_000,
       diff_truncated: true,
     })).toMatchObject({ valid: true });
     const finalReview = {
@@ -532,7 +559,7 @@ describe("PR Review scenario assets", () => {
   }, 30_000);
 
   it.runIf(process.platform !== "win32")(
-    "executes production prepare truncation with deterministic Git output",
+    "splits a large production diff into bounded deterministic evidence chunks",
     () => {
       const cwd = path.join(tmpHome, "prepare-truncation");
       const bin = path.join(cwd, "bin");
@@ -572,6 +599,8 @@ describe("PR Review scenario assets", () => {
         head: string;
         changed_files: string[];
         diff_patch: string;
+        diff_chunks: Array<{ index: number; path: string; bytes: number; files: string[] }>;
+        diff_bytes: number;
         diff_truncated: boolean;
         commit_metadata: Array<{ commit: string; subject: string }>;
         commit_metadata_truncated: boolean;
@@ -579,12 +608,20 @@ describe("PR Review scenario assets", () => {
       expect(context).toMatchObject({
         head,
         changed_files: ["src/quoted.ts"],
-        diff_truncated: true,
+        diff_bytes: 700000,
+        diff_truncated: false,
         commit_metadata: [expect.objectContaining({ commit: head, subject: "Example change" })],
         commit_metadata_truncated: false,
       });
-      expect(context.diff_patch).toContain("HomeRail diff truncated by deterministic evidence limit");
-      expect(context.diff_patch.length).toBeLessThan(500000);
+      expect(context.diff_patch).toContain("HomeRail full diff continues in");
+      expect(context.diff_patch.length).toBeLessThan(150000);
+      expect(context.diff_chunks.length).toBeGreaterThan(1);
+      expect(context.diff_chunks.every((chunk) =>
+        chunk.bytes <= 120000 &&
+        chunk.files.includes("src/quoted.ts") &&
+        fs.existsSync(path.join(cwd, chunk.path))
+      )).toBe(true);
+      expect(context.diff_chunks.reduce((total, chunk) => total + chunk.bytes, 0)).toBe(700000);
       expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(900000);
     },
     30_000,
@@ -801,16 +838,21 @@ describe("PR Review scenario assets", () => {
     });
   });
 
-  it("keeps the trusted manual GitHub adapter thin and the privacy advisory non-blocking", () => {
+  it("keeps the trusted GitHub adapter thin, owner-only, and ready-triggered", () => {
     const workflow = fs.readFileSync(path.resolve(process.cwd(), "..", ".github", "workflows", "pr-review.yml"), "utf8");
     const runner = fs.readFileSync(path.resolve(process.cwd(), "..", "scripts", "run-stable-dag-runner.sh"), "utf8");
     const reviewRunner = fs.readFileSync(path.resolve(process.cwd(), "..", "scripts", "run-pr-review-stable-runner.sh"), "utf8");
     const parsed = parseYaml(workflow) as { jobs: { review: { env: Record<string, string>; steps: Array<{ name: string; env?: Record<string, string> }> } } };
     expect(workflow).toContain("workflow_dispatch:");
-    expect(workflow).not.toContain("pull_request:");
+    expect(workflow).toContain("pull_request:");
+    expect(workflow).toContain("types: [opened, reopened, ready_for_review]");
+    expect(workflow.slice(workflow.indexOf("on:"), workflow.indexOf("permissions:"))).not.toContain("paths-ignore:");
     expect(workflow).not.toContain("pull_request_target:");
     expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow).toContain("github.actor == 'xiaotianfotos'");
+    expect(workflow).toContain("github.event.pull_request.user.login == 'xiaotianfotos'");
+    expect(workflow).toContain("github.event.pull_request.draft == false");
+    expect(workflow).toContain("github.event.pull_request.head.repo.full_name == github.repository");
     expect(workflow).toContain("continue-on-error: true");
     expect(workflow).toContain("Privacy advisory (human inspection only)");
     expect(workflow).toContain("run-pr-review-stable-runner.sh");
@@ -881,6 +923,17 @@ describe("PR Review scenario assets", () => {
       { ...passingReviewReport(), status: "inconclusive" },
       { passed: false, successes: 1, total: 3, threshold: 2 },
     ).status).toBe(0);
+    const incompleteCoverage = passingReviewReport();
+    const firstReviewer = (incompleteCoverage.reviewer_results as Array<Record<string, unknown>>)[0];
+    firstReviewer.unreviewed_files = ["src/missed.ts"];
+    firstReviewer.evidence_truncated = true;
+    const incomplete = runValidator(
+      "completed",
+      incompleteCoverage,
+      { passed: true, successes: 2, total: 3, threshold: 2 },
+    );
+    expect(incomplete.status).toBe(1);
+    expect(incomplete.stderr).toContain("left files unreviewed");
 
     const invalid = runValidator(
       "completed",
@@ -953,6 +1006,9 @@ describe("PR Review scenario assets", () => {
         reviewer: category,
         status: "complete",
         summary: `${category} review complete`,
+        reviewed_files: ["src/run.ts"],
+        unreviewed_files: [],
+        evidence_truncated: false,
         findings: [],
       });
     }
@@ -1067,6 +1123,9 @@ describe("PR Review scenario assets", () => {
       reviewer,
       status: "failed",
       summary: `${reviewer} reviewer refused truncated diff evidence`,
+      reviewed_files: [],
+      unreviewed_files: ["src/run.ts"],
+      evidence_truncated: true,
       findings: [],
     }));
     handoffActiveRun(runId, "synthesize", "drafted", {
@@ -1147,6 +1206,9 @@ describe("PR Review scenario assets", () => {
           reviewer: category,
           status: "complete",
           summary: `${category} review complete`,
+          reviewed_files: ["src/run.ts"],
+          unreviewed_files: [],
+          evidence_truncated: false,
           findings: [],
         },
       );
@@ -1165,6 +1227,9 @@ describe("PR Review scenario assets", () => {
     expect(normalized?.content).toMatchObject({
       reviewer: "security",
       status: "failed",
+      reviewed_files: [],
+      unreviewed_files: ["src/run.ts"],
+      evidence_truncated: true,
       findings: [],
     });
     expect(String((normalized?.content as { summary?: unknown } | undefined)?.summary))
