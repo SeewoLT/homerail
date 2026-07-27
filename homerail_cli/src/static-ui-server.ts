@@ -35,6 +35,16 @@ const DAG_MUTATION_TOKEN = process.env.HOMERAIL_DAG_MUTATION_TOKEN?.trim();
 const USE_HTTPS = process.env.HOMERAIL_UI_HTTPS === "1";
 const BUILD_MANIFEST = "homerail-build.json";
 
+// WebSocket upgrade allowlist. Manager-published routes that the Agent UI must
+// reach same-origin are listed here; everything else is destroyed. Keep these in
+// sync with the Manager's own upgrade handlers.
+//
+//   /ws, /ws/events                       general event stream
+//   /api/voice/asr/realtime               same-origin ASR realtime
+//   /api/voice-agent/sessions/<id>/live   Codex Live Voice (dynamic sessionId)
+const CODEX_LIVE_VOICE_WS_PATH = /^\/api\/voice-agent\/sessions\/[^/]+\/live$/;
+const ALLOWED_WS_PATHS = new Set(["/ws", "/ws/events", "/api/voice/asr/realtime"]);
+
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -292,7 +302,7 @@ function onRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
 
 server.on("upgrade", (req, socket, head) => {
   const pathname = new URL(req.url || "/", "http://localhost").pathname;
-  if (pathname === "/ws" || pathname === "/ws/events" || pathname === "/api/voice/asr/realtime") {
+  if (ALLOWED_WS_PATHS.has(pathname) || CODEX_LIVE_VOICE_WS_PATH.test(pathname)) {
     handleWebSocket(req, socket as unknown as net.Socket, head);
     return;
   }
