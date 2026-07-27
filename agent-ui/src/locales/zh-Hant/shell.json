@@ -6,7 +6,11 @@
   "updates": {
     "downloadedVersion": "HomeRail {version} 已下載，重啓後安裝",
     "downloaded": "新版本已下載，重啓後安裝",
-    "restart": "重啓更新"
+    "restart": "重啓更新",
+    "installing": "正在安裝更新…",
+    "failed": "更新失敗",
+    "retry": "重新檢查更新",
+    "checking": "正在檢查更新…"
   },
   "dashboard": {
     "title": "DAG 儀表盤",

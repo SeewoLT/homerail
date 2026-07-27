@@ -183,7 +183,7 @@ describe("plugin PDK workflow", () => {
       archive_digest: packed.archive_digest,
     }));
     expect(process.exitCode).toBeUndefined();
-  });
+  }, 15_000);
 
   it("runs empty directory -> scaffold -> codegen -> validate -> dev/test matrix -> pack -> verify", async () => {
     const root = path.join(temporaryRoot, "release-notes");

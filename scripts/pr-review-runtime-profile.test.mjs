@@ -114,15 +114,16 @@ test("formal PR Review submits to the durable stable Manager", () => {
   assert.doesNotMatch(workflow, /vars\.HOMERAIL_PR_REVIEW_(?:HOME_TEMPLATE|PRIMARY_MODEL|ARBITER_MODEL)/);
 });
 
-test("formal PR Review runs only when the maintainer dispatches it", () => {
+test("formal PR Review runs for maintainer-owned PRs when they become ready", () => {
   const workflow = fs
     .readFileSync(path.join(root, ".github/workflows/pr-review.yml"), "utf8")
     .replace(/\r\n/g, "\n");
   const eventBlock = workflow.slice(workflow.indexOf("on:\n"), workflow.indexOf("\npermissions:"));
   assert.match(eventBlock, /workflow_dispatch:/);
-  assert.doesNotMatch(eventBlock, /pull_request:/);
-  assert.match(
-    workflow,
-    /if: github\.actor == 'xiaotianfotos' && github\.event_name == 'workflow_dispatch'/,
-  );
+  assert.match(eventBlock, /pull_request:\n[\s\S]*types: \[opened, reopened, ready_for_review\]/);
+  assert.doesNotMatch(eventBlock, /paths-ignore:/);
+  assert.match(workflow, /github\.event\.pull_request\.user\.login == 'xiaotianfotos'/);
+  assert.match(workflow, /github\.event\.pull_request\.draft == false/);
+  assert.match(workflow, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
+  assert.doesNotMatch(workflow, /pull_request_target:/);
 });

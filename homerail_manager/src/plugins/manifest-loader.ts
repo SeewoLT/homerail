@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
   validatePluginCustomRendererSource,
   validatePluginSkill,
+  HOMERAIL_PLUGIN_SDK_ABI_VERSION,
 } from "homerail-plugin-sdk";
 import {
   GENERATIVE_UI_IR_VERSION,
@@ -328,6 +329,18 @@ export function loadPluginPackage(
     }
     const content = decodeHomerailPluginUtf8(buffer, declaration.path);
     const metadata = validatePluginSkill(declaration.id, content);
+    // ABI guard: validatePluginSkill changed from void to { name, description }
+    // in ABI v1. A stale SDK dist still returns undefined, which would crash on
+    // .description access below. validatePluginCustomRendererSource is not
+    // guarded here because its return value is never dereferenced (void call).
+    if (!metadata || typeof metadata.description !== "string") {
+      throw new Error(
+        `homerail-plugin-sdk ABI mismatch (Manager expects ABI version 1, ` +
+        `runtime SDK reports ${HOMERAIL_PLUGIN_SDK_ABI_VERSION}): ` +
+        `validatePluginSkill() did not return { name, description } for skill "${declaration.id}". ` +
+        `The runtime SDK dist is likely stale — rebuild homerail_plugin_sdk and ensure the Manager loads the updated artifact.`,
+      );
+    }
     if (declaration.visual_profile) {
       parseDagWorkerSkillVisualProfileV1(parseJsonObject(
         buffers.get(declaration.visual_profile)!,
