@@ -192,6 +192,76 @@ describe("static Agent UI mutation proxy", () => {
     await waitUntil(async () => (await fetch(uiOrigin)).status === 200);
   }, 15_000);
 
+  it("proxies the dynamic Codex Live Voice WebSocket to the Manager unchanged", async () => {
+    let upgradedPath = "";
+    const manager = http.createServer();
+    manager.on("upgrade", (req, socket) => {
+      trackSocket(socket);
+      upgradedPath = req.url || "";
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: websocket\r\n" +
+        "\r\n",
+      );
+      socket.end();
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    await startStaticUi({
+      port: uiPort,
+      host: "127.0.0.1",
+      origin: uiOrigin,
+      managerUrl,
+    });
+
+    // Dynamic sessionId path: the matcher must accept any non-empty id segment
+    // and forward the path verbatim so Manager's Codex Live Voice handler keeps
+    // ownership of the route.
+    const sessionId = "01HK5CWD6YZ7EV1XBWG3V8N9P0";
+    const livePath = `/api/voice-agent/sessions/${sessionId}/live`;
+    const response = await websocketUpgrade(uiPort, livePath, uiOrigin);
+    expect(response).toContain("HTTP/1.1 101 Switching Protocols");
+    expect(upgradedPath).toBe(livePath);
+  }, 15_000);
+
+  it("destroys WebSocket upgrades on voice-agent routes outside the live allowlist", async () => {
+    let managerUpgrades = 0;
+    const manager = http.createServer();
+    manager.on("upgrade", (_req, socket) => {
+      // These paths must never reach Manager. If one does, track the socket so
+      // afterEach tears it down instead of leaking it into the next test.
+      trackSocket(socket);
+      managerUpgrades++;
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    await startStaticUi({
+      port: uiPort,
+      host: "127.0.0.1",
+      origin: uiOrigin,
+      managerUrl,
+    });
+
+    // Look-alike paths that must NOT be forwarded: an extra trailing segment, an
+    // empty id, and a different voice-agent endpoint. The matcher is anchored, so
+    // each of these should fall through to socket.destroy() and never reach Manager.
+    // A destroyed upgrade closes the socket without a 101 Switching Protocols line.
+    for (const badPath of [
+      "/api/voice-agent/sessions/01HK5CWD6YZ7EV1XBWG3V8N9P0/live/extra",
+      "/api/voice-agent/sessions//live",
+      "/api/voice-agent/sessions/01HK5CWD6YZ7EV1XBWG3V8N9P0/ticket",
+    ]) {
+      const response = await websocketUpgrade(uiPort, badPath, uiOrigin).catch((reason) => String(reason));
+      expect(response).not.toContain("HTTP/1.1 101 Switching Protocols");
+    }
+    expect(managerUpgrades).toBe(0);
+  }, 15_000);
+
   it("rejects no-Origin/cross-origin requests and proxies exact self-Origin without credentials", async () => {
     const received: Array<{ authorization?: string; origin?: string; method?: string; mutationToken?: string }> = [];
     const manager = http.createServer((req, res) => {
