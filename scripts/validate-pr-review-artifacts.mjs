@@ -49,6 +49,26 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
   if (report.status === "findings") {
     invariant(Number.isInteger(report.actionable_count) && report.actionable_count > 0, "a findings report has no actionable findings");
   }
+  invariant(
+    Array.isArray(report.reviewer_results) && report.reviewer_results.length === 4,
+    "report does not contain four reviewer results",
+  );
+  const reviewerNames = new Set();
+  for (const reviewer of report.reviewer_results) {
+    invariant(reviewer && typeof reviewer === "object" && !Array.isArray(reviewer), "reviewer result is not an object");
+    invariant(["runtime", "security", "tests", "frontend"].includes(reviewer.reviewer), "reviewer result has an invalid identity");
+    reviewerNames.add(reviewer.reviewer);
+    invariant(["complete", "failed"].includes(reviewer.status), `${reviewer.reviewer} reviewer status is invalid`);
+    invariant(Array.isArray(reviewer.reviewed_files), `${reviewer.reviewer} reviewed_files is missing`);
+    invariant(Array.isArray(reviewer.unreviewed_files), `${reviewer.reviewer} unreviewed_files is missing`);
+    invariant(typeof reviewer.evidence_truncated === "boolean", `${reviewer.reviewer} evidence_truncated is missing`);
+    if (report.status !== "inconclusive") {
+      invariant(reviewer.status === "complete", `${reviewer.reviewer} reviewer did not complete`);
+      invariant(reviewer.unreviewed_files.length === 0, `${reviewer.reviewer} left files unreviewed`);
+      invariant(reviewer.evidence_truncated === false, `${reviewer.reviewer} used truncated evidence`);
+    }
+  }
+  invariant(reviewerNames.size === 4, "report reviewer identities are not distinct");
 
   const runIdLine = `**HomeRail Run ID:** \`${command.run_id}\``;
   invariant(markdown.includes(runIdLine), "Markdown does not contain the exact HomeRail run_id field");

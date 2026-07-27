@@ -1,6 +1,10 @@
 name: HomeRail PR Review
 
 on:
+  pull_request:
+    # Review each coherent PR once. Moving a PR back to Draft and then Ready
+    # emits another ready_for_review event and intentionally starts a new run.
+    types: [opened, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       repo:
@@ -30,7 +34,13 @@ concurrency:
 jobs:
   review:
     name: HomeRail PR Review
-    if: github.actor == 'xiaotianfotos' && github.event_name == 'workflow_dispatch'
+    if: >-
+      github.actor == 'xiaotianfotos' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.user.login == 'xiaotianfotos' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: [self-hosted, Linux, X64, homerail-pr-review]
     timeout-minutes: 90
     env:

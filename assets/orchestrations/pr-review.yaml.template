@@ -20,7 +20,7 @@ spec:
 
   pattern:
     id: pr-review-scenario
-    version: 1.7.2
+    version: 1.8.0
     source: HomeRail concrete scenario composed from budget-gate, orchestrator-workers, and quorum
     parameters:
       reviewer_count: 4
@@ -79,7 +79,7 @@ spec:
     ReviewContext:
       type: object
       additionalProperties: false
-      required: [repo, pr, base, head, repository_path, changed_files, diff_stat, diff_patch, diff_truncated]
+      required: [repo, pr, base, head, repository_path, changed_files, diff_stat, diff_patch, diff_chunks, diff_bytes, diff_truncated]
       properties:
         repo: { type: string }
         pr: { type: integer }
@@ -91,7 +91,23 @@ spec:
           maxItems: 5000
           items: { type: string }
         diff_stat: { type: string, maxLength: 20000 }
-        diff_patch: { type: string, maxLength: 700000 }
+        diff_patch: { type: string, maxLength: 150000 }
+        diff_chunks:
+          type: array
+          maxItems: 512
+          items:
+            type: object
+            additionalProperties: false
+            required: [index, path, bytes, files]
+            properties:
+              index: { type: integer, minimum: 1, maximum: 512 }
+              path: { type: string, pattern: '^review-evidence/diff-[0-9]{4}\.patch$' }
+              bytes: { type: integer, minimum: 0, maximum: 120000 }
+              files:
+                type: array
+                maxItems: 5000
+                items: { type: string }
+        diff_bytes: { type: integer, minimum: 0, maximum: 67108864 }
         diff_truncated: { type: boolean }
         title: { type: string }
         author: { type: string }
@@ -99,7 +115,7 @@ spec:
     PreparedReviewContext:
       type: object
       additionalProperties: false
-      required: [repo, pr, base, head, repository_path, changed_files, diff_stat, diff_patch, diff_truncated, commit_metadata, commit_metadata_truncated]
+      required: [repo, pr, base, head, repository_path, changed_files, diff_stat, diff_patch, diff_chunks, diff_bytes, diff_truncated, commit_metadata, commit_metadata_truncated]
       properties:
         repo: { type: string }
         pr: { type: integer }
@@ -111,7 +127,23 @@ spec:
           maxItems: 5000
           items: { type: string }
         diff_stat: { type: string, maxLength: 20000 }
-        diff_patch: { type: string, maxLength: 700000 }
+        diff_patch: { type: string, maxLength: 150000 }
+        diff_chunks:
+          type: array
+          maxItems: 512
+          items:
+            type: object
+            additionalProperties: false
+            required: [index, path, bytes, files]
+            properties:
+              index: { type: integer, minimum: 1, maximum: 512 }
+              path: { type: string, pattern: '^review-evidence/diff-[0-9]{4}\.patch$' }
+              bytes: { type: integer, minimum: 0, maximum: 120000 }
+              files:
+                type: array
+                maxItems: 5000
+                items: { type: string }
+        diff_bytes: { type: integer, minimum: 0, maximum: 67108864 }
         diff_truncated: { type: boolean }
         commit_metadata:
           type: array
@@ -148,11 +180,20 @@ spec:
     ReviewerResult:
       type: object
       additionalProperties: false
-      required: [reviewer, status, summary, findings]
+      required: [reviewer, status, summary, reviewed_files, unreviewed_files, evidence_truncated, findings]
       properties:
         reviewer: { type: string, enum: [runtime, security, tests, frontend] }
         status: { type: string, enum: [complete, failed] }
         summary: { type: string, minLength: 1, maxLength: 12000 }
+        reviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        unreviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        evidence_truncated: { type: boolean }
         findings:
           type: array
           maxItems: 50
@@ -173,11 +214,20 @@ spec:
     RuntimeReviewerResult:
       type: object
       additionalProperties: false
-      required: [reviewer, status, summary, findings]
+      required: [reviewer, status, summary, reviewed_files, unreviewed_files, evidence_truncated, findings]
       properties:
         reviewer: { const: runtime }
         status: { type: string, enum: [complete, failed] }
         summary: { type: string, minLength: 1, maxLength: 12000 }
+        reviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        unreviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        evidence_truncated: { type: boolean }
         findings:
           type: array
           maxItems: 50
@@ -198,11 +248,20 @@ spec:
     SecurityReviewerResult:
       type: object
       additionalProperties: false
-      required: [reviewer, status, summary, findings]
+      required: [reviewer, status, summary, reviewed_files, unreviewed_files, evidence_truncated, findings]
       properties:
         reviewer: { const: security }
         status: { type: string, enum: [complete, failed] }
         summary: { type: string, minLength: 1, maxLength: 12000 }
+        reviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        unreviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        evidence_truncated: { type: boolean }
         findings:
           type: array
           maxItems: 50
@@ -223,11 +282,20 @@ spec:
     TestReviewerResult:
       type: object
       additionalProperties: false
-      required: [reviewer, status, summary, findings]
+      required: [reviewer, status, summary, reviewed_files, unreviewed_files, evidence_truncated, findings]
       properties:
         reviewer: { const: tests }
         status: { type: string, enum: [complete, failed] }
         summary: { type: string, minLength: 1, maxLength: 12000 }
+        reviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        unreviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        evidence_truncated: { type: boolean }
         findings:
           type: array
           maxItems: 50
@@ -248,11 +316,20 @@ spec:
     FrontendReviewerResult:
       type: object
       additionalProperties: false
-      required: [reviewer, status, summary, findings]
+      required: [reviewer, status, summary, reviewed_files, unreviewed_files, evidence_truncated, findings]
       properties:
         reviewer: { const: frontend }
         status: { type: string, enum: [complete, failed] }
         summary: { type: string, minLength: 1, maxLength: 12000 }
+        reviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        unreviewed_files:
+          type: array
+          maxItems: 5000
+          items: { type: string }
+        evidence_truncated: { type: boolean }
         findings:
           type: array
           maxItems: 50
@@ -329,11 +406,20 @@ spec:
           items:
             type: object
             additionalProperties: false
-            required: [reviewer, status, summary, findings]
+            required: [reviewer, status, summary, reviewed_files, unreviewed_files, evidence_truncated, findings]
             properties:
               reviewer: { type: string, enum: [runtime, security, tests, frontend] }
               status: { type: string, enum: [complete, failed] }
               summary: { type: string, minLength: 1, maxLength: 12000 }
+              reviewed_files:
+                type: array
+                maxItems: 5000
+                items: { type: string }
+              unreviewed_files:
+                type: array
+                maxItems: 5000
+                items: { type: string }
+              evidence_truncated: { type: boolean }
               findings:
                 type: array
                 maxItems: 50
@@ -535,8 +621,10 @@ spec:
         repository tools whenever they help verify changed files, references,
         or metadata; invoke tools directly rather than printing proposed calls.
         Every Read, Grep, Glob, or LS call must set its path explicitly to
-        input.context.repository_path or one of its descendants; keep Glob
-        patterns relative and traversal-free.
+        input.context.repository_path, one of its descendants, or an exact
+        path listed in input.context.diff_chunks; keep Glob patterns relative
+        and traversal-free. Read every diff_chunks entry before concluding;
+        diff_patch is only a bounded preview.
         The supplied diff is the starting index, not the only permitted
         evidence. Keep inspection proportional to the changed surface and stop
         after the concrete references needed for a decision. Do not modify the
@@ -583,9 +671,14 @@ spec:
         persistence, and tests beyond the supplied patch; invoke tools directly
         rather than printing proposed calls.
         Every Read, Grep, Glob, or LS call must set its path explicitly to
-        input.context.repository_path or one of its descendants; keep Glob
-        patterns relative and traversal-free. The diff is the starting index,
-        not the only permitted evidence. Keep inspection proportional to the
+        input.context.repository_path, one of its descendants, or an exact
+        path listed in input.context.diff_chunks; keep Glob patterns relative
+        and traversal-free. diff_patch is only a bounded preview. Read every
+        diff_chunks entry and account for every changed_files entry before
+        returning status=complete. Put examined paths in reviewed_files and
+        any missing paths in unreviewed_files. Set evidence_truncated when
+        input.context.diff_truncated is true or coverage is incomplete.
+        The diff is the starting index, not the only permitted evidence. Keep inspection proportional to the
         changed surface and follow only concrete affected paths needed for a
         decision. Do not modify the checkout. If
         `diff_truncated` is true, do not guess:
@@ -608,7 +701,7 @@ spec:
         needs file, precise line when known, evidence, recommendation,
         severity, and confidence. Do not end with prose. Your final action MUST
         call handoff on reviewed with exactly this shape and no extra keys:
-        {"reviewer":"runtime","status":"complete","summary":"text","findings":[{"category":"runtime","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        {"reviewer":"runtime","status":"complete","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"runtime","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
         The reviewer field MUST be the literal string `runtime`; never reuse
         another reviewer's identity even when discussing tests or security.
         line must identify the precise changed or directly affected source line;
@@ -628,9 +721,14 @@ spec:
         boundaries, configuration, and affected callers beyond the supplied
         patch; invoke tools directly rather than printing proposed calls.
         Every Read, Grep, Glob, or LS call must set its path explicitly to
-        input.context.repository_path or one of its descendants; keep Glob
-        patterns relative and traversal-free. The diff is the starting index,
-        not the only permitted evidence. Keep
+        input.context.repository_path, one of its descendants, or an exact
+        path listed in input.context.diff_chunks; keep Glob patterns relative
+        and traversal-free. diff_patch is only a bounded preview. Read every
+        diff_chunks entry and account for every changed_files entry before
+        returning status=complete. Put examined paths in reviewed_files and
+        any missing paths in unreviewed_files. Set evidence_truncated when
+        input.context.diff_truncated is true or coverage is incomplete.
+        The diff is the starting index, not the only permitted evidence. Keep
         inspection proportional to concrete changed security boundaries. Do
         not modify the checkout. If `diff_truncated` is true, do not guess:
         call handoff on failed with
@@ -644,7 +742,7 @@ spec:
         the diff changes that boundary. Never expose a
         secret value in evidence. Do not end with prose. Your final action MUST
         call handoff on reviewed with exactly this shape and no extra keys:
-        {"reviewer":"security","status":"complete","summary":"text","findings":[{"category":"security","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        {"reviewer":"security","status":"complete","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"security","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
         The reviewer field MUST be the literal string `security`; never reuse
         another reviewer's identity.
         line must be a precise changed or directly affected source line. Empty findings are valid.
@@ -662,8 +760,14 @@ spec:
         repository tools whenever useful to inspect existing coverage and
         locate affected tests; invoke tools directly rather than
         printing proposed calls. Every Read, Grep, Glob, or LS call must set its
-        path explicitly to input.context.repository_path or one of its
-        descendants; keep Glob patterns relative and traversal-free. The diff
+        path explicitly to input.context.repository_path, one of its
+        descendants, or an exact path listed in input.context.diff_chunks;
+        keep Glob patterns relative and traversal-free. diff_patch is only a
+        bounded preview. Read every diff_chunks entry and account for every
+        changed_files entry before returning status=complete. Put examined
+        paths in reviewed_files and any missing paths in unreviewed_files. Set
+        evidence_truncated when input.context.diff_truncated is true or
+        coverage is incomplete. The diff
         is the starting index, not the only permitted evidence. Keep inspection
         proportional to concrete changed
         behavior and its directly affected tests. Do not modify the checkout.
@@ -687,7 +791,7 @@ spec:
         existing test suite falsely passes a demonstrated critical defect.
         Do not end with prose. Your final action MUST call
         handoff on reviewed with exactly this shape and no extra keys:
-        {"reviewer":"tests","status":"complete","summary":"text","findings":[{"category":"tests","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        {"reviewer":"tests","status":"complete","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"tests","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
         The reviewer field MUST be the literal string `tests`; never reuse
         another reviewer's identity.
         Every finding needs a precise changed or directly affected line. Empty findings are valid.
@@ -705,8 +809,14 @@ spec:
         repository tools whenever useful to inspect components, styles, API
         consumers, and tests beyond the supplied patch; invoke tools directly
         rather than printing proposed calls. Every Read, Grep, Glob, or LS call
-        must set its path explicitly to input.context.repository_path or one of
-        its descendants; keep Glob patterns relative and traversal-free. The
+        must set its path explicitly to input.context.repository_path, one of
+        its descendants, or an exact path listed in input.context.diff_chunks;
+        keep Glob patterns relative and traversal-free. diff_patch is only a
+        bounded preview. Read every diff_chunks entry and account for every
+        changed_files entry before returning status=complete. Put examined
+        paths in reviewed_files and any missing paths in unreviewed_files. Set
+        evidence_truncated when input.context.diff_truncated is true or
+        coverage is incomplete. The
         diff is the starting index, not the only permitted evidence. Keep
         inspection proportional to the
         changed user surface and directly affected consumers. Do not modify the
@@ -725,7 +835,7 @@ spec:
         Do not demand frontend changes when the diff has no user
         surface. Do not end with prose. Your final action MUST call handoff on
         reviewed with exactly this shape and no extra keys:
-        {"reviewer":"frontend","status":"complete","summary":"text","findings":[{"category":"frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        {"reviewer":"frontend","status":"complete","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
         The reviewer field MUST be the literal string `frontend`; never reuse
         another reviewer's identity.
         Every finding needs a precise changed or directly affected line. Empty findings are valid.
@@ -759,7 +869,9 @@ spec:
         URL prefixes as out of scope.
         Every retained finding
         must have a precise line.
-        Set status=findings when
+        Treat a reviewer with evidence_truncated=true or a non-empty
+        unreviewed_files list as failed coverage even if its status says
+        complete. Set status=findings when
         actionable_count is positive, pass when it is zero, and inconclusive
         if any reviewer failed. Never edit the repository or end with prose.
         Your final action MUST call handoff on drafted with exactly these
@@ -802,8 +914,9 @@ spec:
         repository tools whenever needed to independently verify affected callers,
         tests, and observable behavior; invoke tools directly rather than
         printing proposed calls. Every Read, Grep, Glob, or LS call must set its
-        path explicitly to input.context.repository_path or one of its
-        descendants; keep Glob patterns relative and traversal-free. The diff
+        path explicitly to input.context.repository_path, one of its
+        descendants, or an exact path listed in input.context.diff_chunks;
+        keep Glob patterns relative and traversal-free. The diff
         is the starting index, not the only
         permitted evidence. Keep inspection bounded to evidence needed to
         adjudicate the retained findings. Do not modify the checkout.
@@ -826,9 +939,10 @@ spec:
         hosts. A rejected finding is a successful verifier correction, not a
         reason to reject the whole report. Vote accept when every retained
         finding has a grounded confirmed or rejected verdict, all four
-        reviewer_results have status complete, report identity matches
-        input.context, and diff_truncated is false. Vote reject when any
-        reviewer failed, the report is inconclusive, evidence is insufficient
+        reviewer_results have status complete, evidence_truncated=false and
+        empty unreviewed_files, report identity matches input.context, and
+        diff_truncated is false. Vote reject when any
+        reviewer failed or reported incomplete coverage, the report is inconclusive, evidence is insufficient
         to adjudicate every finding, identity differs, or diff_truncated is
         true. An empty report is acceptable only when the reviewer evidence
         supports it. Do not end with prose. Your final action MUST
@@ -846,8 +960,9 @@ spec:
         repository tools whenever needed to challenge each finding against callers,
         tests, and exact base...head behavior; invoke tools directly rather than
         printing proposed calls. Every Read, Grep, Glob, or LS call must set its
-        path explicitly to input.context.repository_path or one of its
-        descendants; keep Glob patterns relative and traversal-free. The diff
+        path explicitly to input.context.repository_path, one of its
+        descendants, or an exact path listed in input.context.diff_chunks;
+        keep Glob patterns relative and traversal-free. The diff
         is the starting index, not the only
         permitted evidence. Keep inspection bounded to evidence needed to
         accept or reject each retained finding. Do not modify the checkout. Act
@@ -873,8 +988,10 @@ spec:
         finding receives verdict rejected; that correction does not reject the
         whole report. Vote accept when every finding has a grounded confirmed or
         rejected verdict, all four reviewer_results have status complete,
-        report identity matches input.context, and diff_truncated is false.
-        Vote reject when any reviewer failed, the report is inconclusive,
+        evidence_truncated=false and empty unreviewed_files, report identity
+        matches input.context, and diff_truncated is false.
+        Vote reject when any reviewer failed or reported incomplete coverage,
+        the report is inconclusive,
         evidence is insufficient to adjudicate every finding, identity differs,
         or diff_truncated is true. Do not end with prose. Your final action MUST
         call handoff on voted with exactly:
@@ -887,9 +1004,11 @@ spec:
         Verify that runtime, security, tests, and frontend scopes all produced
         explicit ReviewerResult records and that the synthesis did not silently
         discard stronger evidence. Vote accept only when all four distinct
-        reviewer records are present with status complete. Vote reject when any
-        reviewer is missing or has status failed, or when report.status is
-        inconclusive. Findings do not make coverage incomplete.
+        reviewer records are present with status complete,
+        evidence_truncated=false, and empty unreviewed_files. Vote reject when
+        any reviewer is missing, has status failed, reports truncated evidence,
+        leaves files unreviewed, or when report.status is inconclusive.
+        Findings do not make coverage incomplete.
         Coverage does not adjudicate individual findings. Never include
         finding_verdicts or any other extra field. Do not end with prose. Your
         final action MUST call handoff on voted with exactly:
@@ -948,7 +1067,7 @@ spec:
           - -e
           - |-
             const { spawnSync } = require('node:child_process');
-            const { existsSync } = require('node:fs');
+            const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('node:fs');
             let stdin = '';
             const fail = (message) => { throw new Error(message); };
             const exactRevision = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
@@ -991,7 +1110,7 @@ spec:
                 '-c', 'protocol.ext.allow=never',
               ];
               const result = spawnSync('git', [...common, ...args], {
-                encoding: 'utf8', env: gitEnv(), maxBuffer: 16777216,
+                encoding: 'utf8', env: gitEnv(), maxBuffer: 67108864,
               });
               if (result.error) throw result.error;
               if (result.status !== 0) {
@@ -1070,36 +1189,90 @@ spec:
                   subject: cleanMetadata(metadataFields[offset + 5], 1000),
                 });
               }
-              const patchLimit = 600000;
-              const marker = '\n... [HomeRail diff truncated by deterministic evidence limit]\n';
-              let diffPatch = rawPatch;
-              let diffTruncated = Buffer.byteLength(diffPatch, 'utf8') > patchLimit;
-              if (diffTruncated) {
-                diffPatch = Buffer.from(diffPatch).subarray(0, patchLimit).toString('utf8');
+              const chunkLimit = 120000;
+              const evidenceLimit = 48 * 1024 * 1024;
+              const rawPatchBytes = Buffer.byteLength(rawPatch, 'utf8');
+              const splitByBytes = (value, limit) => {
+                const chunks = [];
+                let chunk = '';
+                let bytes = 0;
+                const flush = () => {
+                  if (!chunk) return;
+                  chunks.push(chunk);
+                  chunk = '';
+                  bytes = 0;
+                };
+                for (const line of value.match(/[^\n]*\n|[^\n]+$/g) || []) {
+                  const lineBytes = Buffer.byteLength(line, 'utf8');
+                  if (lineBytes <= limit) {
+                    if (bytes > 0 && bytes + lineBytes > limit) flush();
+                    chunk += line;
+                    bytes += lineBytes;
+                    continue;
+                  }
+                  flush();
+                  for (const character of line) {
+                    const characterBytes = Buffer.byteLength(character, 'utf8');
+                    if (bytes > 0 && bytes + characterBytes > limit) flush();
+                    chunk += character;
+                    bytes += characterBytes;
+                  }
+                }
+                flush();
+                return chunks;
+              };
+              const boundedPatch = rawPatchBytes > evidenceLimit
+                ? splitByBytes(rawPatch, evidenceLimit)[0] || ''
+                : rawPatch;
+              const diffTruncated = rawPatchBytes > evidenceLimit;
+              const sections = boundedPatch
+                ? boundedPatch.split(/(?=^diff --git )/m).filter(Boolean)
+                : [];
+              const evidenceDir = 'review-evidence';
+              if (existsSync(evidenceDir)) fail('run workspace review evidence path already exists');
+              mkdirSync(evidenceDir, { mode: 0o700 });
+              const diffChunks = [];
+              for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+                const files = sections.length === changed.length && changed[sectionIndex]
+                  ? [changed[sectionIndex]]
+                  : [];
+                for (const content of splitByBytes(sections[sectionIndex], chunkLimit)) {
+                  const index = diffChunks.length + 1;
+                  if (index > 512) fail('diff evidence requires more than 512 chunks');
+                  const chunkPath = `review-evidence/diff-${String(index).padStart(4, '0')}.patch`;
+                  writeFileSync(chunkPath, content, { encoding: 'utf8', mode: 0o600 });
+                  diffChunks.push({
+                    index,
+                    path: chunkPath,
+                    bytes: Buffer.byteLength(content, 'utf8'),
+                    files,
+                  });
+                }
               }
+              const inlinePreview = diffChunks.length > 0
+                ? readFileSync(diffChunks[0].path, 'utf8')
+                : '';
+              const continuation = diffChunks.length > 1
+                ? `\n... [HomeRail full diff continues in ${diffChunks.length} review-evidence chunks]\n`
+                : '';
+              const truncation = diffTruncated
+                ? '\n... [HomeRail diff evidence truncated at the 48 MiB safety limit]\n'
+                : '';
               const context = {
                 repo, pr, base, head,
                 repository_path: '/workspace/repository',
                 changed_files: changed,
                 diff_stat: diffStat,
-                diff_patch: '',
+                diff_patch: inlinePreview + continuation + truncation,
+                diff_chunks: diffChunks,
+                diff_bytes: rawPatchBytes,
                 diff_truncated: diffTruncated,
                 commit_metadata: commitMetadata,
                 commit_metadata_truncated: commitCount > commitMetadata.length,
               };
               if (typeof title === 'string') context.title = title;
               if (typeof author === 'string') context.author = author;
-              const serialize = () => {
-                context.diff_patch = diffPatch + (diffTruncated ? marker : '');
-                context.diff_truncated = diffTruncated;
-                return JSON.stringify(context);
-              };
-              let output = serialize();
-              while (Buffer.byteLength(output, 'utf8') > 900000 && diffPatch.length > 0) {
-                diffTruncated = true;
-                diffPatch = diffPatch.slice(0, Math.floor(diffPatch.length * 0.8));
-                output = serialize();
-              }
+              const output = JSON.stringify(context);
               if (Buffer.byteLength(output, 'utf8') > 900000) {
                 fail('review context exceeds the command capture limit');
               }
@@ -1138,7 +1311,7 @@ spec:
       agent: privacy_reviewer
       allowed_builtin_tools: [Read, Grep, Glob, LS]
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: PreparedReviewContext } }
       outputs: { reviewed: { contract: PrivacyReview }, failed: {} }
 
@@ -1176,27 +1349,28 @@ spec:
       agent: runtime_reviewer
       allowed_builtin_tools: [Read, Grep, Glob, LS]
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
       outputs: { reviewed: { contract: RuntimeReviewerResult }, failed: {} }
 
     normalize_runtime_review:
       kind: command
-      depends_on: [runtime_review]
+      depends_on: [runtime_review, strip_privacy_context]
       inputs:
         success: { contract: RuntimeReviewerResult }
         failure: {}
+        context: { contract: ReviewContext }
       outputs: { reviewed: { contract: ReviewerResult } }
       config:
         command:
           - node
           - -e
           - >-
-            let s='';const reviewer=process.argv[1];const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined;const text=value=>{if(typeof value==='string')return value;try{return JSON.stringify(value)}catch{return String(value)}};process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),success=last(input,'success');if(success&&typeof success==='object'&&success.reviewer===reviewer&&(success.status==='complete'||success.status==='failed')){process.stdout.write(JSON.stringify(success));return}const candidate=success??last(input,'failure'),raw=candidate&&typeof candidate==='object'&&typeof candidate.error==='string'?candidate.error:text(candidate??'reviewer ended without a contract-valid handoff'),failure=raw.slice(0,2048);process.stdout.write(JSON.stringify({reviewer,status:'failed',summary:reviewer+' reviewer failed before producing a contract-valid result: '+failure,findings:[]}))});
+            let s='';const reviewer=process.argv[1];const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined;const text=value=>{if(typeof value==='string')return value;try{return JSON.stringify(value)}catch{return String(value)}};process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),success=last(input,'success');if(success&&typeof success==='object'&&success.reviewer===reviewer&&(success.status==='complete'||success.status==='failed')){process.stdout.write(JSON.stringify(success));return}const context=last(input,'context'),unreviewed_files=Array.isArray(context?.changed_files)?context.changed_files:[],candidate=success??last(input,'failure'),raw=candidate&&typeof candidate==='object'&&typeof candidate.error==='string'?candidate.error:text(candidate??'reviewer ended without a contract-valid handoff'),failure=raw.slice(0,2048);process.stdout.write(JSON.stringify({reviewer,status:'failed',summary:reviewer+' reviewer failed before producing a contract-valid result: '+failure,reviewed_files:[],unreviewed_files,evidence_truncated:true,findings:[]}))});
           - runtime
         stdin_field: "$inputs"
         timeout_ms: 10000
-        capture_limit: 12000
+        capture_limit: 400000
         success_port: reviewed
         failure_port: reviewed
         parse_stdout: json
@@ -1207,27 +1381,28 @@ spec:
       agent: security_reviewer
       allowed_builtin_tools: [Read, Grep, Glob, LS]
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
       outputs: { reviewed: { contract: SecurityReviewerResult }, failed: {} }
 
     normalize_security_review:
       kind: command
-      depends_on: [security_review]
+      depends_on: [security_review, strip_privacy_context]
       inputs:
         success: { contract: SecurityReviewerResult }
         failure: {}
+        context: { contract: ReviewContext }
       outputs: { reviewed: { contract: ReviewerResult } }
       config:
         command:
           - node
           - -e
           - >-
-            let s='';const reviewer=process.argv[1];const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined;const text=value=>{if(typeof value==='string')return value;try{return JSON.stringify(value)}catch{return String(value)}};process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),success=last(input,'success');if(success&&typeof success==='object'&&success.reviewer===reviewer&&(success.status==='complete'||success.status==='failed')){process.stdout.write(JSON.stringify(success));return}const candidate=success??last(input,'failure'),raw=candidate&&typeof candidate==='object'&&typeof candidate.error==='string'?candidate.error:text(candidate??'reviewer ended without a contract-valid handoff'),failure=raw.slice(0,2048);process.stdout.write(JSON.stringify({reviewer,status:'failed',summary:reviewer+' reviewer failed before producing a contract-valid result: '+failure,findings:[]}))});
+            let s='';const reviewer=process.argv[1];const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined;const text=value=>{if(typeof value==='string')return value;try{return JSON.stringify(value)}catch{return String(value)}};process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),success=last(input,'success');if(success&&typeof success==='object'&&success.reviewer===reviewer&&(success.status==='complete'||success.status==='failed')){process.stdout.write(JSON.stringify(success));return}const context=last(input,'context'),unreviewed_files=Array.isArray(context?.changed_files)?context.changed_files:[],candidate=success??last(input,'failure'),raw=candidate&&typeof candidate==='object'&&typeof candidate.error==='string'?candidate.error:text(candidate??'reviewer ended without a contract-valid handoff'),failure=raw.slice(0,2048);process.stdout.write(JSON.stringify({reviewer,status:'failed',summary:reviewer+' reviewer failed before producing a contract-valid result: '+failure,reviewed_files:[],unreviewed_files,evidence_truncated:true,findings:[]}))});
           - security
         stdin_field: "$inputs"
         timeout_ms: 10000
-        capture_limit: 12000
+        capture_limit: 400000
         success_port: reviewed
         failure_port: reviewed
         parse_stdout: json
@@ -1238,27 +1413,28 @@ spec:
       agent: test_reviewer
       allowed_builtin_tools: [Read, Grep, Glob, LS]
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
       outputs: { reviewed: { contract: TestReviewerResult }, failed: {} }
 
     normalize_test_review:
       kind: command
-      depends_on: [test_review]
+      depends_on: [test_review, strip_privacy_context]
       inputs:
         success: { contract: TestReviewerResult }
         failure: {}
+        context: { contract: ReviewContext }
       outputs: { reviewed: { contract: ReviewerResult } }
       config:
         command:
           - node
           - -e
           - >-
-            let s='';const reviewer=process.argv[1];const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined;const text=value=>{if(typeof value==='string')return value;try{return JSON.stringify(value)}catch{return String(value)}};process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),success=last(input,'success');if(success&&typeof success==='object'&&success.reviewer===reviewer&&(success.status==='complete'||success.status==='failed')){process.stdout.write(JSON.stringify(success));return}const candidate=success??last(input,'failure'),raw=candidate&&typeof candidate==='object'&&typeof candidate.error==='string'?candidate.error:text(candidate??'reviewer ended without a contract-valid handoff'),failure=raw.slice(0,2048);process.stdout.write(JSON.stringify({reviewer,status:'failed',summary:reviewer+' reviewer failed before producing a contract-valid result: '+failure,findings:[]}))});
+            let s='';const reviewer=process.argv[1];const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined;const text=value=>{if(typeof value==='string')return value;try{return JSON.stringify(value)}catch{return String(value)}};process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),success=last(input,'success');if(success&&typeof success==='object'&&success.reviewer===reviewer&&(success.status==='complete'||success.status==='failed')){process.stdout.write(JSON.stringify(success));return}const context=last(input,'context'),unreviewed_files=Array.isArray(context?.changed_files)?context.changed_files:[],candidate=success??last(input,'failure'),raw=candidate&&typeof candidate==='object'&&typeof candidate.error==='string'?candidate.error:text(candidate??'reviewer ended without a contract-valid handoff'),failure=raw.slice(0,2048);process.stdout.write(JSON.stringify({reviewer,status:'failed',summary:reviewer+' reviewer failed before producing a contract-valid result: '+failure,reviewed_files:[],unreviewed_files,evidence_truncated:true,findings:[]}))});
           - tests
         stdin_field: "$inputs"
         timeout_ms: 10000
-        capture_limit: 12000
+        capture_limit: 400000
         success_port: reviewed
         failure_port: reviewed
         parse_stdout: json
@@ -1269,27 +1445,28 @@ spec:
       agent: frontend_reviewer
       allowed_builtin_tools: [Read, Grep, Glob, LS]
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
       outputs: { reviewed: { contract: FrontendReviewerResult }, failed: {} }
 
     normalize_frontend_review:
       kind: command
-      depends_on: [frontend_review]
+      depends_on: [frontend_review, strip_privacy_context]
       inputs:
         success: { contract: FrontendReviewerResult }
         failure: {}
+        context: { contract: ReviewContext }
       outputs: { reviewed: { contract: ReviewerResult } }
       config:
         command:
           - node
           - -e
           - >-
-            let s='';const reviewer=process.argv[1];const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined;const text=value=>{if(typeof value==='string')return value;try{return JSON.stringify(value)}catch{return String(value)}};process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),success=last(input,'success');if(success&&typeof success==='object'&&success.reviewer===reviewer&&(success.status==='complete'||success.status==='failed')){process.stdout.write(JSON.stringify(success));return}const candidate=success??last(input,'failure'),raw=candidate&&typeof candidate==='object'&&typeof candidate.error==='string'?candidate.error:text(candidate??'reviewer ended without a contract-valid handoff'),failure=raw.slice(0,2048);process.stdout.write(JSON.stringify({reviewer,status:'failed',summary:reviewer+' reviewer failed before producing a contract-valid result: '+failure,findings:[]}))});
+            let s='';const reviewer=process.argv[1];const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined;const text=value=>{if(typeof value==='string')return value;try{return JSON.stringify(value)}catch{return String(value)}};process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),success=last(input,'success');if(success&&typeof success==='object'&&success.reviewer===reviewer&&(success.status==='complete'||success.status==='failed')){process.stdout.write(JSON.stringify(success));return}const context=last(input,'context'),unreviewed_files=Array.isArray(context?.changed_files)?context.changed_files:[],candidate=success??last(input,'failure'),raw=candidate&&typeof candidate==='object'&&typeof candidate.error==='string'?candidate.error:text(candidate??'reviewer ended without a contract-valid handoff'),failure=raw.slice(0,2048);process.stdout.write(JSON.stringify({reviewer,status:'failed',summary:reviewer+' reviewer failed before producing a contract-valid result: '+failure,reviewed_files:[],unreviewed_files,evidence_truncated:true,findings:[]}))});
           - frontend
         stdin_field: "$inputs"
         timeout_ms: 10000
-        capture_limit: 12000
+        capture_limit: 400000
         success_port: reviewed
         failure_port: reviewed
         parse_stdout: json
@@ -1315,7 +1492,7 @@ spec:
       agent: synthesizer
       allowed_builtin_tools: []
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs:
         context: { contract: ReviewContext }
         reviews: {}
@@ -1326,7 +1503,7 @@ spec:
       agent: evidence_voter
       allowed_builtin_tools: [Read, Grep, Glob, LS]
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs:
         report: { contract: DraftReviewReport }
         context: { contract: ReviewContext }
@@ -1337,7 +1514,7 @@ spec:
       agent: false_positive_voter
       allowed_builtin_tools: [Read, Grep, Glob, LS]
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs:
         report: { contract: DraftReviewReport }
         context: { contract: ReviewContext }
@@ -1348,7 +1525,7 @@ spec:
       agent: coverage_voter
       allowed_builtin_tools: []
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { report: { contract: DraftReviewReport } }
       outputs: { voted: { contract: CoverageVote }, failed: {} }
 
@@ -1385,7 +1562,7 @@ spec:
       agent: refiner
       allowed_builtin_tools: []
       allowed_dag_tools: [handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs:
         report: { contract: DraftReviewReport }
         verification: {}
@@ -1416,7 +1593,7 @@ spec:
       agent: publisher
       allowed_builtin_tools: []
       allowed_dag_tools: [get_graph_context, handoff]
-      workspace_access: { writable_paths: [], readonly_paths: [repository] }
+      workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs:
         review: { contract: FinalReview }
         privacy: { contract: PrivacyReview }
@@ -1516,12 +1693,16 @@ spec:
     - { from: privacy_review.failed, to: normalize_privacy_review.failure, condition: on_failure }
     - { from: runtime_review.reviewed, to: normalize_runtime_review.success }
     - { from: runtime_review.failed, to: normalize_runtime_review.failure, condition: on_failure }
+    - { from: strip_privacy_context.ready, to: normalize_runtime_review.context }
     - { from: security_review.reviewed, to: normalize_security_review.success }
     - { from: security_review.failed, to: normalize_security_review.failure, condition: on_failure }
+    - { from: strip_privacy_context.ready, to: normalize_security_review.context }
     - { from: test_review.reviewed, to: normalize_test_review.success }
     - { from: test_review.failed, to: normalize_test_review.failure, condition: on_failure }
+    - { from: strip_privacy_context.ready, to: normalize_test_review.context }
     - { from: frontend_review.reviewed, to: normalize_frontend_review.success }
     - { from: frontend_review.failed, to: normalize_frontend_review.failure, condition: on_failure }
+    - { from: strip_privacy_context.ready, to: normalize_frontend_review.context }
     - { from: normalize_runtime_review.reviewed, to: collect_reviews.runtime }
     - { from: normalize_security_review.reviewed, to: collect_reviews.security }
     - { from: normalize_test_review.reviewed, to: collect_reviews.tests }
