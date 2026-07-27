@@ -66,13 +66,15 @@
       },
       "currentVersion": "目前安裝版本：{version}",
       "waitingForStable": "目前預發佈版本會繼續保留，直到出現版本號更高的穩定版；HomeRail 不會自動降級。",
-      "error": "更新通道切換失敗：{message}",
+      "error": "桌面更新失敗：{message}",
       "state": {
         "idle": "可以檢查更新",
         "checking": "正在檢查更新…",
         "available": "找到新版本",
         "downloading": "正在下載更新…",
+        "downloadingProgress": "正在下載更新… {percent}%",
         "downloaded": "更新已下載，重新啟動後安裝",
+        "installing": "正在安裝更新…",
         "not-available": "此通道暫無更高版本",
         "error": "更新檢查失敗"
       }

@@ -4,6 +4,16 @@ import { http } from '@/api/clients/http-client'
 import { i18n } from '@/plugins/i18n'
 import AgentModeTopBar from './AgentModeTopBar.vue'
 
+function updateStatus(overrides: Partial<DesktopUpdateStatus> = {}): DesktopUpdateStatus {
+  return {
+    supported: true,
+    state: 'not-available',
+    currentVersion: '0.1.0-alpha.1',
+    channel: 'early-access',
+    ...overrides,
+  }
+}
+
 describe('AgentModeTopBar localization', () => {
   let app: App<Element> | null = null
   let root: HTMLElement | null = null
@@ -17,6 +27,7 @@ describe('AgentModeTopBar localization', () => {
     root?.remove()
     app = null
     root = null
+    Reflect.deleteProperty(window, 'homerailDesktop')
     vi.restoreAllMocks()
   })
 
@@ -66,6 +77,46 @@ describe('AgentModeTopBar localization', () => {
       expect(button?.title).toContain('1 个运行等待指令')
       expect(button?.textContent).toContain('1')
       expect(button?.querySelector('.animate-spin')).toBeNull()
+    })
+  })
+
+  it('shows the installing state immediately after restart-to-update is requested', async () => {
+    i18n.global.locale.value = 'en-US'
+    const installUpdate = vi.fn().mockResolvedValue(updateStatus({
+      state: 'installing',
+      installStartedAt: Date.now(),
+      update: { version: '0.1.0-alpha.2' },
+    }))
+    Object.defineProperty(window, 'homerailDesktop', {
+      configurable: true,
+      value: {
+        updateStatus: vi.fn().mockResolvedValue(updateStatus({
+          state: 'downloaded',
+          update: { version: '0.1.0-alpha.2' },
+        })),
+        installUpdate,
+      } satisfies HomeRailDesktopBridge,
+    })
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(AgentModeTopBar, { activeMode: 'text' })
+    app.use(i18n)
+    app.mount(root)
+
+    await vi.waitFor(() => {
+      const button = root?.querySelector<HTMLButtonElement>('[data-testid="desktop-update-install"]')
+      expect(button?.textContent).toContain('Restart to update')
+      expect(button?.disabled).toBe(false)
+    })
+
+    root?.querySelector<HTMLButtonElement>('[data-testid="desktop-update-install"]')?.click()
+
+    await vi.waitFor(() => {
+      const button = root?.querySelector<HTMLButtonElement>('[data-testid="desktop-update-install"]')
+      expect(installUpdate).toHaveBeenCalledOnce()
+      expect(button?.textContent).toContain('Installing update')
+      expect(button?.disabled).toBe(true)
+      expect(button?.getAttribute('aria-busy')).toBe('true')
     })
   })
 })

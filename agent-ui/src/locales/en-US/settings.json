@@ -66,13 +66,15 @@
       },
       "currentVersion": "Installed version: {version}",
       "waitingForStable": "This prerelease will stay installed until a newer Stable version is available. HomeRail will not downgrade it.",
-      "error": "Update channel change failed: {message}",
+      "error": "Desktop update failed: {message}",
       "state": {
         "idle": "Ready to check",
         "checking": "Checking for updates…",
         "available": "Update found",
         "downloading": "Downloading update…",
+        "downloadingProgress": "Downloading update… {percent}%",
         "downloaded": "Update downloaded; restart to install",
+        "installing": "Installing update…",
         "not-available": "No newer update on this channel",
         "error": "Update check failed"
       }

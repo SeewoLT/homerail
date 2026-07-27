@@ -12,11 +12,16 @@ let removeListener: (() => void) | null = null
 
 const channelBusy = computed(() => {
   if (switching.value) return true
-  return ['checking', 'available', 'downloading', 'downloaded'].includes(status.value?.state ?? '')
+  return ['checking', 'available', 'downloading', 'downloaded', 'installing'].includes(status.value?.state ?? '')
 })
 
 const statusText = computed(() => {
   if (!status.value) return ''
+  if (status.value.state === 'downloading' && status.value.downloadProgress) {
+    return t('settings.general.updates.state.downloadingProgress', {
+      percent: Math.round(status.value.downloadProgress.percent),
+    })
+  }
   return t(`settings.general.updates.state.${status.value.state}`)
 })
 
@@ -110,6 +115,21 @@ onBeforeUnmount(() => {
           {{ t('settings.general.updates.currentVersion', { version: status.currentVersion }) }}
           · {{ statusText }}
         </p>
+        <div
+          v-if="status?.state === 'downloading' && status.downloadProgress"
+          class="mt-2 h-1.5 max-w-2xl overflow-hidden rounded-full bg-[var(--hr-surface-2)]"
+          role="progressbar"
+          :aria-label="statusText"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          :aria-valuenow="Math.round(status.downloadProgress.percent)"
+          data-testid="desktop-update-progress"
+        >
+          <div
+            class="h-full rounded-full bg-[var(--hr-accent)] transition-[width]"
+            :style="{ width: `${Math.max(0, Math.min(100, status.downloadProgress.percent))}%` }"
+          />
+        </div>
         <p
           v-if="status?.channelNotice === 'waiting-for-newer-stable'"
           class="mt-2 text-xs leading-5 text-[var(--hr-warning)]"

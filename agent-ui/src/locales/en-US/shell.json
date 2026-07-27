@@ -6,7 +6,9 @@
   "updates": {
     "downloadedVersion": "HomeRail {version} is ready. Restart to install.",
     "downloaded": "An update is ready. Restart to install.",
-    "restart": "Restart to update"
+    "restart": "Restart to update",
+    "installing": "Installing update…",
+    "failed": "Update failed"
   },
   "dashboard": {
     "title": "DAG dashboard",

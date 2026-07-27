@@ -7,6 +7,7 @@ declare global {
     | 'available'
     | 'downloading'
     | 'downloaded'
+    | 'installing'
     | 'not-available'
     | 'error'
 
@@ -26,6 +27,13 @@ declare global {
     error?: string
     checkedAt?: number
     downloadedAt?: number
+    installStartedAt?: number
+    downloadProgress?: {
+      percent: number
+      transferred: number
+      total: number
+      bytesPerSecond?: number
+    }
   }
 
   interface HomeRailDesktopBridge {
