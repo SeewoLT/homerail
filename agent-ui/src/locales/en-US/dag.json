@@ -76,6 +76,11 @@
     "skipped": "Worker image build was skipped, so Docker DAG runs may be temporarily unavailable.",
     "status": "DAG resource status",
     "manage": "Manage DAG runtime",
-    "manageDescription": "Open Settings to check Docker or build the Worker image."
+    "manageDescription": "Open Settings to check Docker or build the Worker image.",
+    "dockerUnavailable": "Docker unavailable",
+    "imageMissing": "Worker image missing",
+    "imageStale": "Worker image needs rebuild",
+    "buildFailed": "Image build failed",
+    "sourceUnavailable": "Worker source unavailable"
   }
 }

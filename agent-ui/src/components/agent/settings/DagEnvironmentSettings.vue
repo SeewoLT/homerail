@@ -12,10 +12,11 @@ import {
   Server,
 } from 'lucide-vue-next'
 import { useDagEnvironment } from '@/composables/useDagEnvironment'
-import type {
-  DagEnvironmentCompatibility,
-  DagEnvironmentReasonCode,
-} from '@/api/services/dag-environment-api'
+import {
+  dagEnvironmentGuidanceKey,
+  dagEnvironmentReasonCode,
+} from '@/composables/useDagEnvironmentGuidance'
+import type { DagEnvironmentCompatibility } from '@/api/services/dag-environment-api'
 
 const { t, locale } = useI18n()
 const { status, loading, action, error, check, build } = useDagEnvironment()
@@ -83,40 +84,8 @@ function compatibilityClass(value: DagEnvironmentCompatibility): string {
   return 'text-[var(--hr-text-3)] border-[var(--hr-border)] bg-[var(--hr-surface-2)]'
 }
 
-function guidanceKey(reason: DagEnvironmentReasonCode | undefined): string | null {
-  if (!reason) return null
-  if (reason === 'docker_cli_missing') {
-    if (status.value?.platform === 'win32') return 'settings.environment.guidance.installWindows'
-    if (status.value?.platform === 'darwin') return 'settings.environment.guidance.installMac'
-    return 'settings.environment.guidance.installLinux'
-  }
-  if (reason === 'docker_daemon_unavailable') {
-    if (status.value?.platform === 'win32') return 'settings.environment.guidance.startWindows'
-    if (status.value?.platform === 'darwin') return 'settings.environment.guidance.startMac'
-    return 'settings.environment.guidance.startLinux'
-  }
-  if (reason === 'docker_permission_denied') return 'settings.environment.guidance.permissionLinux'
-  if (reason === 'docker_linux_engine_required') return 'settings.environment.guidance.linuxEngineWindows'
-  if (reason === 'worker_source_unavailable') return 'settings.environment.guidance.sourceUnavailable'
-  if (
-    reason === 'worker_image_missing'
-    || reason === 'worker_image_stale'
-    || reason === 'worker_image_incompatible'
-    || reason === 'worker_image_build_failed'
-  ) return `settings.environment.guidance.${reason}`
-  return 'settings.environment.guidance.checkFailed'
-}
-
 const guidance = computed(() => {
-  const reason = status.value?.docker.reason_code
-    ?? status.value?.worker_image.reason_code
-    ?? (
-      status.value?.worker_image.reason === 'stale'
-      || status.value?.worker_image.compatibility === 'stale'
-        ? 'worker_image_stale'
-        : undefined
-    )
-  const key = guidanceKey(reason)
+  const key = dagEnvironmentGuidanceKey(status.value, dagEnvironmentReasonCode(status.value))
   if (key) return t(key)
   if (
     status.value?.docker.status === 'unknown'
