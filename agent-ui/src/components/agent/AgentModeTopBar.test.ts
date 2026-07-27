@@ -119,4 +119,55 @@ describe('AgentModeTopBar localization', () => {
       expect(button?.getAttribute('aria-busy')).toBe('true')
     })
   })
+
+  it('offers an explicit update check retry after installation handoff fails', async () => {
+    i18n.global.locale.value = 'en-US'
+    let finishCheck: ((status: DesktopUpdateStatus) => void) | null = null
+    const checkForUpdates = vi.fn(() => new Promise<DesktopUpdateStatus>((resolve) => {
+      finishCheck = resolve
+    }))
+    Object.defineProperty(window, 'homerailDesktop', {
+      configurable: true,
+      value: {
+        updateStatus: vi.fn().mockResolvedValue(updateStatus({
+          state: 'downloaded',
+          update: { version: '0.1.0-alpha.2' },
+        })),
+        installUpdate: vi.fn().mockRejectedValue(new Error('installer handoff timed out')),
+        checkForUpdates,
+      } satisfies HomeRailDesktopBridge,
+    })
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(AgentModeTopBar, { activeMode: 'text' })
+    app.use(i18n)
+    app.mount(root)
+
+    await vi.waitFor(() => {
+      expect(root?.querySelector<HTMLButtonElement>('[data-testid="desktop-update-install"]')?.textContent)
+        .toContain('Restart to update')
+    })
+    root?.querySelector<HTMLButtonElement>('[data-testid="desktop-update-install"]')?.click()
+
+    await vi.waitFor(() => {
+      const button = root?.querySelector<HTMLButtonElement>('[data-testid="desktop-update-install"]')
+      expect(button?.textContent).toContain('Retry update check')
+      expect(button?.disabled).toBe(false)
+      expect(button?.title).toContain('installer handoff timed out')
+    })
+    root?.querySelector<HTMLButtonElement>('[data-testid="desktop-update-install"]')?.click()
+
+    await vi.waitFor(() => {
+      const button = root?.querySelector<HTMLButtonElement>('[data-testid="desktop-update-install"]')
+      expect(checkForUpdates).toHaveBeenCalledOnce()
+      expect(button?.textContent).toContain('Checking for updates')
+      expect(button?.disabled).toBe(true)
+      expect(button?.getAttribute('aria-busy')).toBe('true')
+    })
+
+    finishCheck?.(updateStatus({ state: 'checking' }))
+    await vi.waitFor(() => {
+      expect(root?.querySelector('[data-testid="desktop-update-install"]')).toBeNull()
+    })
+  })
 })

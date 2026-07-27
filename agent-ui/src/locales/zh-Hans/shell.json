@@ -8,7 +8,9 @@
     "downloaded": "新版本已下载，重启后安装",
     "restart": "重启更新",
     "installing": "正在安装更新…",
-    "failed": "更新失败"
+    "failed": "更新失败",
+    "retry": "重新检查更新",
+    "checking": "正在检查更新…"
   },
   "dashboard": {
     "title": "DAG 仪表盘",

@@ -43,6 +43,7 @@ const hasWaitingRuns = computed(() => waitingRunCount.value > 0)
 const runtimeRunCount = computed(() => activeRunCount.value + waitingRunCount.value)
 const desktopUpdateStatus = ref<DesktopUpdateStatus | null>(null)
 const installRequestPending = ref(false)
+const retryRequestPending = ref(false)
 let removeUpdateListener: (() => void) | null = null
 
 const runtimeTitle = computed(() => {
@@ -66,6 +67,12 @@ const installFailure = computed(() =>
 const updateInstalling = computed(() =>
   installRequestPending.value || desktopUpdateStatus.value?.state === 'installing',
 )
+const updateActionPending = computed(() =>
+  updateInstalling.value || retryRequestPending.value,
+)
+const updateRetrySupported = computed(() =>
+  Boolean(desktopBridge()?.checkForUpdates),
+)
 const updateActionVisible = computed(() =>
   Boolean(
     desktopUpdateStatus.value?.supported
@@ -77,6 +84,7 @@ const updateActionVisible = computed(() =>
   ),
 )
 const updateButtonTitle = computed(() => {
+  if (retryRequestPending.value) return t('shell.updates.checking')
   if (installFailure.value) {
     return desktopUpdateStatus.value?.error || t('shell.updates.failed')
   }
@@ -85,7 +93,8 @@ const updateButtonTitle = computed(() => {
   return version ? t('shell.updates.downloadedVersion', { version }) : t('shell.updates.downloaded')
 })
 const updateButtonText = computed(() => {
-  if (installFailure.value) return t('shell.updates.failed')
+  if (retryRequestPending.value) return t('shell.updates.checking')
+  if (installFailure.value) return t('shell.updates.retry')
   if (updateInstalling.value) return t('shell.updates.installing')
   return t('shell.updates.restart')
 })
@@ -139,6 +148,7 @@ function startDesktopUpdateWatcher(): void {
     if (status.state === 'installing' || status.state === 'error') {
       installRequestPending.value = false
     }
+    retryRequestPending.value = false
   }) ?? null
 
   void bridge.updateStatus()
@@ -163,17 +173,18 @@ function stopDesktopUpdateWatcher(): void {
 
 async function installDesktopUpdate(): Promise<void> {
   const bridge = desktopBridge()
+  const downloadedStatus = desktopUpdateStatus.value
   if (
     !bridge?.installUpdate
     || updateInstalling.value
-    || desktopUpdateStatus.value?.state !== 'downloaded'
+    || downloadedStatus?.state !== 'downloaded'
   ) return
   installRequestPending.value = true
   try {
     desktopUpdateStatus.value = await bridge.installUpdate()
   } catch (error) {
     desktopUpdateStatus.value = {
-      ...(desktopUpdateStatus.value as DesktopUpdateStatus),
+      ...downloadedStatus,
       state: 'error',
       error: error instanceof Error ? error.message : String(error),
       installStartedAt: Date.now(),
@@ -181,6 +192,36 @@ async function installDesktopUpdate(): Promise<void> {
   } finally {
     installRequestPending.value = false
   }
+}
+
+async function retryDesktopUpdateCheck(): Promise<void> {
+  const bridge = desktopBridge()
+  const failedStatus = desktopUpdateStatus.value
+  if (
+    !bridge?.checkForUpdates
+    || retryRequestPending.value
+    || failedStatus?.state !== 'error'
+    || !failedStatus.installStartedAt
+  ) return
+  retryRequestPending.value = true
+  try {
+    desktopUpdateStatus.value = await bridge.checkForUpdates()
+  } catch (error) {
+    desktopUpdateStatus.value = {
+      ...failedStatus,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  } finally {
+    retryRequestPending.value = false
+  }
+}
+
+function handleDesktopUpdateAction(): void {
+  if (installFailure.value) {
+    void retryDesktopUpdateCheck()
+    return
+  }
+  void installDesktopUpdate()
 }
 
 onMounted(() => {
@@ -239,11 +280,11 @@ onBeforeUnmount(() => {
         :title="updateButtonTitle"
         type="button"
         data-testid="desktop-update-install"
-        :aria-busy="updateInstalling"
-        :disabled="updateInstalling || installFailure"
-        @click="installDesktopUpdate"
+        :aria-busy="updateActionPending"
+        :disabled="updateActionPending || (installFailure && !updateRetrySupported)"
+        @click="handleDesktopUpdateAction"
       >
-        <RotateCcw class="h-4 w-4" :class="updateInstalling ? 'animate-spin' : ''" />
+        <RotateCcw class="h-4 w-4" :class="updateActionPending ? 'animate-spin' : ''" />
         {{ updateButtonText }}
       </button>
       <button

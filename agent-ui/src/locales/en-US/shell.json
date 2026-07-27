@@ -8,7 +8,9 @@
     "downloaded": "An update is ready. Restart to install.",
     "restart": "Restart to update",
     "installing": "Installing update…",
-    "failed": "Update failed"
+    "failed": "Update failed",
+    "retry": "Retry update check",
+    "checking": "Checking for updates…"
   },
   "dashboard": {
     "title": "DAG dashboard",
