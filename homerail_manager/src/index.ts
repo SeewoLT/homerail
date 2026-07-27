@@ -13,6 +13,9 @@ import {
 import { getDagEnvironmentController } from "./server/dag-environment.js";
 import { HOMERAIL_PLUGIN_SDK_ABI_VERSION } from "homerail-plugin-sdk";
 
+// Precondition: this check itself only runs when the Manager dist is current.
+// A stale Manager dist would not contain this guard at all. The check targets
+// the more common failure mode: Manager rebuilt but SDK dist left stale.
 const EXPECTED_PLUGIN_SDK_ABI_VERSION = 1;
 if (HOMERAIL_PLUGIN_SDK_ABI_VERSION !== EXPECTED_PLUGIN_SDK_ABI_VERSION) {
   console.error(

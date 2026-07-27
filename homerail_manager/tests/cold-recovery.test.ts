@@ -221,8 +221,9 @@ describe("manager cold recovery", () => {
 
     const run = getActiveRun("run-blocked-after-restart")!;
     expect(summary.failed.map((f) => f.runId)).toContain("run-blocked-after-restart");
-    expect(summary.failed[0].demotedNodes).toContain("root");
-    expect(summary.failed[0].reason).toContain("orphaned running nodes");
+    const failure = summary.failed.find((f) => f.runId === "run-blocked-after-restart")!;
+    expect(failure.demotedNodes).toContain("root");
+    expect(failure.reason).toContain("orphaned running nodes");
     expect(run.status).toBe("failed");
     expect(run.dagRun.nodeStates.get("root")).toBe("FAILED");
     expect(run.dagRun.nodeStates.get("observer")).toBe("SKIPPED");

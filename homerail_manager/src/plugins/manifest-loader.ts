@@ -329,6 +329,10 @@ export function loadPluginPackage(
     }
     const content = decodeHomerailPluginUtf8(buffer, declaration.path);
     const metadata = validatePluginSkill(declaration.id, content);
+    // ABI guard: validatePluginSkill changed from void to { name, description }
+    // in ABI v1. A stale SDK dist still returns undefined, which would crash on
+    // .description access below. validatePluginCustomRendererSource is not
+    // guarded here because its return value is never dereferenced (void call).
     if (!metadata || typeof metadata.description !== "string") {
       throw new Error(
         `homerail-plugin-sdk ABI mismatch (expected ABI version ${HOMERAIL_PLUGIN_SDK_ABI_VERSION}): ` +
