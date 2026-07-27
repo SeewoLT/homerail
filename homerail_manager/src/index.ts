@@ -11,6 +11,17 @@ import {
   recoverDagLiveSurfaceProjections,
 } from "./generative-ui/dag-live-surface-projector.js";
 import { getDagEnvironmentController } from "./server/dag-environment.js";
+import { HOMERAIL_PLUGIN_SDK_ABI_VERSION } from "homerail-plugin-sdk";
+
+const EXPECTED_PLUGIN_SDK_ABI_VERSION = 1;
+if (HOMERAIL_PLUGIN_SDK_ABI_VERSION !== EXPECTED_PLUGIN_SDK_ABI_VERSION) {
+  console.error(
+    `[homerail_manager] FATAL: homerail-plugin-sdk ABI version mismatch — ` +
+    `Manager expects ${EXPECTED_PLUGIN_SDK_ABI_VERSION}, runtime SDK reports ${HOMERAIL_PLUGIN_SDK_ABI_VERSION}. ` +
+    `Rebuild homerail_plugin_sdk (npm run build) and restart.`,
+  );
+  process.exit(1);
+}
 
 initEventLogging();
 
@@ -46,6 +57,11 @@ server.listen(port, host, () => {
   console.error(
     `cold recovery: recovered=${recovery.recovered.length} failed=${recovery.failed.length} skipped=${recovery.skipped.length}`,
   );
+  for (const failure of recovery.failed) {
+    console.error(
+      `cold recovery failed: run=${failure.runId} reason="${failure.reason}" demoted_nodes=[${failure.demotedNodes.join(", ")}]`,
+    );
+  }
   console.error(
     `live surface recovery: projected=${surfaceRecovery.projected_events} failed=${surfaceRecovery.failed.length}`,
   );

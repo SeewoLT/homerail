@@ -220,7 +220,9 @@ describe("manager cold recovery", () => {
     const summary = recoverAllActiveRuns();
 
     const run = getActiveRun("run-blocked-after-restart")!;
-    expect(summary.failed).toContain("run-blocked-after-restart");
+    expect(summary.failed.map((f) => f.runId)).toContain("run-blocked-after-restart");
+    expect(summary.failed[0].demotedNodes).toContain("root");
+    expect(summary.failed[0].reason).toContain("orphaned running nodes");
     expect(run.status).toBe("failed");
     expect(run.dagRun.nodeStates.get("root")).toBe("FAILED");
     expect(run.dagRun.nodeStates.get("observer")).toBe("SKIPPED");
@@ -238,7 +240,10 @@ describe("manager cold recovery", () => {
     const summary = recoverAllActiveRuns();
 
     const recovered = getActiveRun("run-legacy-recovery-state")!;
-    expect(summary.failed).toContain("run-legacy-recovery-state");
+    expect(summary.failed.map((f) => f.runId)).toContain("run-legacy-recovery-state");
+    const failure = summary.failed.find((f) => f.runId === "run-legacy-recovery-state")!;
+    expect(failure.demotedNodes).toEqual([]);
+    expect(failure.reason).toContain("blocked by failed dependency");
     expect(recovered.status).toBe("failed");
     expect(recovered.dagRun.nodeStates.get("observer")).toBe("SKIPPED");
   });

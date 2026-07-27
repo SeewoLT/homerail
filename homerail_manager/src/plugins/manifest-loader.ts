@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
   validatePluginCustomRendererSource,
   validatePluginSkill,
+  HOMERAIL_PLUGIN_SDK_ABI_VERSION,
 } from "homerail-plugin-sdk";
 import {
   GENERATIVE_UI_IR_VERSION,
@@ -328,6 +329,13 @@ export function loadPluginPackage(
     }
     const content = decodeHomerailPluginUtf8(buffer, declaration.path);
     const metadata = validatePluginSkill(declaration.id, content);
+    if (!metadata || typeof metadata.description !== "string") {
+      throw new Error(
+        `homerail-plugin-sdk ABI mismatch (expected ABI version ${HOMERAIL_PLUGIN_SDK_ABI_VERSION}): ` +
+        `validatePluginSkill() did not return { name, description } for skill "${declaration.id}". ` +
+        `The runtime SDK dist is likely stale — rebuild homerail_plugin_sdk and ensure the Manager loads the updated artifact.`,
+      );
+    }
     if (declaration.visual_profile) {
       parseDagWorkerSkillVisualProfileV1(parseJsonObject(
         buffers.get(declaration.visual_profile)!,
