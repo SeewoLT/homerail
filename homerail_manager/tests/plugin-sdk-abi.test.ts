@@ -79,6 +79,9 @@ describe("plugin SDK ABI guard", () => {
       /ABI mismatch/,
     );
     expect(() => loadPluginPackage(packageRoot, { source: "development" })).toThrow(
+      /Manager expects ABI version 1/,
+    );
+    expect(() => loadPluginPackage(packageRoot, { source: "development" })).toThrow(
       /rebuild homerail_plugin_sdk/i,
     );
   });

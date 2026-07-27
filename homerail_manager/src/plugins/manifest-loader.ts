@@ -335,7 +335,8 @@ export function loadPluginPackage(
     // guarded here because its return value is never dereferenced (void call).
     if (!metadata || typeof metadata.description !== "string") {
       throw new Error(
-        `homerail-plugin-sdk ABI mismatch (expected ABI version ${HOMERAIL_PLUGIN_SDK_ABI_VERSION}): ` +
+        `homerail-plugin-sdk ABI mismatch (Manager expects ABI version 1, ` +
+        `runtime SDK reports ${HOMERAIL_PLUGIN_SDK_ABI_VERSION}): ` +
         `validatePluginSkill() did not return { name, description } for skill "${declaration.id}". ` +
         `The runtime SDK dist is likely stale — rebuild homerail_plugin_sdk and ensure the Manager loads the updated artifact.`,
       );
