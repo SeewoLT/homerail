@@ -63,7 +63,7 @@ function installPrepareCommandStub(
   prepare.gateway_config.command = [
     "node",
     "-e",
-    "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const i=JSON.parse(s),r=Array.isArray(i.request)?i.request.at(-1):undefined,p=r?.input?.payload;if(!p)throw new Error('missing request');process.stdout.write(JSON.stringify({repo:p.repo,pr:p.pr,base:p.base,head:p.head,repository_path:'/workspace/repository',changed_files:['src/run.ts'],diff_stat:'1 file changed',diff_patch:'diff --git a/src/run.ts b/src/run.ts',diff_chunks:[{index:1,path:'review-evidence/diff-0001.patch',bytes:39,files:['src/run.ts']}],diff_bytes:39,diff_truncated:" + JSON.stringify(diffTruncated) + ",commit_metadata:[],commit_metadata_truncated:false}))})",
+    "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const i=JSON.parse(s),r=Array.isArray(i.request)?i.request.at(-1):undefined,p=r?.payload;if(!p)throw new Error('missing request');process.stdout.write(JSON.stringify({repo:p.repo,pr:p.pr,base:p.base,head:p.head,repository_path:'/workspace/repository',changed_files:['src/run.ts'],diff_stat:'1 file changed',diff_patch:'diff --git a/src/run.ts b/src/run.ts',diff_chunks:[{index:1,path:'review-evidence/diff-0001.patch',bytes:39,files:['src/run.ts']}],diff_bytes:39,diff_truncated:" + JSON.stringify(diffTruncated) + ",commit_metadata:[],commit_metadata_truncated:false}))})",
   ];
 }
 
@@ -83,18 +83,14 @@ function productionPrepareCommand(): string {
 function prepareCommandInput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     request: [{
-      input: {
-        payload: {
-          repo: "enterprise/homerail",
-          pr: 8,
-          base: "a".repeat(40),
-          head: "b".repeat(40),
-          base_clone_url: "https://github.example/enterprise/homerail.git",
-          head_clone_url: "https://github.example/enterprise/homerail.git",
-          expected_usage: 8,
-          budget_key: "pr-review:enterprise/homerail:prepare-command",
-          ...overrides,
-        },
+      payload: {
+        repo: "enterprise/homerail",
+        pr: 8,
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        base_clone_url: "https://github.example/enterprise/homerail.git",
+        head_clone_url: "https://github.example/enterprise/homerail.git",
+        ...overrides,
       },
     }],
   };
@@ -170,6 +166,12 @@ describe("PR Review scenario assets", () => {
       }),
     ]);
     const nodes = result.canonical?.nodes ?? [];
+    expect(nodes.find((node) => node.id === "budget")).toBeUndefined();
+    expect(nodes.find((node) => node.id === "budget_blocked")).toBeUndefined();
+    expect(nodes.find((node) => node.id === "prepare")).toMatchObject({
+      inputs: [expect.objectContaining({ name: "request", contract: "RunEnvelope" })],
+      depends_on: [],
+    });
     expect(nodes.filter((node) => node.id.endsWith("_review") && !node.id.startsWith("normalize_"))
       .map((node) => node.id).sort()).toEqual([
       "frontend_review",
@@ -514,8 +516,6 @@ describe("PR Review scenario assets", () => {
       head: "b".repeat(40),
       base_clone_url: "https://github.example/enterprise/homerail.git",
       head_clone_url: "https://github.example/contributor/homerail.git",
-      expected_usage: 8,
-      budget_key: "pr-review:enterprise/homerail:2026-07-13",
     };
     expect(validateJsonContract(inputContract, reviewInput)).toMatchObject({ valid: true });
     expect(validateJsonContract(inputContract, {
@@ -683,7 +683,7 @@ describe("PR Review scenario assets", () => {
     try {
       const invoked = await _invokeHostCodexVoiceToolForTest(
         "run_pr_review",
-        { repo: "xiaotianfotos/homerail", pr: 25, expected_usage: 8 },
+        { repo: "xiaotianfotos/homerail", pr: 25 },
         { managerRestUrl: `${baseUrl}/api` },
       );
       expect(JSON.parse(invoked.result.content[0].text)).toMatchObject({
@@ -703,7 +703,6 @@ describe("PR Review scenario assets", () => {
           head: "b".repeat(40),
           base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
           head_clone_url: "https://github.com/contributor/homerail.git",
-          expected_usage: 8,
         },
       });
     } finally {
@@ -1007,8 +1006,6 @@ describe("PR Review scenario assets", () => {
         head: "b".repeat(40),
         base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
         head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-        expected_usage: 8,
-        budget_key: "pr-review:xiaotianfotos/homerail:2026-07-12",
       },
     };
     executor.createRun("pr-review-runtime", parsed, JSON.stringify(input));
@@ -1121,8 +1118,6 @@ describe("PR Review scenario assets", () => {
         head: "b".repeat(40),
         base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
         head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-        expected_usage: 8,
-        budget_key: "pr-review:xiaotianfotos/homerail:truncated",
       },
     };
     executor.createRun(runId, parsed, JSON.stringify(input));
@@ -1215,8 +1210,6 @@ describe("PR Review scenario assets", () => {
         head: "b".repeat(40),
         base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
         head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-        expected_usage: 8,
-        budget_key: "pr-review:xiaotianfotos/homerail:reviewer-failure",
       },
     };
     executor.createRun("pr-review-reviewer-failure", parsed, JSON.stringify(input));
