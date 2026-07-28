@@ -67,7 +67,7 @@ describe("PR Review run-template", () => {
 
     const input = await resolvePrReviewInput(
       { repo: "xiaotianfotos/homerail", pr: 25 },
-      { fetchImpl: fetchImpl as typeof fetch, now: new Date("2026-07-12T00:00:00Z"), env: {} },
+      { fetchImpl: fetchImpl as typeof fetch, env: {} },
     );
 
     expect(fetchImpl).toHaveBeenCalledWith(
@@ -81,8 +81,6 @@ describe("PR Review run-template", () => {
       head: "b".repeat(40),
       base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
       head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-      expected_usage: 8,
-      budget_key: "pr-review:xiaotianfotos/homerail:2026-07-12",
     });
     expect(manualRunEnvelope(input)).toMatchObject({
       trigger_id: "manual",

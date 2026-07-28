@@ -20,8 +20,8 @@ spec:
 
   pattern:
     id: pr-review-scenario
-    version: 1.8.0
-    source: HomeRail concrete scenario composed from budget-gate, orchestrator-workers, and quorum
+    version: 1.9.0
+    source: HomeRail concrete scenario composed from orchestrator-workers and quorum
     parameters:
       reviewer_count: 4
       privacy_advisories: 1
@@ -39,7 +39,7 @@ spec:
     PRReviewInput:
       type: object
       additionalProperties: false
-      required: [repo, pr, base, head, base_clone_url, head_clone_url, expected_usage, budget_key]
+      required: [repo, pr, base, head, base_clone_url, head_clone_url]
       properties:
         repo: { type: string, pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" }
         pr: { type: integer, minimum: 1 }
@@ -47,8 +47,6 @@ spec:
         head: { type: string, pattern: '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$' }
         base_clone_url: { type: string, pattern: '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$' }
         head_clone_url: { type: string, pattern: '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$' }
-        expected_usage: { type: number, minimum: 0, maximum: 100 }
-        budget_key: { type: string, minLength: 1, maxLength: 200 }
         title: { type: string, maxLength: 500 }
         author: { type: string, maxLength: 200 }
 
@@ -63,7 +61,7 @@ spec:
         payload:
           type: object
           additionalProperties: false
-          required: [repo, pr, base, head, base_clone_url, head_clone_url, expected_usage, budget_key]
+          required: [repo, pr, base, head, base_clone_url, head_clone_url]
           properties:
             repo: { type: string, pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" }
             pr: { type: integer, minimum: 1 }
@@ -71,8 +69,6 @@ spec:
             head: { type: string, pattern: '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$' }
             base_clone_url: { type: string, pattern: '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$' }
             head_clone_url: { type: string, pattern: '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$' }
-            expected_usage: { type: number, minimum: 0, maximum: 100 }
-            budget_key: { type: string, minLength: 1, maxLength: 200 }
             title: { type: string, maxLength: 500 }
             author: { type: string, maxLength: 200 }
 
@@ -1049,23 +1045,9 @@ spec:
         handoff; immediately resubmit the existing publication in the exact shape.
 
   nodes:
-    budget:
-      kind: state
-      inputs: { request: { contract: RunEnvelope } }
-      outputs: { admitted: {}, blocked: {} }
-      config:
-        namespace: pr-review-budget
-        key: default
-        key_field: payload.budget_key
-        operation: budget_admit
-        value_field: payload.expected_usage
-        budget_limit: 100
-        success_port: admitted
-        conflict_port: blocked
-
     prepare:
       kind: command
-      inputs: { request: {} }
+      inputs: { request: { contract: RunEnvelope } }
       outputs: { ready: { contract: PreparedReviewContext }, failed: {} }
       config:
         command:
@@ -1127,8 +1109,8 @@ spec:
             process.stdin.on('data', (chunk) => { stdin += chunk; }).on('end', () => {
               const inputs = JSON.parse(stdin);
               const request = Array.isArray(inputs.request) ? inputs.request.at(-1) : undefined;
-              const payload = request?.input?.payload;
-              if (!payload || typeof payload !== 'object') fail('budget input payload is missing');
+              const payload = request?.payload;
+              if (!payload || typeof payload !== 'object') fail('review input payload is missing');
               const { repo, pr, base, head, title, author } = payload;
               if (
                 typeof repo !== 'string' || !Number.isInteger(pr) ||
@@ -1628,11 +1610,6 @@ spec:
       outcome: cancelled
       inputs: { result: { contract: PublishedReview } }
 
-    budget_blocked:
-      kind: terminal
-      outcome: cancelled
-      inputs: { result: {} }
-
     preparation_failed:
       kind: terminal
       outcome: failure
@@ -1684,9 +1661,7 @@ spec:
       inputs: { result: {} }
 
   edges:
-    - { from: $run.input, to: budget.request }
-    - { from: budget.admitted, to: prepare.request }
-    - { from: budget.blocked, to: budget_blocked.result }
+    - { from: $run.input, to: prepare.request }
     - { from: prepare.ready, to: privacy_review.context }
     - { from: prepare.ready, to: strip_privacy_context.prepared }
     - { from: prepare.failed, to: preparation_failed.result, condition: on_failure }

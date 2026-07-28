@@ -963,7 +963,6 @@ export const MANAGER_AGENT_TOOL_SPECS: Record<ManagerAgentToolName, AgentToolDef
       properties: {
         repo: { type: "string", description: "GitHub repository in owner/name form" },
         pr: { type: "integer", minimum: 1 },
-        expected_usage: { type: "integer", minimum: 0, maximum: 100 },
       },
       required: ["repo", "pr"],
       additionalProperties: false,

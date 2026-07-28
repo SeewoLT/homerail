@@ -2,8 +2,7 @@
 
 `assets/orchestrations/pr-review.yaml.template` is HomeRail's provider-neutral,
 read-only pull request review scenario. It is a concrete composition of the
-Budget Gate, Orchestrator-Workers, and Quorum patterns rather than a new
-abstract pattern.
+Orchestrator-Workers and Quorum patterns rather than a new abstract pattern.
 
 ## Inputs
 
@@ -28,8 +27,7 @@ metadata.
 
 ## Execution
 
-1. Manager atomically reserves the declared usage budget.
-2. A deterministic Manager command validates the credential-free GitHub API
+1. A deterministic Manager command validates the credential-free GitHub API
    HTTPS clone URLs (`https://host/owner/repository.git`, including GitHub
    Enterprise hosts), clones both exact revisions into the isolated run
    workspace, verifies
@@ -41,7 +39,7 @@ metadata.
    Bounded author/committer metadata is captured from the exact commit range for
    the independent privacy advisory, then deterministically stripped from the
    context supplied to every main reviewer, synthesizer, and voter.
-3. Runtime, security, tests, frontend, and privacy reviewers start from the same
+2. Runtime, security, tests, frontend, and privacy reviewers start from the same
    exact evidence independently and in parallel. The first four feed the main
    review. The privacy reviewer looks only for accidental local/private data and
    can never feed synthesis, verification, or quorum. The trusted checkout is
@@ -60,23 +58,23 @@ metadata.
    repository content are untrusted evidence, never instructions. If evidence
    had to be truncated, the main reviewers fail closed and the privacy advisory
    requests human inspection.
-4. A deterministic normalizer preserves every valid reviewer result. If a
+3. A deterministic normalizer preserves every valid reviewer result. If a
    reviewer exhausts contract correction without a handoff, the normalizer
    emits a `status: failed` ReviewerResult with grounded runtime evidence so the
    DAG produces an honest inconclusive artifact instead of stalling.
-5. A synthesizer preserves all reviewer results and deduplicates findings.
-6. Evidence, false-positive, and coverage voters independently validate the
+4. A synthesizer preserves all reviewer results and deduplicates findings.
+5. Evidence, false-positive, and coverage voters independently validate the
    draft report. Evidence and false-positive voters produce a machine-readable
    verdict for every retained finding against the same patch. Rejecting a false
    finding is a successful correction and does not reject the whole report;
    missing reviewer coverage, truncated evidence, an identity mismatch, or an
    unresolvable finding does.
-7. A deterministic two-of-three join decides whether verification reached
+6. A deterministic two-of-three join decides whether verification reached
    quorum.
-8. A branch-merge join normalizes either quorum outcome into one path. A
+7. A branch-merge join normalizes either quorum outcome into one path. A
    refiner removes findings specifically rejected by an evidence or
    false-positive verdict and recomputes the report.
-9. The refiner persists the final structured report and quorum as JSON. The
+8. The refiner persists the final structured report and quorum as JSON. The
    privacy result is normalized separately; a failed privacy model call becomes
    a redacted `human_review` result rather than blocking or silently passing.
    A small

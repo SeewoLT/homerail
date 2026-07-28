@@ -20,9 +20,7 @@ import {
   compactManagerAgentSkillSupervisedDagResult,
   compactManagerAgentSkillViewPresentResult,
   createManagerAgentWidgetFileTools,
-  DEFAULT_PR_REVIEW_EXPECTED_USAGE,
   DEFAULT_MANAGER_AGENT_RUNTIME_AGENT_TYPE,
-  defaultPrReviewBudgetKey,
   isFullGitRevision,
   managerAgentDagCommandResult,
   managerAgentDagContextPrompt,
@@ -920,10 +918,6 @@ export function createManagerTools(state: {
         const pr = Number(args.pr);
         try {
           const metadata = await resolveGitHubPullRequest(repo, pr);
-          const requestedUsage = Number(args.expected_usage);
-          const expectedUsage = Number.isInteger(requestedUsage) && requestedUsage >= 0 && requestedUsage <= 100
-            ? requestedUsage
-            : DEFAULT_PR_REVIEW_EXPECTED_USAGE;
           const envelope = {
             trigger_id: "manager-agent",
             trigger_type: "manual",
@@ -937,8 +931,6 @@ export function createManagerTools(state: {
               head_clone_url: metadata.headCloneUrl,
               title: metadata.title,
               author: metadata.author,
-              expected_usage: expectedUsage,
-              budget_key: defaultPrReviewBudgetKey(repo),
             },
           };
           const body = await requestManager("/runs/create-and-run", {

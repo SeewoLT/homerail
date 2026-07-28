@@ -2,8 +2,6 @@ import type { Command } from "commander";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-  DEFAULT_PR_REVIEW_EXPECTED_USAGE,
-  defaultPrReviewBudgetKey,
   isFullGitRevision,
 } from "homerail-protocol";
 
@@ -39,8 +37,6 @@ export interface ResolvedPrReviewInput {
   head: string;
   base_clone_url: string;
   head_clone_url: string;
-  expected_usage: number;
-  budget_key: string;
   title?: string;
   author?: string;
 }
@@ -163,7 +159,6 @@ export async function resolvePrReviewInput(
   options: {
     fetchImpl?: typeof fetch;
     env?: NodeJS.ProcessEnv;
-    now?: Date;
     apiBaseUrl?: string;
   } = {},
 ): Promise<ResolvedPrReviewInput> {
@@ -196,12 +191,6 @@ export async function resolvePrReviewInput(
   if (!isFullGitRevision(base)) throw new Error("pr-review base must be a full commit SHA");
   if (!isFullGitRevision(head)) throw new Error("pr-review head must be a full commit SHA");
 
-  const expectedUsage = input.expected_usage === undefined
-    ? DEFAULT_PR_REVIEW_EXPECTED_USAGE
-    : Number(input.expected_usage);
-  if (!Number.isFinite(expectedUsage) || expectedUsage < 0 || expectedUsage > 100) {
-    throw new Error("pr-review expected_usage must be between 0 and 100");
-  }
   return {
     repo,
     pr,
@@ -209,8 +198,6 @@ export async function resolvePrReviewInput(
     head,
     base_clone_url: baseRepository.cloneUrl,
     head_clone_url: headRepository.cloneUrl,
-    expected_usage: expectedUsage,
-    budget_key: optionalString(input.budget_key) ?? defaultPrReviewBudgetKey(repo, options.now),
     ...(title ? { title } : {}),
     ...(author ? { author } : {}),
   };
