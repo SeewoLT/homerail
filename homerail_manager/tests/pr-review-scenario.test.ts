@@ -923,17 +923,42 @@ describe("PR Review scenario assets", () => {
       { ...passingReviewReport(), status: "inconclusive" },
       { passed: false, successes: 1, total: 3, threshold: 2 },
     ).status).toBe(0);
+
+    const specializedCoverage = passingReviewReport();
+    const specializedReviewers = specializedCoverage.reviewer_results as Array<Record<string, unknown>>;
+    specializedReviewers[3].reviewed_files = ["agent-ui/src/App.vue"];
+    specializedReviewers[3].unreviewed_files = ["homerail_manager/src/index.ts"];
+    for (const reviewer of specializedReviewers.slice(0, 3)) {
+      reviewer.reviewed_files = ["agent-ui/src/App.vue", "homerail_manager/src/index.ts"];
+    }
+    expect(runValidator(
+      "completed",
+      specializedCoverage,
+      { passed: true, successes: 2, total: 3, threshold: 2 },
+    ).status).toBe(0);
+
     const incompleteCoverage = passingReviewReport();
-    const firstReviewer = (incompleteCoverage.reviewer_results as Array<Record<string, unknown>>)[0];
-    firstReviewer.unreviewed_files = ["src/missed.ts"];
-    firstReviewer.evidence_truncated = true;
+    const incompleteReviewers = incompleteCoverage.reviewer_results as Array<Record<string, unknown>>;
+    incompleteReviewers[0].unreviewed_files = ["src/missed.ts"];
+    incompleteReviewers[1].reviewed_files = ["src/run.ts", "src/missed.ts"];
     const incomplete = runValidator(
       "completed",
       incompleteCoverage,
       { passed: true, successes: 2, total: 3, threshold: 2 },
     );
     expect(incomplete.status).toBe(1);
-    expect(incomplete.stderr).toContain("left files unreviewed");
+    expect(incomplete.stderr).toContain("without two independent reviews");
+
+    const truncatedCoverage = passingReviewReport();
+    const firstReviewer = (truncatedCoverage.reviewer_results as Array<Record<string, unknown>>)[0];
+    firstReviewer.evidence_truncated = true;
+    const truncated = runValidator(
+      "completed",
+      truncatedCoverage,
+      { passed: true, successes: 2, total: 3, threshold: 2 },
+    );
+    expect(truncated.status).toBe(1);
+    expect(truncated.stderr).toContain("used truncated evidence");
 
     const invalid = runValidator(
       "completed",
