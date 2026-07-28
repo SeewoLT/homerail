@@ -54,6 +54,7 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
     "report does not contain four reviewer results",
   );
   const reviewerNames = new Set();
+  const reviewedByFile = new Map();
   for (const reviewer of report.reviewer_results) {
     invariant(reviewer && typeof reviewer === "object" && !Array.isArray(reviewer), "reviewer result is not an object");
     invariant(["runtime", "security", "tests", "frontend"].includes(reviewer.reviewer), "reviewer result has an invalid identity");
@@ -62,13 +63,35 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
     invariant(Array.isArray(reviewer.reviewed_files), `${reviewer.reviewer} reviewed_files is missing`);
     invariant(Array.isArray(reviewer.unreviewed_files), `${reviewer.reviewer} unreviewed_files is missing`);
     invariant(typeof reviewer.evidence_truncated === "boolean", `${reviewer.reviewer} evidence_truncated is missing`);
+    const reviewedFiles = new Set(reviewer.reviewed_files);
+    for (const file of reviewer.reviewed_files) {
+      invariant(typeof file === "string" && file.length > 0, `${reviewer.reviewer} reviewed_files contains an invalid path`);
+      const reviewers = reviewedByFile.get(file) ?? new Set();
+      reviewers.add(reviewer.reviewer);
+      reviewedByFile.set(file, reviewers);
+    }
+    for (const file of reviewer.unreviewed_files) {
+      invariant(typeof file === "string" && file.length > 0, `${reviewer.reviewer} unreviewed_files contains an invalid path`);
+      invariant(!reviewedFiles.has(file), `${reviewer.reviewer} both reviewed and skipped ${file}`);
+    }
     if (report.status !== "inconclusive") {
       invariant(reviewer.status === "complete", `${reviewer.reviewer} reviewer did not complete`);
-      invariant(reviewer.unreviewed_files.length === 0, `${reviewer.reviewer} left files unreviewed`);
       invariant(reviewer.evidence_truncated === false, `${reviewer.reviewer} used truncated evidence`);
     }
   }
   invariant(reviewerNames.size === 4, "report reviewer identities are not distinct");
+  if (report.status !== "inconclusive") {
+    for (const reviewer of report.reviewer_results) {
+      for (const file of reviewer.unreviewed_files) {
+        const independentReviewers = new Set(reviewedByFile.get(file) ?? []);
+        independentReviewers.delete(reviewer.reviewer);
+        invariant(
+          independentReviewers.size >= 2,
+          `${reviewer.reviewer} left ${file} without two independent reviews`,
+        );
+      }
+    }
+  }
 
   const runIdLine = `**HomeRail Run ID:** \`${command.run_id}\``;
   invariant(markdown.includes(runIdLine), "Markdown does not contain the exact HomeRail run_id field");

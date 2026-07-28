@@ -869,9 +869,11 @@ spec:
         URL prefixes as out of scope.
         Every retained finding
         must have a precise line.
-        Treat a reviewer with evidence_truncated=true or a non-empty
-        unreviewed_files list as failed coverage even if its status says
-        complete. Set status=findings when
+        Treat a reviewer with evidence_truncated=true as failed coverage even
+        if its status says complete. A specialized reviewer may list an
+        out-of-scope path in unreviewed_files only when at least two other
+        completed reviewers list that exact path in reviewed_files; otherwise
+        coverage failed. Set status=findings when
         actionable_count is positive, pass when it is zero, and inconclusive
         if any reviewer failed. Never edit the repository or end with prose.
         Your final action MUST call handoff on drafted with exactly these
@@ -939,9 +941,10 @@ spec:
         hosts. A rejected finding is a successful verifier correction, not a
         reason to reject the whole report. Vote accept when every retained
         finding has a grounded confirmed or rejected verdict, all four
-        reviewer_results have status complete, evidence_truncated=false and
-        empty unreviewed_files, report identity matches input.context, and
-        diff_truncated is false. Vote reject when any
+        reviewer_results have status complete, evidence_truncated=false, and
+        every unreviewed_files entry is covered by reviewed_files from at least
+        two other completed reviewers; report identity must match input.context
+        and diff_truncated must be false. Vote reject when any
         reviewer failed or reported incomplete coverage, the report is inconclusive, evidence is insufficient
         to adjudicate every finding, identity differs, or diff_truncated is
         true. An empty report is acceptable only when the reviewer evidence
@@ -988,8 +991,9 @@ spec:
         finding receives verdict rejected; that correction does not reject the
         whole report. Vote accept when every finding has a grounded confirmed or
         rejected verdict, all four reviewer_results have status complete,
-        evidence_truncated=false and empty unreviewed_files, report identity
-        matches input.context, and diff_truncated is false.
+        evidence_truncated=false, every unreviewed_files entry is covered by
+        reviewed_files from at least two other completed reviewers, report
+        identity matches input.context, and diff_truncated is false.
         Vote reject when any reviewer failed or reported incomplete coverage,
         the report is inconclusive,
         evidence is insufficient to adjudicate every finding, identity differs,
@@ -1004,10 +1008,12 @@ spec:
         Verify that runtime, security, tests, and frontend scopes all produced
         explicit ReviewerResult records and that the synthesis did not silently
         discard stronger evidence. Vote accept only when all four distinct
-        reviewer records are present with status complete,
-        evidence_truncated=false, and empty unreviewed_files. Vote reject when
-        any reviewer is missing, has status failed, reports truncated evidence,
-        leaves files unreviewed, or when report.status is inconclusive.
+        reviewer records are present with status complete and
+        evidence_truncated=false. A specialized reviewer may leave a path in
+        unreviewed_files only when at least two other completed reviewers list
+        that exact path in reviewed_files. Vote reject when any reviewer is
+        missing, has status failed, reports truncated evidence, leaves a path
+        without two independent reviews, or when report.status is inconclusive.
         Findings do not make coverage incomplete.
         Coverage does not adjudicate individual findings. Never include
         finding_verdicts or any other extra field. Do not end with prose. Your
