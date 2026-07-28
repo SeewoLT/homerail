@@ -159,8 +159,14 @@ describe('Custom Renderer real Chromium isolation', () => {
     }, { frameSource: srcdoc, envelope: init })
 
     try {
+      // Playwright defaults to requestAnimationFrame polling here. Hosted
+      // Windows browsers may throttle rAF even though postMessage delivery
+      // continues, so poll on a wall-clock interval instead.
       await page.waitForFunction(() => (window as any).__customRendererMessages
-        .some((message: any) => message?.type === 'homerail.custom-renderer.a2ui'), undefined, { timeout: 10_000 })
+        .some((message: any) => message?.type === 'homerail.custom-renderer.a2ui'), undefined, {
+        polling: 100,
+        timeout: 10_000,
+      })
     } catch (cause) {
       const messages = await page.evaluate(() => (window as any).__customRendererMessages)
       throw new Error(`Renderer did not return A2UI: messages=${JSON.stringify(messages)} console=${JSON.stringify(consoleMessages)}`, { cause })
