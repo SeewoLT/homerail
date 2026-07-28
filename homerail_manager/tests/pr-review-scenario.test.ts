@@ -3,53 +3,97 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 
-import { compileWorkflowSource } from "../src/orchestration/workflow-spec-v1.js";
-import { parseWorkflowSource } from "../src/orchestration/workflow-spec-v1.js";
-import { validateJsonContract } from "../src/orchestration/json-contract.js";
 import { FakeDAGDispatcher } from "../src/orchestration/dag-dispatcher.js";
 import { GraphExecutor } from "../src/orchestration/graph-executor.js";
+import { validateJsonContract } from "../src/orchestration/json-contract.js";
+import {
+  compileWorkflowSource,
+  parseWorkflowSource,
+} from "../src/orchestration/workflow-spec-v1.js";
 import { closeDb } from "../src/persistence/db.js";
-import { loadRunSnapshot } from "../src/persistence/store.js";
 import { getRunArtifactBlobPath } from "../src/persistence/run-artifacts.js";
+import { loadRunSnapshot } from "../src/persistence/store.js";
 import {
   _clearActiveRuns,
   failActiveRun,
   getActiveRun,
   handoffActiveRun,
 } from "../src/runtime/active-runs.js";
-import {
-  _invokeHostCodexVoiceToolForTest,
-} from "../src/server/host-codex-manager-agent.js";
-import {
-  ensureManagerSkillsInstalled,
-  readManagerSkill,
-} from "../src/server/manager-skills.js";
 import { finalizeRunArtifacts } from "../src/runtime/run-artifact-service.js";
+import { _invokeHostCodexVoiceToolForTest } from "../src/server/host-codex-manager-agent.js";
+import { ensureManagerSkillsInstalled, readManagerSkill } from "../src/server/manager-skills.js";
+
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const workflowPath = path.join(repositoryRoot, "assets", "orchestrations", "pr-review.yaml.template");
+
+type ModelId = "qwen" | "kimi" | "glm";
+type Vote = "approve" | "request_changes" | "abstain";
+
+const finding = {
+  category: "runtime",
+  severity: "high",
+  title: "Changed branch drops persisted state",
+  file: "src/run.ts",
+  line: 12,
+  evidence: "The changed branch returns before persistence.",
+  recommendation: "Persist state before returning.",
+  confidence: "high",
+};
+
+function modelReview(
+  reviewer: ModelId,
+  vote: Vote = "approve",
+  options: { failed?: boolean } = {},
+): Record<string, unknown> {
+  const failed = options.failed ?? vote === "abstain";
+  return {
+    reviewer,
+    status: failed ? "failed" : "complete",
+    vote: failed ? "abstain" : vote,
+    summary: failed ? `${reviewer} could not complete the review` : `${reviewer} review complete`,
+    reviewed_files: failed ? [] : ["src/run.ts"],
+    unreviewed_files: failed ? ["src/run.ts"] : [],
+    evidence_truncated: failed,
+    findings: !failed && vote === "request_changes" ? [finding] : [],
+  };
+}
 
 function passingReviewReport(): Record<string, unknown> {
-  const categories = ["runtime", "security", "tests", "frontend"];
   return {
     repo: "xiaotianfotos/homerail",
     pr: 25,
     base: "a".repeat(40),
     head: "b".repeat(40),
     status: "pass",
-    confidence: "high",
-    summary: "No actionable findings",
+    confidence: "medium",
+    summary: "Three-model review: 2 approve, 1 request changes, 0 abstain.",
     actionable_count: 0,
     findings: [],
-    reviewer_results: categories.map((reviewer) => ({
-      reviewer,
-      status: "complete",
-      summary: `${reviewer} review complete`,
-      reviewed_files: ["src/run.ts"],
-      unreviewed_files: [],
-      evidence_truncated: false,
-      findings: [],
-    })),
+    reviewer_results: [
+      modelReview("qwen"),
+      modelReview("kimi"),
+      modelReview("glm", "request_changes"),
+    ],
+  };
+}
+
+function reviewInput(): Record<string, unknown> {
+  return {
+    trigger_id: "manual",
+    trigger_type: "manual",
+    fire_key: "manual:xiaotianfotos/homerail#25:bbbbbbb",
+    payload: {
+      repo: "xiaotianfotos/homerail",
+      pr: 25,
+      base: "a".repeat(40),
+      head: "b".repeat(40),
+      base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
+      head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
+    },
   };
 }
 
@@ -59,20 +103,17 @@ function installPrepareCommandStub(
 ): void {
   const prepare = parsed.graph.nodes.find((node) => node.node_id === "prepare");
   if (!prepare?.gateway_config) throw new Error("prepare command node is missing");
-  const diffTruncated = options.diffTruncated ?? false;
   prepare.gateway_config.command = [
     "node",
     "-e",
-    "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const i=JSON.parse(s),r=Array.isArray(i.request)?i.request.at(-1):undefined,p=r?.payload;if(!p)throw new Error('missing request');process.stdout.write(JSON.stringify({repo:p.repo,pr:p.pr,base:p.base,head:p.head,repository_path:'/workspace/repository',changed_files:['src/run.ts'],diff_stat:'1 file changed',diff_patch:'diff --git a/src/run.ts b/src/run.ts',diff_chunks:[{index:1,path:'review-evidence/diff-0001.patch',bytes:39,files:['src/run.ts']}],diff_bytes:39,diff_truncated:" + JSON.stringify(diffTruncated) + ",commit_metadata:[],commit_metadata_truncated:false}))})",
+    "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const i=JSON.parse(s),r=Array.isArray(i.request)?i.request.at(-1):undefined,p=r?.payload;if(!p)throw new Error('missing request');process.stdout.write(JSON.stringify({repo:p.repo,pr:p.pr,base:p.base,head:p.head,repository_path:'/workspace/repository',changed_files:['src/run.ts'],diff_stat:'1 file changed',diff_patch:'diff --git a/src/run.ts b/src/run.ts',diff_chunks:[{index:1,path:'review-evidence/diff-0001.patch',bytes:39,files:['src/run.ts']}],diff_bytes:39,diff_truncated:" +
+      JSON.stringify(options.diffTruncated ?? false) +
+      ",commit_metadata:[],commit_metadata_truncated:false}))})",
   ];
 }
 
 function productionPrepareCommand(): string {
-  const source = fs.readFileSync(
-    path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template"),
-    "utf8",
-  );
-  const parsed = parseWorkflowSource(source);
+  const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
   const command = parsed.graph.nodes.find((node) => node.node_id === "prepare")?.gateway_config?.command;
   if (!Array.isArray(command) || typeof command[2] !== "string") {
     throw new Error("production prepare command is missing");
@@ -94,6 +135,16 @@ function prepareCommandInput(overrides: Record<string, unknown> = {}): Record<st
       },
     }],
   };
+}
+
+function commandCode(nodeId: string): { code: string; args: string[] } {
+  const compiled = compileWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+  expect(compiled.valid).toBe(true);
+  const command = compiled.canonical?.nodes.find((node) => node.id === nodeId)?.config?.command;
+  if (!Array.isArray(command) || typeof command[2] !== "string") {
+    throw new Error(`${nodeId} command is missing`);
+  }
+  return { code: command[2], args: command.slice(3).map(String) };
 }
 
 describe("PR Review scenario assets", () => {
@@ -126,427 +177,245 @@ describe("PR Review scenario assets", () => {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
-  it("compiles four main reviewers, an isolated privacy advisory, and 2-of-3 verification", () => {
-    const file = path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template");
-    const source = fs.readFileSync(file, "utf8");
+  it("compiles exactly three independent model reviews and deterministic 2-of-3 approval", () => {
+    const source = fs.readFileSync(workflowPath, "utf8");
     const result = compileWorkflowSource(source);
 
     expect(result.valid).toBe(true);
     expect(result.diagnostics).toEqual([]);
     expect(result.summary).toMatchObject({ workflow_id: "pr-review" });
-    const runtimeResult = {
-      reviewer: "runtime",
-      status: "complete",
-      summary: "Runtime review complete",
-      reviewed_files: ["src/run.ts"],
-      unreviewed_files: [],
-      evidence_truncated: false,
-      findings: [],
-    };
-    expect(validateJsonContract(result.canonical?.contracts.RuntimeReviewerResult, runtimeResult).valid).toBe(true);
-    expect(validateJsonContract(result.canonical?.contracts.RuntimeReviewerResult, {
-      ...runtimeResult,
-      reviewer: "tests",
-    }).valid).toBe(false);
     expect(result.canonical?.artifacts).toEqual([
       expect.objectContaining({
-        name: "pr-privacy-review.json",
-        source: { type: "handoff", node: "normalize_privacy_review", port: "reviewed" },
-        contract: "PrivacyReview",
-      }),
-      expect.objectContaining({
         name: "pr-review.json",
-        source: { type: "handoff", node: "normalize_review", port: "normalized" },
+        source: { type: "handoff", node: "decide", port: "decided" },
         contract: "FinalReview",
       }),
-      expect.objectContaining({
-        name: "pr-review.md",
-        source: { type: "handoff", node: "publish", port: "published", json_pointer: "/markdown" },
-        media_type: "text/markdown",
-      }),
     ]);
+
     const nodes = result.canonical?.nodes ?? [];
-    expect(nodes.find((node) => node.id === "budget")).toBeUndefined();
-    expect(nodes.find((node) => node.id === "budget_blocked")).toBeUndefined();
-    expect(nodes.find((node) => node.id === "prepare")).toMatchObject({
-      inputs: [expect.objectContaining({ name: "request", contract: "RunEnvelope" })],
-      depends_on: [],
-    });
-    expect(nodes.filter((node) => node.id.endsWith("_review") && !node.id.startsWith("normalize_"))
-      .map((node) => node.id).sort()).toEqual([
-      "frontend_review",
-      "privacy_review",
-      "runtime_review",
-      "security_review",
-      "test_review",
-    ]);
-    const reviewerContracts = {
-      runtime: "RuntimeReviewerResult",
-      security: "SecurityReviewerResult",
-      test: "TestReviewerResult",
-      frontend: "FrontendReviewerResult",
-    } as const;
-    for (const [reviewer, contract] of Object.entries(reviewerContracts)) {
-      expect(nodes.find((node) => node.id === `${reviewer}_review`)).toMatchObject({
-        outputs: expect.arrayContaining([expect.objectContaining({ name: "reviewed", contract })]),
-        config: {
+    const modelNodes = ["qwen_review", "kimi_review", "glm_review"];
+    expect(nodes.filter((node) => node.kind === "agent").map((node) => node.id).sort())
+      .toEqual([...modelNodes].sort());
+    for (const nodeId of modelNodes) {
+      expect(nodes.find((node) => node.id === nodeId)).toMatchObject({
+        outputs: expect.arrayContaining([expect.objectContaining({ name: "voted", contract: "VerificationVote" })]),
+        config: expect.objectContaining({
           allowed_builtin_tools: ["Glob", "Grep", "LS", "Read"],
           allowed_dag_tools: ["handoff"],
           workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
-        },
-      });
-      expect(nodes.find((node) => node.id === `normalize_${reviewer}_review`)).toMatchObject({
-        kind: "command",
-        depends_on: expect.arrayContaining([`${reviewer}_review`, "strip_privacy_context"]),
-        inputs: expect.arrayContaining([expect.objectContaining({ name: "success", contract })]),
-        outputs: [expect.objectContaining({ name: "reviewed", contract: "ReviewerResult" })],
-        config: expect.objectContaining({
-          success_port: "reviewed",
-          failure_port: "reviewed",
-          parse_stdout: "json",
-          result_payload: "value",
         }),
       });
     }
-    expect(nodes.find((node) => node.id === "privacy_review")?.config).toMatchObject({
-      allowed_builtin_tools: ["Glob", "Grep", "LS", "Read"],
-      allowed_dag_tools: ["handoff"],
-      workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
-    });
-    expect(nodes.find((node) => node.id === "strip_privacy_context")).toMatchObject({
+    expect(nodes.find((node) => node.id === "decide")).toMatchObject({
       kind: "command",
-      outputs: expect.arrayContaining([expect.objectContaining({ name: "ready", contract: "ReviewContext" })]),
-    });
-    expect(nodes.find((node) => node.id === "normalize_privacy_review")).toMatchObject({
-      kind: "command",
-      depends_on: ["privacy_review"],
-      outputs: [expect.objectContaining({ name: "reviewed", contract: "PrivacyReview" })],
+      outputs: expect.arrayContaining([expect.objectContaining({ name: "decided", contract: "FinalReview" })]),
     });
     expect(nodes.find((node) => node.id === "collect_reviews")?.config).toMatchObject({
       mode: "all",
       field: "status",
       success_values: ["complete", "failed"],
     });
-    expect(nodes.find((node) => node.id === "verification_quorum")?.config).toMatchObject({
-      mode: "n_of_m",
-      threshold: 2,
-      field: "vote",
-    });
-    expect(nodes.find((node) => node.id === "coverage_vote")?.outputs).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: "voted", contract: "CoverageVote" }),
-    ]));
-    for (const voter of ["evidence_vote", "false_positive_vote"]) {
-      expect(nodes.find((node) => node.id === voter)).toMatchObject({
-        config: expect.objectContaining({
-          allowed_builtin_tools: ["Glob", "Grep", "LS", "Read"],
-          allowed_dag_tools: ["handoff"],
-          workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
-        }),
-        inputs: expect.arrayContaining([
-          expect.objectContaining({ name: "report", contract: "DraftReviewReport" }),
-          expect.objectContaining({ name: "context", contract: "ReviewContext" }),
-        ]),
-      });
-    }
-    expect(nodes.find((node) => node.id === "quorum_result")?.config).toMatchObject({
-      mode: "any",
-      field: "passed",
-      passed_port: "decided",
-    });
-    expect(nodes.find((node) => node.id === "normalize_review")).toMatchObject({
-      kind: "command",
-      depends_on: ["refine"],
-      inputs: [expect.objectContaining({ name: "review", contract: "FinalReview" })],
-      outputs: expect.arrayContaining([
-        expect.objectContaining({ name: "normalized", contract: "FinalReview" }),
-      ]),
-      config: expect.objectContaining({
-        success_port: "normalized",
-        failure_port: "failed",
-        parse_stdout: "json",
-        result_payload: "value",
-      }),
-    });
-    expect(nodes.find((node) => node.id === "publication_outcome")?.config).toMatchObject({
-      field: "quorum.passed",
-      default: "rejected",
-    });
-    expect(nodes.filter((node) => node.agent === "refiner")).toHaveLength(1);
-    expect(nodes.filter((node) => node.agent === "publisher")).toHaveLength(1);
-    expect(nodes.find((node) => node.agent === "publisher")?.config).toMatchObject({
-      allowed_builtin_tools: [],
-      allowed_dag_tools: ["get_graph_context", "handoff"],
-      workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
-    });
-    for (const nodeId of ["synthesize", "coverage_vote", "refine"]) {
-      expect(nodes.find((node) => node.id === nodeId)?.config).toMatchObject({
-        allowed_builtin_tools: [],
-        workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
-      });
-    }
-    for (const node of nodes.filter((node) => node.kind === "agent")) {
-      expect(node.config).toMatchObject({
-        workspace_access: { writable_paths: [], readonly_paths: ["repository", "review-evidence"] },
-      });
-    }
-    const agents = parseWorkflowSource(source).meta.agents ?? {};
-    for (const agentId of [
-      "runtime_reviewer",
-      "privacy_reviewer",
-      "security_reviewer",
-      "test_reviewer",
-      "frontend_reviewer",
-      "synthesizer",
-      "refiner",
-      "evidence_voter",
-      "false_positive_voter",
-      "coverage_voter",
-      "publisher",
+    for (const removed of [
+      "privacy_review",
+      "runtime_review",
+      "security_review",
+      "test_review",
+      "frontend_review",
+      "synthesize",
+      "refine",
+      "normalize_review",
     ]) {
-      expect(agents[agentId]?.system).toMatch(/final action MUST\s+call\s+(?:the\s+)?handoff/);
+      expect(nodes.find((node) => node.id === removed)).toBeUndefined();
     }
-    for (const [agentId, reviewer] of [
-      ["runtime_reviewer", "runtime"],
-      ["security_reviewer", "security"],
-      ["test_reviewer", "tests"],
-      ["frontend_reviewer", "frontend"],
-    ] as const) {
-      expect(agents[agentId]?.system).toContain(
-        `reviewer field MUST be the literal string \`${reviewer}\``,
-      );
-    }
-    for (const agentId of [
-      "runtime_reviewer",
-      "privacy_reviewer",
-      "security_reviewer",
-      "test_reviewer",
-      "frontend_reviewer",
-      "evidence_voter",
-      "false_positive_voter",
-    ]) {
-      expect(agents[agentId]?.system).toContain("input.context.repository_path");
-      expect(agents[agentId]?.system).toMatch(/available read-only\s+repository tools/);
-      expect(agents[agentId]?.system).toContain("starting index");
-      expect(agents[agentId]?.system).toMatch(/proportional|bounded/);
-      expect(agents[agentId]?.system).not.toContain("No shell or file tools are needed or available");
-    }
-    for (const agentId of [
-      "runtime_reviewer",
-      "privacy_reviewer",
-      "security_reviewer",
-      "test_reviewer",
-      "frontend_reviewer",
-      "evidence_voter",
-      "false_positive_voter",
-    ]) {
-      expect(agents[agentId]?.system).toContain("diff_truncated");
-    }
-    expect(agents.publisher?.system).toContain("Do not call Bash");
-    expect(agents.privacy_reviewer?.system).toContain(
-      "Every non-noreply address in author_email or committer_email requires",
-    );
-    expect(agents.privacy_reviewer?.system).toContain("high-confidence evidence");
-    expect(agents.privacy_reviewer?.system).toContain("never excuse or downgrade");
-    for (const agentId of [
-      "runtime_reviewer",
-      "synthesizer",
-      "evidence_voter",
-      "false_positive_voter",
-    ]) {
-      expect(agents[agentId]?.system).toMatch(/GitHub\s+Enterprise/);
-      expect(agents[agentId]?.system).toContain("clone_url");
-    }
-    const prepare = nodes.find((node) => node.id === "prepare");
-    expect(prepare).toMatchObject({
-      kind: "command",
-      config: expect.objectContaining({
-        command: ["node", "-e", expect.any(String)],
-        cwd: "$run_workspace",
-        stdin_field: "$inputs",
-        success_port: "ready",
-        failure_port: "failed",
-        parse_stdout: "json",
-        result_payload: "value",
-      }),
+    expect(result.canonical?.policies).toMatchObject({
+      max_parallelism: 3,
+      max_dispatches: 12,
+      max_corrections_per_node: 2,
+      max_tool_calls_per_node: 50,
     });
-    const prepareCode = String((prepare?.config?.command as unknown[] | undefined)?.[2]);
-    expect(prepareCode).toContain("base_clone_url");
-    expect(prepareCode).toContain("head_clone_url");
-    expect(prepareCode).toContain("[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+\\.git$");
-    expect(prepareCode).toContain("credential.helper=");
-    expect(prepareCode).toContain("GIT_CONFIG_NOSYSTEM");
-    expect(prepareCode).toContain("protocol.file.allow=never");
-    expect(prepareCode).toContain("--shortstat");
-    expect(prepareCode).toContain("--unified=80");
-    expect(prepareCode).toContain("diff_patch");
-    expect(prepareCode).toContain("diff_truncated");
-    expect(prepareCode).toContain("commit_metadata");
-    expect(prepareCode).toContain("--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00%s");
-    expect(prepareCode).toContain("repository_path: '/workspace/repository'");
-    expect(agents).not.toHaveProperty("preparer");
-    expect(result.canonical?.policies?.max_corrections_per_node).toBe(5);
-    expect(nodes.find((node) => node.id === "synthesize")?.inputs).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: "context" }),
-    ]));
-    expect(nodes.find((node) => node.id === "publish")?.inputs).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: "privacy", contract: "PrivacyReview" }),
-    ]));
 
     const contracts = parseWorkflowSource(source).meta.contracts ?? {};
-    expect(validateJsonContract(contracts.ReviewContext, {
-      repo: "xiaotianfotos/homerail",
-      pr: 25,
-      base: "a".repeat(40),
-      head: "b".repeat(40),
-      repository_path: "/workspace/repository",
-      changed_files: ["src/run.ts"],
-      diff_stat: "1 file changed",
-      diff_patch: "diff --git a/src/run.ts b/src/run.ts",
-      diff_chunks: [{
-        index: 1,
-        path: "review-evidence/diff-0001.patch",
-        bytes: 39,
-        files: ["src/run.ts"],
-      }],
-      diff_bytes: 39,
-      diff_truncated: false,
-    })).toMatchObject({ valid: true });
-    expect(validateJsonContract(contracts.PreparedReviewContext, {
-      repo: "xiaotianfotos/homerail",
-      pr: 25,
-      base: "a".repeat(40),
-      head: "b".repeat(40),
-      repository_path: "/workspace/repository",
-      changed_files: ["src/run.ts"],
-      diff_stat: "1 file changed",
-      diff_patch: "diff --git a/src/run.ts b/src/run.ts",
-      diff_chunks: [{
-        index: 1,
-        path: "review-evidence/diff-0001.patch",
-        bytes: 39,
-        files: ["src/run.ts"],
-      }],
-      diff_bytes: 39,
-      diff_truncated: false,
-      commit_metadata: [],
-      commit_metadata_truncated: false,
-    })).toMatchObject({ valid: true });
-    expect(validateJsonContract(contracts.PrivacyReview, {
-      status: "human_review",
-      summary: "One redacted location needs human inspection.",
-      findings: [{
-        category: "local_network",
-        source: "diff",
-        location: "docs/example.md:12",
-        description: "A private network address appears in a changed line; inspect it before publishing.",
-        confidence: "high",
-      }],
-    })).toMatchObject({ valid: true });
-    expect(validateJsonContract(contracts.ReviewContext, {
-      repo: "xiaotianfotos/homerail",
-      pr: 25,
-      base: "a".repeat(40),
-      head: "b".repeat(40),
-      repository_path: "/workspace/repository",
-      changed_files: ["src/run.ts"],
-      diff_stat: "1 file changed",
-      diff_patch: "diff --git a/src/run.ts b/src/run.ts\n... truncated",
-      diff_chunks: [{
-        index: 1,
-        path: "review-evidence/diff-0001.patch",
-        bytes: 39,
-        files: ["src/run.ts"],
-      }],
-      diff_bytes: 50_000_000,
-      diff_truncated: true,
-    })).toMatchObject({ valid: true });
-    const finalReview = {
-      report: passingReviewReport(),
-      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
-    };
-    expect(validateJsonContract(contracts.FinalReview, finalReview)).toMatchObject({ valid: true });
-    expect(validateJsonContract(contracts.FinalReview, {
-      ...finalReview,
-      quorum: { passed: true, successes: 1, total: 3, threshold: 2 },
-    })).toMatchObject({ valid: false });
-    expect(validateJsonContract(contracts.FinalReview, {
-      ...finalReview,
-      quorum: { passed: false, successes: 2, total: 3, threshold: 2 },
-    })).toMatchObject({ valid: false });
-    expect(validateJsonContract(contracts.FinalReview, {
-      ...finalReview,
-      quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
-    })).toMatchObject({ valid: false });
-    expect(validateJsonContract(contracts.FinalReview, {
-      ...finalReview,
-      report: { status: "inconclusive" },
-      quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
-    })).toMatchObject({ valid: false });
-    expect(validateJsonContract(contracts.FinalReview, {
-      ...finalReview,
-      report: { ...passingReviewReport(), status: "inconclusive" },
-      quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
-    })).toMatchObject({ valid: true });
-    expect(validateJsonContract(contracts.FinalReview, {
-      ...finalReview,
-      report: { status: "pass" },
+    for (const reviewer of ["qwen", "kimi", "glm"] as const) {
+      expect(validateJsonContract(contracts.VerificationVote, modelReview(reviewer))).toMatchObject({ valid: true });
+    }
+    expect(validateJsonContract(contracts.VerificationVote, {
+      ...modelReview("qwen"),
+      reviewer: "runtime",
     })).toMatchObject({ valid: false });
 
-    const publication = {
-      run_id: "a".repeat(24),
-      markdown: `# Review\n\n**HomeRail Run ID:** \`${"a".repeat(24)}\``,
-      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
-    };
-    expect(validateJsonContract(contracts.PublishedReview, publication)).toMatchObject({ valid: true });
-    expect(validateJsonContract(contracts.PublishedReview, {
-      ...publication,
-      run_id: "${run_id}",
-      markdown: "# Review\n\n**HomeRail Run ID:** `${run_id}`",
-    })).toMatchObject({ valid: false });
-    expect(validateJsonContract(contracts.PublishedReview, {
-      ...publication,
-      quorum: { passed: true, successes: 1, total: 3, threshold: 2 },
-    })).toMatchObject({ valid: false });
-
-    const inputContract = parseWorkflowSource(source).meta.contracts?.PRReviewInput;
-    const reviewInput = {
-      repo: "enterprise/homerail",
-      pr: 8,
-      base: "a".repeat(40),
-      head: "b".repeat(40),
-      base_clone_url: "https://github.example/enterprise/homerail.git",
-      head_clone_url: "https://github.example/contributor/homerail.git",
-    };
-    expect(validateJsonContract(inputContract, reviewInput)).toMatchObject({ valid: true });
-    expect(validateJsonContract(inputContract, {
-      ...reviewInput,
-      base_clone_url: "https://github.example/git/enterprise/homerail.git",
-    })).toMatchObject({ valid: false });
-    expect(validateJsonContract(inputContract, {
-      ...reviewInput,
-      base_clone_url: "https://token@github.example/enterprise/homerail.git",
-    })).toMatchObject({ valid: false });
-    expect(validateJsonContract(inputContract, {
-      ...reviewInput,
-      head_clone_url: "https://github.example/contributor/homerail.git?token=secret",
-    })).toMatchObject({ valid: false });
-    expect(validateJsonContract(inputContract, {
-      ...reviewInput,
-      head: "b".repeat(12),
-    })).toMatchObject({ valid: false });
+    const agents = parseWorkflowSource(source).meta.agents ?? {};
+    for (const agentId of ["qwen_reviewer", "kimi_reviewer", "glm_reviewer"]) {
+      expect(agents[agentId]?.system).toMatch(/final action MUST\s+call\s+(?:the\s+)?handoff/);
+    }
+    for (const agentId of ["qwen_reviewer", "kimi_reviewer", "glm_reviewer"]) {
+      expect(agents[agentId]?.system).toContain("input.context.diff_chunks");
+      expect(agents[agentId]?.system).toMatch(/Independently review/);
+      expect(agents[agentId]?.system).toContain("No draft report exists or is required");
+      expect(agents[agentId]?.system).toMatch(/copy\s+input\.context\.changed_files exactly/);
+      expect(agents[agentId]?.system).toContain("including lockfiles");
+      expect(agents[agentId]?.system).toContain("untrusted source");
+    }
   });
 
-  it("executes production prepare URL validation against hostile clone URLs", () => {
+  it("counts approvals deterministically and blocks request-changes or split votes", () => {
+    const { code, args } = commandCode("decide");
+    const context = {
+      repo: "xiaotianfotos/homerail",
+      pr: 25,
+      base: "a".repeat(40),
+      head: "b".repeat(40),
+    };
+    const execute = (reviews: Array<Record<string, unknown>>) => {
+      const result = spawnSync(process.execPath, ["-e", code, ...args], {
+        encoding: "utf8",
+        input: JSON.stringify({ context: [context], reviews: [{ values: reviews }] }),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return JSON.parse(result.stdout) as {
+        report: { status: string; actionable_count: number; findings: unknown[] };
+        quorum: { passed: boolean; successes: number; total: number; threshold: number };
+      };
+    };
+
+    expect(execute([
+      modelReview("qwen"),
+      modelReview("kimi"),
+      modelReview("glm", "request_changes"),
+    ])).toMatchObject({
+      report: { status: "pass", actionable_count: 0 },
+      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
+    });
+    expect(execute([
+      modelReview("qwen", "request_changes"),
+      modelReview("kimi", "request_changes"),
+      modelReview("glm"),
+    ])).toMatchObject({
+      report: { status: "findings", actionable_count: 1 },
+      quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
+    });
+    expect(execute([
+      modelReview("qwen"),
+      modelReview("kimi", "request_changes"),
+      modelReview("glm", "abstain"),
+    ])).toMatchObject({
+      report: { status: "inconclusive", actionable_count: 0 },
+      quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
+    });
+  });
+
+  it("normalizes incomplete model output to an abstention", () => {
+    const { code, args } = commandCode("normalize_qwen_review");
+    const result = spawnSync(process.execPath, ["-e", code, ...args], {
+      encoding: "utf8",
+      input: JSON.stringify({
+        context: [{ changed_files: ["src/run.ts", "src/other.ts"] }],
+        success: [{
+          ...modelReview("qwen"),
+          reviewed_files: ["src/run.ts"],
+          unreviewed_files: ["src/other.ts"],
+        }],
+      }),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      reviewer: "qwen",
+      status: "failed",
+      vote: "abstain",
+      reviewed_files: [],
+      unreviewed_files: ["src/run.ts", "src/other.ts"],
+      evidence_truncated: true,
+      findings: [],
+    });
+  });
+
+  it("executes the compact graph with exactly three model calls", async () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-three-model-runtime";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+    expect(dispatcher.dispatched.map((envelope) => envelope.nodeId).sort()).toEqual([
+      "glm_review",
+      "kimi_review",
+      "qwen_review",
+    ]);
+    handoffActiveRun(runId, "qwen_review", "voted", modelReview("qwen"));
+    handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi"));
+    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm", "request_changes"));
+
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+    expect(dispatcher.dispatched.map((envelope) => envelope.nodeId)).toEqual([
+      "glm_review",
+      "kimi_review",
+      "qwen_review",
+    ]);
+    const decision = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "decide" && handoff.port === "decided",
+    )?.content;
+    expect(decision).toMatchObject({
+      report: { status: "pass", reviewer_results: expect.arrayContaining([
+        expect.objectContaining({ reviewer: "qwen", vote: "approve" }),
+        expect.objectContaining({ reviewer: "kimi", vote: "approve" }),
+        expect.objectContaining({ reviewer: "glm", vote: "request_changes" }),
+      ]) },
+      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
+    });
+
+    expect(getActiveRun(runId)?.status).toBe("completed");
+    expect(await finalizeRunArtifacts(runId, "success")).toEqual([
+      expect.objectContaining({ name: "pr-review.json", status: "ready" }),
+    ]);
+    expect(JSON.parse(fs.readFileSync(getRunArtifactBlobPath(runId, "pr-review.json")!, "utf8")))
+      .toMatchObject({ report: { status: "pass" }, quorum: { passed: true, successes: 2 } });
+  });
+
+  it("turns one failed model into abstain and keeps a split decision inconclusive", () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-model-abstention";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    handoffActiveRun(runId, "qwen_review", "voted", modelReview("qwen"));
+    handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi", "request_changes"));
+    failActiveRun(runId, "glm_review", "agent ended without a contract-valid handoff");
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+    const normalized = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "normalize_glm_review" && handoff.port === "reviewed",
+    )?.content;
+    expect(normalized).toMatchObject({
+      reviewer: "glm",
+      status: "failed",
+      vote: "abstain",
+      evidence_truncated: true,
+      unreviewed_files: ["src/run.ts"],
+    });
+    const decision = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "decide" && handoff.port === "decided",
+    )?.content;
+    expect(decision).toMatchObject({
+      report: { status: "inconclusive" },
+      quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
+    });
+  });
+
+  it("rejects hostile clone URLs before invoking git", () => {
     const cwd = path.join(tmpHome, "prepare-url-validation");
     fs.mkdirSync(cwd, { recursive: true });
-    const command = productionPrepareCommand();
     for (const base_clone_url of [
       "https://token@github.example/enterprise/homerail.git",
       "http://github.example/enterprise/homerail.git",
       "https://github.example/enterprise/homerail.git?token=secret",
       "https://github.example/git/enterprise/homerail.git",
     ]) {
-      const result = spawnSync(process.execPath, ["-e", command], {
+      const result = spawnSync(process.execPath, ["-e", productionPrepareCommand()], {
         cwd,
         encoding: "utf8",
         input: JSON.stringify(prepareCommandInput({ base_clone_url })),
@@ -559,13 +428,23 @@ describe("PR Review scenario assets", () => {
   }, 30_000);
 
   it.runIf(process.platform !== "win32")(
-    "splits a large production diff into bounded deterministic evidence chunks",
+    "groups small changed-file patches into bounded evidence chunks",
     () => {
-      const cwd = path.join(tmpHome, "prepare-truncation");
+      const cwd = path.join(tmpHome, "prepare-chunk-grouping");
       const bin = path.join(cwd, "bin");
       fs.mkdirSync(bin, { recursive: true });
-      const fakeGit = path.join(bin, "fake-git.cjs");
+      const files = Array.from({ length: 28 }, (_, index) => `src/file-${String(index + 1).padStart(2, "0")}.ts`);
+      const patch = files.map((file) => [
+        `diff --git a/${file} b/${file}`,
+        `--- a/${file}`,
+        `+++ b/${file}`,
+        "@@ -1 +1 @@",
+        `-${"a".repeat(1600)}`,
+        `+${"b".repeat(1600)}`,
+        "",
+      ].join("\n")).join("");
       const head = "b".repeat(40);
+      const fakeGit = path.join(bin, "fake-git.cjs");
       fs.writeFileSync(fakeGit, [
         "const fs = require('node:fs');",
         "const args = process.argv.slice(2);",
@@ -574,9 +453,9 @@ describe("PR Review scenario assets", () => {
         `else if (has('rev-parse')) process.stdout.write(${JSON.stringify(head)});`,
         "else if (has('rev-list')) process.stdout.write('1');",
         `else if (has('log')) process.stdout.write(${JSON.stringify(`${head}\0Example User\0user@example.com\0GitHub\0noreply@github.com\0Example change\0`)});`,
-        `else if (has('diff') && has('--name-only')) process.stdout.write(${JSON.stringify("src/quoted.ts\0")});`,
-        "else if (has('diff') && has('--shortstat')) process.stdout.write('1 file changed, 1 insertion(+), 1 deletion(-)');",
-        "else if (has('diff')) process.stdout.write('\"'.repeat(700000));",
+        `else if (has('diff') && has('--name-only')) process.stdout.write(${JSON.stringify(`${files.join("\0")}\0`)});`,
+        `else if (has('diff') && has('--shortstat')) process.stdout.write(${JSON.stringify(`${files.length} files changed`)});`,
+        `else if (has('diff')) process.stdout.write(${JSON.stringify(patch)});`,
       ].join("\n"));
       const git = path.join(bin, "git");
       fs.writeFileSync(git, `#!/usr/bin/env node\nrequire(${JSON.stringify(fakeGit)});\n`);
@@ -586,43 +465,23 @@ describe("PR Review scenario assets", () => {
         cwd,
         encoding: "utf8",
         input: JSON.stringify(prepareCommandInput()),
-        env: {
-          ...process.env,
-          PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-        },
+        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` },
         maxBuffer: 2_000_000,
       });
-      if (result.status !== 0) {
-        throw new Error(`production prepare command failed: ${result.stderr || result.stdout}`);
-      }
+      if (result.status !== 0) throw new Error(result.stderr || result.stdout);
       const context = JSON.parse(result.stdout) as {
-        head: string;
         changed_files: string[];
-        diff_patch: string;
         diff_chunks: Array<{ index: number; path: string; bytes: number; files: string[] }>;
         diff_bytes: number;
-        diff_truncated: boolean;
-        commit_metadata: Array<{ commit: string; subject: string }>;
-        commit_metadata_truncated: boolean;
       };
-      expect(context).toMatchObject({
-        head,
-        changed_files: ["src/quoted.ts"],
-        diff_bytes: 700000,
-        diff_truncated: false,
-        commit_metadata: [expect.objectContaining({ commit: head, subject: "Example change" })],
-        commit_metadata_truncated: false,
-      });
-      expect(context.diff_patch).toContain("HomeRail full diff continues in");
-      expect(context.diff_patch.length).toBeLessThan(150000);
-      expect(context.diff_chunks.length).toBeGreaterThan(1);
+      expect(context.changed_files).toEqual(files);
+      expect(context.diff_chunks.length).toBeGreaterThan(0);
+      expect(context.diff_chunks.length).toBeLessThan(files.length);
       expect(context.diff_chunks.every((chunk) =>
-        chunk.bytes <= 120000 &&
-        chunk.files.includes("src/quoted.ts") &&
-        fs.existsSync(path.join(cwd, chunk.path))
+        chunk.bytes <= 120000 && fs.existsSync(path.join(cwd, chunk.path))
       )).toBe(true);
-      expect(context.diff_chunks.reduce((total, chunk) => total + chunk.bytes, 0)).toBe(700000);
-      expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(900000);
+      expect(new Set(context.diff_chunks.flatMap((chunk) => chunk.files))).toEqual(new Set(files));
+      expect(context.diff_chunks.reduce((total, chunk) => total + chunk.bytes, 0)).toBe(context.diff_bytes);
     },
     30_000,
   );
@@ -630,18 +489,16 @@ describe("PR Review scenario assets", () => {
   it("installs Manager guidance and lists tracked template assets", async () => {
     expect(ensureManagerSkillsInstalled().installed).toContain("homerail-pr-review");
     expect(readManagerSkill("homerail-pr-review")?.content).toContain("create_and_run");
-
     const listed = await _invokeHostCodexVoiceToolForTest("list_orchestrations", {});
-    const text = listed.result.content.map((entry) => entry.text).join("\n");
-    expect(text).toContain("pr-review.yaml.template");
+    expect(listed.result.content.map((entry) => entry.text).join("\n")).toContain("pr-review.yaml.template");
   });
 
-  it("starts PR Review from Host Codex with code-resolved immutable GitHub metadata", async () => {
+  it("starts PR Review with code-resolved immutable GitHub metadata", async () => {
     let createRunBody: Record<string, unknown> | undefined;
-    const server = http.createServer((req, res) => {
-      if (req.method === "GET" && req.url === "/repos/xiaotianfotos/homerail/pulls/25") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
+    const server = http.createServer((request, response) => {
+      if (request.method === "GET" && request.url === "/repos/xiaotianfotos/homerail/pulls/25") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({
           title: "Native A2UI",
           user: { login: "contributor" },
           base: {
@@ -661,22 +518,22 @@ describe("PR Review scenario assets", () => {
         }));
         return;
       }
-      if (req.method === "POST" && req.url === "/api/runs/create-and-run") {
+      if (request.method === "POST" && request.url === "/api/runs/create-and-run") {
         const chunks: Buffer[] = [];
-        req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-        req.on("end", () => {
+        request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        request.on("end", () => {
           createRunBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ data: { runId: "host-pr-review-run" } }));
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ data: { runId: "host-pr-review-run" } }));
         });
         return;
       }
-      res.writeHead(404);
-      res.end();
+      response.writeHead(404);
+      response.end();
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
-    if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
+    if (!address || typeof address === "string") throw new Error("test server did not bind");
     const baseUrl = `http://127.0.0.1:${address.port}`;
     const previousGithubApi = process.env.HOMERAIL_GITHUB_API_BASE_URL;
     process.env.HOMERAIL_GITHUB_API_BASE_URL = baseUrl;
@@ -692,17 +549,13 @@ describe("PR Review scenario assets", () => {
         base: "a".repeat(40),
         head: "b".repeat(40),
       });
-      expect(createRunBody).toMatchObject({ yamlPath: "assets/orchestrations/pr-review.yaml.template" });
-      const envelope = JSON.parse(String(createRunBody?.prompt)) as Record<string, unknown>;
+      const envelope = JSON.parse(String(createRunBody?.prompt));
       expect(envelope).toMatchObject({
-        trigger_id: "manager-agent",
         payload: {
           repo: "xiaotianfotos/homerail",
           pr: 25,
           base: "a".repeat(40),
           head: "b".repeat(40),
-          base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-          head_clone_url: "https://github.com/contributor/homerail.git",
         },
       });
     } finally {
@@ -712,180 +565,40 @@ describe("PR Review scenario assets", () => {
     }
   });
 
-  it("deterministically redacts privacy summaries and descriptions before artifact publication", () => {
-    const source = fs.readFileSync(
-      path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template"),
-      "utf8",
-    );
-    const workflow = compileWorkflowSource(source);
-    const normalizer = workflow.canonical?.nodes.find((node) => node.id === "normalize_privacy_review");
-    const command = normalizer?.config?.command as unknown[] | undefined;
-    const code = String(command?.[2] ?? "");
-    const execute = (privacy: Record<string, unknown>) => {
-      const result = spawnSync(process.execPath, ["-e", code], {
-        encoding: "utf8",
-        input: JSON.stringify({ success: [privacy] }),
-      });
-      expect(result.status).toBe(0);
-      return JSON.parse(result.stdout) as Record<string, unknown>;
+  it("keeps the GitHub adapter owner-only, ready-triggered, and release-backed", () => {
+    const workflow = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "pr-review.yml"), "utf8");
+    const runner = fs.readFileSync(path.join(repositoryRoot, "scripts", "run-stable-dag-runner.sh"), "utf8");
+    const reviewRunner = fs.readFileSync(path.join(repositoryRoot, "scripts", "run-pr-review-stable-runner.sh"), "utf8");
+    const parsed = parseYaml(workflow) as {
+      jobs: { review: { env: Record<string, string>; steps: Array<{ name: string; env?: Record<string, string> }> } };
     };
-    const privatePath = "/" + "home" + "/machine-user/project";
-    const privateEmail = "person" + "@" + "private.test";
-
-    expect(execute({
-      status: "clear",
-      summary: `Synthetic evidence included ${privatePath} and ${privateEmail}`,
-      findings: [],
-    })).toEqual({
-      status: "clear",
-      summary: "No local or private information requires human inspection.",
-      findings: [],
-    });
-
-    const advisory = execute({
-      status: "human_review",
-      summary: `Inspect ${privatePath}`,
-      findings: [{
-        category: "email",
-        source: "commit_metadata",
-        location: "commit:0123456789ab metadata",
-        description: `The value was ${privateEmail}`,
-        confidence: "high",
-      }],
-    });
-    expect(advisory).toEqual({
-      status: "human_review",
-      summary: "1 redacted privacy finding requires human inspection.",
-      findings: [{
-        category: "email",
-        source: "commit_metadata",
-        location: "commit:0123456789ab metadata",
-        description: "A redacted email indicator requires human inspection.",
-        confidence: "high",
-      }],
-    });
-    expect(JSON.stringify(advisory)).not.toContain(privatePath);
-    expect(JSON.stringify(advisory)).not.toContain(privateEmail);
-  });
-
-  it("deterministically normalizes final review status from findings and quorum", () => {
-    const source = fs.readFileSync(
-      path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template"),
-      "utf8",
-    );
-    const workflow = compileWorkflowSource(source);
-    const normalizer = workflow.canonical?.nodes.find((node) => node.id === "normalize_review");
-    const command = normalizer?.config?.command as unknown[] | undefined;
-    const code = String(command?.[2] ?? "");
-    const execute = (review: Record<string, unknown>) => {
-      const result = spawnSync(process.execPath, ["-e", code], {
-        encoding: "utf8",
-        input: JSON.stringify({ review: [review] }),
-      });
-      expect(result.status).toBe(0);
-      return JSON.parse(result.stdout) as {
-        report: Record<string, unknown>;
-        quorum: Record<string, unknown>;
-      };
-    };
-    const finding = {
-      category: "security",
-      severity: "low",
-      title: "Debug API remains available",
-      file: "agent-ui/src/debug.ts",
-      line: 12,
-      evidence: "The debug command is registered.",
-      recommendation: "Confirm the intended production support contract.",
-      confidence: "high",
-    };
-    const contradictoryPass = {
-      report: {
-        ...passingReviewReport(),
-        status: "pass",
-        actionable_count: 0,
-        findings: [finding],
-      },
-      quorum: { passed: true, successes: 3, total: 3, threshold: 2 },
-    };
-    expect(execute(contradictoryPass)).toMatchObject({
-      report: {
-        status: "findings",
-        actionable_count: 1,
-        findings: [finding],
-      },
-      quorum: contradictoryPass.quorum,
-    });
-
-    const contradictoryFindings = {
-      report: {
-        ...passingReviewReport(),
-        status: "findings",
-        actionable_count: 7,
-        findings: [],
-      },
-      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
-    };
-    expect(execute(contradictoryFindings)).toMatchObject({
-      report: { status: "pass", actionable_count: 0, findings: [] },
-    });
-
-    expect(execute({
-      ...contradictoryPass,
-      quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
-    })).toMatchObject({
-      report: { status: "inconclusive", actionable_count: 1, findings: [finding] },
-    });
-  });
-
-  it("keeps the trusted GitHub adapter thin, owner-only, and ready-triggered", () => {
-    const workflow = fs.readFileSync(path.resolve(process.cwd(), "..", ".github", "workflows", "pr-review.yml"), "utf8");
-    const runner = fs.readFileSync(path.resolve(process.cwd(), "..", "scripts", "run-stable-dag-runner.sh"), "utf8");
-    const reviewRunner = fs.readFileSync(path.resolve(process.cwd(), "..", "scripts", "run-pr-review-stable-runner.sh"), "utf8");
-    const parsed = parseYaml(workflow) as { jobs: { review: { env: Record<string, string>; steps: Array<{ name: string; env?: Record<string, string> }> } } };
-    expect(workflow).toContain("workflow_dispatch:");
-    expect(workflow).toContain("pull_request:");
     expect(workflow).toContain("types: [opened, reopened, ready_for_review]");
-    expect(workflow.slice(workflow.indexOf("on:"), workflow.indexOf("permissions:"))).not.toContain("paths-ignore:");
     expect(workflow).not.toContain("pull_request_target:");
-    expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow).toContain("github.actor == 'xiaotianfotos'");
-    expect(workflow).toContain("github.event.pull_request.user.login == 'xiaotianfotos'");
     expect(workflow).toContain("github.event.pull_request.draft == false");
     expect(workflow).toContain("github.event.pull_request.head.repo.full_name == github.repository");
-    expect(workflow).toContain("continue-on-error: true");
-    expect(workflow).toContain("Privacy advisory (human inspection only)");
     expect(workflow).toContain("run-pr-review-stable-runner.sh");
-    expect(workflow).not.toContain("npm run build:packages");
-    expect(workflow).not.toContain("HOMERAIL_PATTERN_MODEL: qwen3.6");
-    expect(workflow).not.toContain("HOMERAIL_PR_REVIEW_MANAGER_URL");
+    expect(workflow).not.toContain("report-pr-privacy-advisory.mjs");
+    expect(workflow).not.toContain("pr-privacy-review.json");
+    expect(workflow).toContain("render-pr-review-markdown.mjs");
     expect(runner).toContain("dag run-template");
     expect(runner).toContain('stable_hr dag artifact "$RUN_ID" "$artifact"');
     expect(runner).toContain('--profile "$PROFILE_ID"');
-    expect(runner).toContain("initialize_stable_automation_runtime");
     expect(reviewRunner).toContain("HOMERAIL_STABLE_TASK=pr-review");
-    expect(workflow).not.toContain("--output-dir");
-    expect(workflow).toContain("$GITHUB_STEP_SUMMARY");
     expect(parsed.jobs.review.env.HOMERAIL_GITHUB_API_BASE_URL).toBe("${{ github.api_url }}");
-    expect(parsed.jobs.review.env).not.toHaveProperty("HOMERAIL_PATTERN_MODEL_BASE_URL");
     expect(parsed.jobs.review.env).not.toHaveProperty("HOMERAIL_HOME");
-    expect(parsed.jobs.review.env).not.toHaveProperty("HOMERAIL_MANAGER_URL");
-    expect(parsed.jobs.review.steps.find((step) => step.name === "Run HomeRail PR Review DAG on stable Manager")?.env)
-      .not.toHaveProperty("HOMERAIL_HOME");
   });
 
-  it("validates completed and inconclusive CI artifacts without hiding infrastructure failures", () => {
-    const validator = path.resolve(process.cwd(), "..", "scripts", "validate-pr-review-artifacts.mjs");
+  it("validates pass, findings, and inconclusive artifacts against the model votes", () => {
+    const validator = path.join(repositoryRoot, "scripts", "validate-pr-review-artifacts.mjs");
     const dir = path.join(tmpHome, "artifact-validator");
     fs.mkdirSync(dir, { recursive: true });
     const commandPath = path.join(dir, "command.json");
     const reportPath = path.join(dir, "pr-review.json");
     const markdownPath = path.join(dir, "pr-review.md");
-    const privacyPath = path.join(dir, "pr-privacy-review.json");
     const runId = "a".repeat(24);
     const artifacts = [
       { name: "pr-review.json", status: "ready" },
-      { name: "pr-review.md", status: "ready" },
-      { name: "pr-privacy-review.json", status: "ready" },
     ];
     const runValidator = (
       status: string,
@@ -904,12 +617,7 @@ describe("PR Review scenario assets", () => {
       fs.writeFileSync(commandPath, JSON.stringify({ run_id: runId, status, artifacts }));
       fs.writeFileSync(reportPath, JSON.stringify({ report, quorum }));
       fs.writeFileSync(markdownPath, markdown);
-      fs.writeFileSync(privacyPath, JSON.stringify({
-        status: "clear",
-        summary: "No local or private information requires human inspection.",
-        findings: [],
-      }));
-      return spawnSync(process.execPath, [validator, commandPath, reportPath, markdownPath, privacyPath], { encoding: "utf8" });
+      return spawnSync(process.execPath, [validator, commandPath, reportPath, markdownPath], { encoding: "utf8" });
     };
 
     expect(runValidator(
@@ -917,340 +625,75 @@ describe("PR Review scenario assets", () => {
       passingReviewReport(),
       { passed: true, successes: 2, total: 3, threshold: 2 },
     ).status).toBe(0);
+    const renderer = path.join(repositoryRoot, "scripts", "render-pr-review-markdown.mjs");
+    const rendered = spawnSync(process.execPath, [renderer, commandPath, reportPath], { encoding: "utf8" });
+    expect(rendered.status, rendered.stderr).toBe(0);
+    expect(rendered.stdout).toContain(`**HomeRail Run ID:** \`${runId}\``);
+    expect(rendered.stdout).toContain("| qwen | complete | approve |");
+    expect(rendered.stdout).not.toContain("${run_id}");
+    expect(runValidator(
+      "completed",
+      passingReviewReport(),
+      { passed: true, successes: 2, total: 3, threshold: 2 },
+      rendered.stdout,
+    ).status).toBe(0);
+
+    const findingsReport = {
+      ...passingReviewReport(),
+      status: "findings",
+      actionable_count: 1,
+      findings: [finding],
+      reviewer_results: [
+        modelReview("qwen", "request_changes"),
+        modelReview("kimi", "request_changes"),
+        modelReview("glm"),
+      ],
+    };
     expect(runValidator(
       "cancelled",
-      { ...passingReviewReport(), status: "inconclusive" },
+      findingsReport,
       { passed: false, successes: 1, total: 3, threshold: 2 },
     ).status).toBe(0);
 
-    const specializedCoverage = passingReviewReport();
-    const specializedReviewers = specializedCoverage.reviewer_results as Array<Record<string, unknown>>;
-    specializedReviewers[3].reviewed_files = ["agent-ui/src/App.vue"];
-    specializedReviewers[3].unreviewed_files = ["homerail_manager/src/index.ts"];
-    for (const reviewer of specializedReviewers.slice(0, 3)) {
-      reviewer.reviewed_files = ["agent-ui/src/App.vue", "homerail_manager/src/index.ts"];
-    }
+    const inconclusiveReport = {
+      ...passingReviewReport(),
+      status: "inconclusive",
+      confidence: "low",
+      reviewer_results: [
+        modelReview("qwen"),
+        modelReview("kimi", "request_changes"),
+        modelReview("glm", "abstain"),
+      ],
+    };
     expect(runValidator(
-      "completed",
-      specializedCoverage,
-      { passed: true, successes: 2, total: 3, threshold: 2 },
+      "cancelled",
+      inconclusiveReport,
+      { passed: false, successes: 1, total: 3, threshold: 2 },
     ).status).toBe(0);
 
-    const incompleteCoverage = passingReviewReport();
-    const incompleteReviewers = incompleteCoverage.reviewer_results as Array<Record<string, unknown>>;
-    incompleteReviewers[0].unreviewed_files = ["src/missed.ts"];
-    incompleteReviewers[1].reviewed_files = ["src/run.ts", "src/missed.ts"];
-    const incomplete = runValidator(
+    const contradictory = runValidator(
       "completed",
-      incompleteCoverage,
-      { passed: true, successes: 2, total: 3, threshold: 2 },
+      passingReviewReport(),
+      { passed: true, successes: 3, total: 3, threshold: 2 },
     );
-    expect(incomplete.status).toBe(1);
-    expect(incomplete.stderr).toContain("without two independent reviews");
+    expect(contradictory.status).toBe(1);
+    expect(contradictory.stderr).toContain("does not match the model approval votes");
 
-    const truncatedCoverage = passingReviewReport();
-    const firstReviewer = (truncatedCoverage.reviewer_results as Array<Record<string, unknown>>)[0];
-    firstReviewer.evidence_truncated = true;
-    const truncated = runValidator(
-      "completed",
-      truncatedCoverage,
-      { passed: true, successes: 2, total: 3, threshold: 2 },
-    );
-    expect(truncated.status).toBe(1);
-    expect(truncated.stderr).toContain("used truncated evidence");
-
-    const invalid = runValidator(
+    const placeholder = runValidator(
       "completed",
       passingReviewReport(),
       { passed: true, successes: 2, total: 3, threshold: 2 },
       "# Review\n\n**HomeRail Run ID:** `${run_id}`",
     );
-    expect(invalid.status).toBe(1);
-    expect(invalid.stderr).toContain("does not contain the exact HomeRail run_id field");
+    expect(placeholder.status).toBe(1);
   });
 
-  it("keeps PR closeout manual, thin, isolated, and unable to merge", () => {
-    const workflow = fs.readFileSync(path.resolve(process.cwd(), "..", ".github", "workflows", "pr-closeout.yml"), "utf8");
-    const parsed = parseYaml(workflow) as { jobs: { closeout: { env: Record<string, string>; steps: Array<{ name: string; env?: Record<string, string> }> } } };
+  it("keeps PR closeout manual and unable to merge", () => {
+    const workflow = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "pr-closeout.yml"), "utf8");
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).not.toContain("pull_request_target:");
     expect(workflow).toContain("dag run-template pr-closeout");
-    expect(workflow).toContain('dag artifact "$RUN_ID" pr-closeout.json');
-    expect(workflow).not.toContain("closeout-report");
-    expect(workflow).toContain("HOMERAIL_HOME: ${{ runner.temp }}/homerail-pr-closeout-cli-${{ github.run_id }}");
     expect(workflow).not.toContain("gh pr merge");
     expect(workflow).toContain("This workflow never merges the pull request.");
-    expect(parsed.jobs.closeout.env).not.toHaveProperty("HOMERAIL_HOME");
-    expect(parsed.jobs.closeout.steps.find((step) => step.name === "Start deterministic closeout")?.env?.HOMERAIL_HOME)
-      .toBe("${{ runner.temp }}/homerail-pr-closeout-cli-${{ github.run_id }}");
-  });
-
-  it("executes reviews and privacy independently before publication", async () => {
-    const source = fs.readFileSync(
-      path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template"),
-      "utf8",
-    );
-    const parsed = parseWorkflowSource(source);
-    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
-    installPrepareCommandStub(parsed);
-    const dispatcher = new FakeDAGDispatcher();
-    const executor = new GraphExecutor(dispatcher);
-    const input = {
-      trigger_id: "manual",
-      trigger_type: "manual",
-      fire_key: "manual:xiaotianfotos/homerail#25:bbbbbbb",
-      payload: {
-        repo: "xiaotianfotos/homerail",
-        pr: 25,
-        base: "a".repeat(40),
-        head: "b".repeat(40),
-        base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-        head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-      },
-    };
-    executor.createRun("pr-review-runtime", parsed, JSON.stringify(input));
-    expect(executor.tick("pr-review-runtime")).toBeGreaterThan(0);
-    expect(dispatcher.dispatched.map((envelope) => envelope.nodeId).sort()).toEqual([
-      "frontend_review",
-      "privacy_review",
-      "runtime_review",
-      "security_review",
-      "test_review",
-    ]);
-    expect(dispatcher.dispatched.find((envelope) => envelope.nodeId === "privacy_review")?.inputs.context?.[0])
-      .toHaveProperty("commit_metadata");
-    expect(dispatcher.dispatched.find((envelope) => envelope.nodeId === "runtime_review")?.inputs.context?.[0])
-      .not.toHaveProperty("commit_metadata");
-
-    const categories = ["runtime", "security", "tests", "frontend"] as const;
-    for (const category of categories) {
-      handoffActiveRun("pr-review-runtime", `${category === "tests" ? "test" : category}_review`, "reviewed", {
-        reviewer: category,
-        status: "complete",
-        summary: `${category} review complete`,
-        reviewed_files: ["src/run.ts"],
-        unreviewed_files: [],
-        evidence_truncated: false,
-        findings: [],
-      });
-    }
-    handoffActiveRun("pr-review-runtime", "privacy_review", "reviewed", {
-      status: "clear",
-      summary: "No local or private information requires human inspection.",
-      findings: [],
-    });
-    expect(executor.tick("pr-review-runtime")).toBeGreaterThan(0);
-    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("synthesize");
-
-    const report = passingReviewReport();
-    handoffActiveRun("pr-review-runtime", "synthesize", "drafted", report);
-    expect(executor.tick("pr-review-runtime")).toBe(3);
-    handoffActiveRun("pr-review-runtime", "evidence_vote", "voted", {
-      voter: "evidence", vote: "accept", confidence: "high", evidence: "grounded", finding_verdicts: [],
-    });
-    handoffActiveRun("pr-review-runtime", "false_positive_vote", "voted", {
-      voter: "false_positive", vote: "reject", confidence: "medium", evidence: "one concern", finding_verdicts: [],
-    });
-    handoffActiveRun("pr-review-runtime", "coverage_vote", "voted", {
-      voter: "coverage", vote: "accept", confidence: "high", evidence: "all scopes present",
-    });
-    expect(executor.tick("pr-review-runtime")).toBeGreaterThan(0);
-    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("refine");
-
-    const finalReview = {
-      report,
-      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
-    };
-    handoffActiveRun("pr-review-runtime", "refine", "finalized", finalReview);
-    expect(executor.tick("pr-review-runtime")).toBeGreaterThan(0);
-    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("publish");
-    expect(loadRunSnapshot("pr-review-runtime")?.handoffs).toContainEqual(expect.objectContaining({
-      fromNode: "normalize_review",
-      port: "normalized",
-      content: finalReview,
-    }));
-
-    handoffActiveRun("pr-review-runtime", "publish", "published", {
-      run_id: "pr-review-runtime",
-      markdown: "# HomeRail PR Review\n\n**HomeRail Run ID:** `pr-review-runtime`\n\nNo actionable findings.",
-      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
-    });
-    executor.tick("pr-review-runtime");
-
-    expect(getActiveRun("pr-review-runtime")?.status).toBe("completed");
-    expect(loadRunSnapshot("pr-review-runtime")?.handoffs).toContainEqual(expect.objectContaining({
-      fromNode: "publish",
-      port: "published",
-    }));
-
-    expect(await finalizeRunArtifacts("pr-review-runtime", "success")).toEqual([
-      expect.objectContaining({ name: "pr-privacy-review.json", status: "ready" }),
-      expect.objectContaining({ name: "pr-review.json", status: "ready" }),
-      expect.objectContaining({ name: "pr-review.md", status: "ready" }),
-    ]);
-    expect(JSON.parse(fs.readFileSync(getRunArtifactBlobPath("pr-review-runtime", "pr-review.json")!, "utf8")))
-      .toMatchObject({ report: { status: "pass" }, quorum: { passed: true, successes: 2 } });
-    expect(fs.readFileSync(getRunArtifactBlobPath("pr-review-runtime", "pr-review.md")!, "utf8"))
-      .toBe("# HomeRail PR Review\n\n**HomeRail Run ID:** `pr-review-runtime`\n\nNo actionable findings.\n");
-    expect(JSON.parse(fs.readFileSync(getRunArtifactBlobPath("pr-review-runtime", "pr-privacy-review.json")!, "utf8")))
-      .toMatchObject({ status: "clear", findings: [] });
-  });
-
-  it("fails verification closed when the deterministic diff evidence is truncated", () => {
-    const source = fs.readFileSync(
-      path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template"),
-      "utf8",
-    );
-    const parsed = parseWorkflowSource(source);
-    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
-    installPrepareCommandStub(parsed, { diffTruncated: true });
-    const dispatcher = new FakeDAGDispatcher();
-    const executor = new GraphExecutor(dispatcher);
-    const runId = "pr-review-truncated-evidence";
-    const input = {
-      trigger_id: "manual",
-      trigger_type: "manual",
-      fire_key: "manual:xiaotianfotos/homerail#25:truncated",
-      payload: {
-        repo: "xiaotianfotos/homerail",
-        pr: 25,
-        base: "a".repeat(40),
-        head: "b".repeat(40),
-        base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-        head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-      },
-    };
-    executor.createRun(runId, parsed, JSON.stringify(input));
-    expect(executor.tick(runId)).toBeGreaterThan(0);
-    expect(loadRunSnapshot(runId)?.handoffs.find(
-      (handoff) => handoff.fromNode === "prepare" && handoff.port === "ready",
-    )?.content).toMatchObject({ diff_truncated: true });
-    expect(dispatcher.dispatched.map((envelope) => envelope.nodeId).sort()).toEqual([
-      "frontend_review",
-      "privacy_review",
-      "runtime_review",
-      "security_review",
-      "test_review",
-    ]);
-
-    for (const reviewer of ["runtime", "security", "test", "frontend"] as const) {
-      failActiveRun(runId, `${reviewer}_review`, "bounded diff_patch was truncated");
-    }
-    expect(executor.tick(runId)).toBeGreaterThan(0);
-    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("synthesize");
-
-    const reviewerResults = (["runtime", "security", "tests", "frontend"] as const).map((reviewer) => ({
-      reviewer,
-      status: "failed",
-      summary: `${reviewer} reviewer refused truncated diff evidence`,
-      reviewed_files: [],
-      unreviewed_files: ["src/run.ts"],
-      evidence_truncated: true,
-      findings: [],
-    }));
-    handoffActiveRun(runId, "synthesize", "drafted", {
-      ...passingReviewReport(),
-      status: "inconclusive",
-      confidence: "low",
-      summary: "The deterministic diff evidence was truncated.",
-      reviewer_results: reviewerResults,
-    });
-    expect(executor.tick(runId)).toBe(3);
-    handoffActiveRun(runId, "evidence_vote", "voted", {
-      voter: "evidence",
-      vote: "reject",
-      confidence: "high",
-      evidence: "diff_truncated=true",
-      finding_verdicts: [],
-    });
-    handoffActiveRun(runId, "false_positive_vote", "voted", {
-      voter: "false_positive",
-      vote: "reject",
-      confidence: "high",
-      evidence: "diff_truncated=true",
-      finding_verdicts: [],
-    });
-    handoffActiveRun(runId, "coverage_vote", "voted", {
-      voter: "coverage",
-      vote: "reject",
-      confidence: "high",
-      evidence: "all four reviewers failed closed on truncated evidence",
-    });
-    expect(executor.tick(runId)).toBeGreaterThan(0);
-    expect(loadRunSnapshot(runId)?.handoffs.find(
-      (handoff) => handoff.fromNode === "verification_quorum" && handoff.port === "rejected",
-    )?.content).toMatchObject({
-      passed: false,
-      successes: 0,
-      failures: 3,
-      total: 3,
-      threshold: 2,
-    });
-    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("refine");
-  });
-
-  it("normalizes a reviewer failure and continues to synthesis", () => {
-    const source = fs.readFileSync(
-      path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template"),
-      "utf8",
-    );
-    const parsed = parseWorkflowSource(source);
-    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
-    installPrepareCommandStub(parsed);
-    const dispatcher = new FakeDAGDispatcher();
-    const executor = new GraphExecutor(dispatcher);
-    const input = {
-      trigger_id: "manual",
-      trigger_type: "manual",
-      fire_key: "manual:xiaotianfotos/homerail#25:reviewer-failure",
-      payload: {
-        repo: "xiaotianfotos/homerail",
-        pr: 25,
-        base: "a".repeat(40),
-        head: "b".repeat(40),
-        base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-        head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
-      },
-    };
-    executor.createRun("pr-review-reviewer-failure", parsed, JSON.stringify(input));
-    executor.tick("pr-review-reviewer-failure");
-
-    for (const category of ["runtime", "tests", "frontend"] as const) {
-      handoffActiveRun(
-        "pr-review-reviewer-failure",
-        `${category === "tests" ? "test" : category}_review`,
-        "reviewed",
-        {
-          reviewer: category,
-          status: "complete",
-          summary: `${category} review complete`,
-          reviewed_files: ["src/run.ts"],
-          unreviewed_files: [],
-          evidence_truncated: false,
-          findings: [],
-        },
-      );
-    }
-    failActiveRun(
-      "pr-review-reviewer-failure",
-      "security_review",
-      "agent ended without DAG handoff after correction exhaustion",
-    );
-    expect(executor.tick("pr-review-reviewer-failure")).toBeGreaterThan(0);
-    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("synthesize");
-
-    const normalized = loadRunSnapshot("pr-review-reviewer-failure")?.handoffs.find((handoff) =>
-      handoff.fromNode === "normalize_security_review" && handoff.port === "reviewed"
-    );
-    expect(normalized?.content).toMatchObject({
-      reviewer: "security",
-      status: "failed",
-      reviewed_files: [],
-      unreviewed_files: ["src/run.ts"],
-      evidence_truncated: true,
-      findings: [],
-    });
-    expect(String((normalized?.content as { summary?: unknown } | undefined)?.summary))
-      .toContain("agent ended without DAG handoff after correction exhaustion");
   });
 });

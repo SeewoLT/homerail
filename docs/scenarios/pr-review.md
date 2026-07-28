@@ -32,71 +32,55 @@ metadata.
    Enterprise hosts), clones both exact revisions into the isolated run
    workspace, verifies
    `HEAD`, and computes the changed-file list, short diff summary, and a bounded
-   high-context patch. Git runs with credential helpers, prompts, hooks, and
+   high-context patch. Small file sections are packed together into bounded
+   120 KB evidence chunks instead of forcing one model tool call per changed
+   file. Git runs with credential helpers, prompts, hooks, and
    local/ext protocols disabled; no model tool call is involved in checkout or
    evidence collection. The serialized review context is capped below the
    Manager command-output limit and records `diff_truncated` explicitly.
-   Bounded author/committer metadata is captured from the exact commit range for
-   the independent privacy advisory, then deterministically stripped from the
-   context supplied to every main reviewer, synthesizer, and voter.
-2. Runtime, security, tests, frontend, and privacy reviewers start from the same
-   exact evidence independently and in parallel. The first four feed the main
-   review. The privacy reviewer looks only for accidental local/private data and
-   can never feed synthesis, verification, or quorum. The trusted checkout is
+   Bounded author/committer metadata is captured for audit history, then
+   deterministically stripped from the model context.
+2. Qwen, Kimi, and GLM start from the same exact evidence independently and in
+   parallel. Each performs a complete PR review covering runtime correctness,
+   security, compatibility, tests, and user-visible behavior, then casts one
+   `approve` or `request_changes` vote. The trusted checkout is
    mounted read-only. Reviewers that need repository evidence receive only the
    SDK's read-only `Read`, `Grep`, `Glob`, and `LS` tools, so they can inspect
    complete files, trace callers, and search tests without granting untrusted PR
    content a shell or write primitive. A Worker pre-tool hook resolves real paths
    and denies omitted paths, traversal, absolute paths outside the declared
    workspace roots, and symlink escapes before a read/search tool executes.
-   Synthesis, coverage, refinement, and publication keep their built-in tool list
-   empty. The supplied patch is an index rather than the sole evidence source,
-   and prompts require inspection to stay proportional to the changed surface.
-   Reviewer-specific output contracts reject a mislabeled reviewer identity and
-   trigger bounded contract correction. HomeRail DAG tools remain scoped to the
-   node contract, with `handoff` carrying the structured result. Patch and
-   repository content are untrusted evidence, never instructions. If evidence
-   had to be truncated, the main reviewers fail closed and the privacy advisory
-   requests human inspection.
+   The supplied patch is an index rather than the sole evidence source, and
+   prompts require every diff chunk to be read while keeping follow-up
+   inspection proportional. Model-specific output contracts reject a mislabeled
+   identity and trigger bounded contract correction. Patch and repository
+   content are untrusted evidence, never instructions.
 3. A deterministic normalizer preserves every valid reviewer result. If a
    reviewer exhausts contract correction without a handoff, the normalizer
-   emits a `status: failed` ReviewerResult with grounded runtime evidence so the
-   DAG produces an honest inconclusive artifact instead of stalling.
-4. A synthesizer preserves all reviewer results and deduplicates findings.
-5. Evidence, false-positive, and coverage voters independently validate the
-   draft report. Evidence and false-positive voters produce a machine-readable
-   verdict for every retained finding against the same patch. Rejecting a false
-   finding is a successful correction and does not reject the whole report;
-   missing reviewer coverage, truncated evidence, an identity mismatch, or an
-   unresolvable finding does.
-6. A deterministic two-of-three join decides whether verification reached
-   quorum.
-7. A branch-merge join normalizes either quorum outcome into one path. A
-   refiner removes findings specifically rejected by an evidence or
-   false-positive verdict and recomputes the report.
-8. The refiner persists the final structured report and quorum as JSON. The
-   privacy result is normalized separately; a failed privacy model call becomes
-   a redacted `human_review` result rather than blocking or silently passing.
-   A small
-   publisher renders only Markdown plus the exact runtime id, avoiding a second
-   model-generated copy of the full report. Manager materializes both declared
-   artifacts. Failed quorum produces an `inconclusive` report instead of a
-   false clean result.
+   emits a failed/abstain result. A complete vote is accepted only when the
+   reviewer accounted for every changed file and its findings agree with its
+   vote.
+4. A deterministic command counts the three model votes. Two approvals produce
+   `pass` and are the only result that passes the check. Two request-changes
+   votes produce blocking `findings`; otherwise the result is `inconclusive`.
+   No model can alter the vote count.
+5. Manager materializes the structured JSON artifact. After the run reaches a
+   terminal state, the stable runner renders Markdown deterministically from
+   that JSON plus `command.json`, so the exact Manager run id cannot be invented
+   or altered by a model.
 
 ## Outputs
 
 - `pr-review.json`
 - `pr-review.md`
-- `pr-privacy-review.json` (redacted advisory; excluded from the main report)
-- four normalized independent reviewer results
-- three independent verification votes
-- per-finding evidence and false-positive verdicts
+- three normalized reviews and votes from distinct models
 - deterministic quorum payload
 - Manager audit summary and per-node metrics
 - HomeRail run id and replayable event history
 
-The first version is advisory. It does not modify the reviewed repository,
-submit a GitHub review, approve a PR, or merge code.
+The workflow does not modify the reviewed repository, submit a GitHub review,
+approve a PR, or merge code. Its GitHub Check passes only when at least two
+models approve.
 
 ## CI Adapter
 
@@ -105,30 +89,20 @@ event fields into the public CLI input, then submits it to the auto-deployed
 stable Manager. It does not install packages, build the pull-request checkout,
 copy a Seed Home, or start an ephemeral Manager. The stable release syncs its
 tracked template, binds a private database Runtime Profile, calls
-`hr dag run-template ... --wait`, downloads the three declared artifacts,
-uploads them as CI evidence, and copies `pr-review.md` into the GitHub Check
+`hr dag run-template ... --wait`, downloads the declared JSON artifact,
+renders `pr-review.md` locally from the authoritative result and command run id,
+uploads both files as CI evidence, and copies the Markdown into the GitHub Check
 summary. The run and its event history remain visible in the normal production
-UI. Workflow contracts, per-finding verification, and deterministic quorum
-remain authoritative; the adapter does not reconstruct a report from raw
-handoffs.
+UI. Workflow contracts and deterministic quorum remain authoritative; the
+adapter does not reconstruct a report from raw handoffs.
 The adapter verifies that the run reached the terminal state implied by quorum,
 all artifacts are structured and non-empty, the quorum is 2-of-3, and Markdown
-contains the exact HomeRail run id and report identity. A valid rejected quorum
-is retained as `cancelled` plus `inconclusive`; infrastructure or
-artifact-integrity failures fail the check instead of being hidden behind an
-advisory success. Whether that check blocks merging is a repository
-branch-protection decision; findings and a valid inconclusive result are still
-complete diagnostic outputs.
-
-The privacy artifact contains categories, repository-relative locations, and
-redacted reasons only. A separate `continue-on-error` step emits GitHub error
-annotations when its status is `human_review`. That step is visibly red for a
-maintainer to inspect, while the job conclusion and the main PR review remain
-unchanged. Invalid or unredacted artifact output is an infrastructure failure
-and is not hidden by the advisory step.
-Commit author and committer identities are checked independently. Any
-non-noreply email address is always a high-confidence `human_review` finding,
-including an address owned by the repository maintainer or published elsewhere.
+contains the exact HomeRail run id and report identity. A request-changes
+majority is retained as `cancelled` plus `findings`; a split vote or abstention
+without a majority is retained as `cancelled` plus `inconclusive`.
+Infrastructure and artifact-integrity failures also fail the check. Whether
+that check blocks merging is a repository branch-protection decision; findings
+and inconclusive results remain complete diagnostic outputs.
 
 Automatic self-hosted execution is restricted to non-draft, same-repository PRs
 created by the trusted maintainer. This avoids running untrusted fork content on
@@ -151,11 +125,11 @@ Runner repository configuration:
 - `HOMERAIL_STABLE_MANAGER_URL`: host-local Manager URL. It must be loopback or
   the Docker bridge gateway, never a LAN Manager endpoint;
 - `HOMERAIL_PR_REVIEW_PRIMARY_MODEL`: exact setting id, display name, or model
-  name selected from the stable Manager database. It drives all four specialist reviewers and
-  synthesis;
+  name selected from the stable Manager database. It drives the first review;
 - `HOMERAIL_PR_REVIEW_ARBITER_MODEL`: a distinct active setting selected from
-  the same database. It drives the evidence, false-positive, and coverage votes,
-  refinement, and publication. Both settings must expose Anthropic-compatible
+  the same database and drives the second review;
+- `HOMERAIL_PR_REVIEW_THIRD_MODEL`: a third distinct active setting that drives
+  the final review vote. All three settings must expose Anthropic-compatible
   endpoints because these DAG workers use the Claude Agent SDK harness.
 
 The GitHub Actions adapter supplies `github.api_url` as
