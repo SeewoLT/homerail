@@ -643,6 +643,11 @@ test("candidate manifest is reproducibly verified and detects artifact tampering
     assert.match(releaseNotes, /Windows: explicitly unsigned Alpha installer/);
     assert.match(releaseNotes, /macOS: Developer ID signed and Apple-notarized/);
     assert.match(releaseNotes, /platform-specific release gates/);
+    assert.match(
+      releaseNotes,
+      /unstable build intended only for automatic upgrade testing/,
+    );
+    assert.match(releaseNotes, /Do not install it for general use/);
     assert.doesNotMatch(releaseNotes, /This is a signed HomeRail Desktop/);
     assert.doesNotMatch(
       releaseNotes,
