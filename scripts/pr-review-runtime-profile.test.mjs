@@ -6,7 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  PR_REVIEW_ARBITER_AGENTS,
+  PR_REVIEW_MODEL_AGENTS,
   configurePrReviewRuntimeProfile,
   prReviewRuntimeProfileYaml,
   selectRuntimeSetting,
@@ -30,6 +30,14 @@ const arbiter = {
   supports_llm: true,
   anthropic_base_url: "https://kimi.example.test/anthropic",
 };
+const third = {
+  id: "setting-glm52",
+  display_name: "glm-5.2",
+  model_name: "glm-5.2",
+  is_active: true,
+  supports_llm: true,
+  anthropic_base_url: "https://glm.example.test/anthropic",
+};
 
 test("selects one active Anthropic-compatible stable Manager model", () => {
   assert.equal(selectRuntimeSetting([primary, arbiter], "qwen3.8-max-preview", "primary"), primary);
@@ -44,17 +52,28 @@ test("selects one active Anthropic-compatible stable Manager model", () => {
   );
 });
 
-test("binds primary review to one model and arbitration to a distinct model", () => {
-  const yaml = prReviewRuntimeProfileYaml({ profileId: "pr-review-mixed", primary, arbiter });
-  assert.match(yaml, /workflow_id: pr-review/);
+test("binds the three review votes to three distinct models", () => {
+  const yaml = prReviewRuntimeProfileYaml({ profileId: "pr-review-mixed", primary, arbiter, third });
+  assert.match(yaml, /workflow_id: "pr-review"/);
   assert.match(yaml, /default:\n  llm_setting_id: "setting-qwen38"\n  agent_type: claude-sdk/);
-  for (const agentId of PR_REVIEW_ARBITER_AGENTS) {
-    assert.match(yaml, new RegExp(`  ${agentId}:\\n    llm_setting_id: "setting-k3"`));
+  for (const [agentId, role] of Object.entries(PR_REVIEW_MODEL_AGENTS)) {
+    const setting = { primary, arbiter, third }[role];
+    assert.match(yaml, new RegExp(`  ${agentId}:\\n    llm_setting_id: "${setting.id}"`));
   }
   assert.doesNotMatch(yaml, /api[_-]?key/i);
   assert.throws(
-    () => prReviewRuntimeProfileYaml({ profileId: "same", primary, arbiter: primary }),
-    /must use different LLM settings/,
+    () => prReviewRuntimeProfileYaml({ profileId: "same", primary, arbiter, third: primary }),
+    /three distinct LLM settings/,
+  );
+  assert.match(
+    prReviewRuntimeProfileYaml({
+      profileId: "pr-review-candidate",
+      workflowId: "pr-review-candidate",
+      primary,
+      arbiter,
+      third,
+    }),
+    /workflow_id: "pr-review-candidate"/,
   );
 });
 
@@ -67,7 +86,7 @@ test("authenticates profile sync with the isolated DAG mutation token", async ()
   const server = http.createServer((request, response) => {
     response.setHeader("content-type", "application/json");
     if (request.method === "GET" && request.url === "/api/llm/settings") {
-      response.end(JSON.stringify({ success: true, data: { settings: [primary, arbiter] } }));
+      response.end(JSON.stringify({ success: true, data: { settings: [primary, arbiter, third] } }));
       return;
     }
     if (request.method === "POST" && request.url === "/api/dag/profiles/sync") {
@@ -88,8 +107,10 @@ test("authenticates profile sync with the isolated DAG mutation token", async ()
     assert.ok(address && typeof address === "object");
     await configurePrReviewRuntimeProfile({
       managerUrl: `http://127.0.0.1:${address.port}`,
+      workflowId: "pr-review",
       primarySelector: primary.model_name,
       arbiterSelector: arbiter.model_name,
+      thirdSelector: third.model_name,
     });
     assert.equal(syncHeaders?.["x-homerail-dag-token"], "test-mutation-token");
     assert.equal(syncHeaders?.authorization, undefined);
@@ -111,7 +132,7 @@ test("formal PR Review submits to the durable stable Manager", () => {
   assert.match(workflow, /run-pr-review-stable-runner\.sh/);
   assert.match(workflow, /homerail-pr-review/);
   assert.doesNotMatch(workflow, /install:all|build:packages|run-pr-review-live-runner/);
-  assert.doesNotMatch(workflow, /vars\.HOMERAIL_PR_REVIEW_(?:HOME_TEMPLATE|PRIMARY_MODEL|ARBITER_MODEL)/);
+  assert.doesNotMatch(workflow, /vars\.HOMERAIL_PR_REVIEW_(?:HOME_TEMPLATE|PRIMARY_MODEL|ARBITER_MODEL|THIRD_MODEL)/);
 });
 
 test("formal PR Review runs for maintainer-owned PRs when they become ready", () => {
