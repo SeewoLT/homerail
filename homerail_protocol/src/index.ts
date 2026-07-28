@@ -1,12 +1,12 @@
 /**
- * HomeRail Protocol — v0.1.0-alpha.2.1
+ * HomeRail Protocol — v0.1.0-alpha.2.2
  *
  * Single source of truth for all runtime communication between
  * homerail_worker, homerail_node, and homerail_manager.
- * @version 0.1.0-alpha.2.1
+ * @version 0.1.0-alpha.2.2
  */
 
-export const PROTOCOL_VERSION = "0.1.0-alpha.2.1";
+export const PROTOCOL_VERSION = "0.1.0-alpha.2.2";
 
 export * from "./types.js";
 export * from "./dag-activity.js";
