@@ -456,6 +456,44 @@ jobs:
             exit 1
           fi
           codesign --verify --deep --strict --verbose=2 "$app_path"
+          helper_apps=()
+          while IFS= read -r helper_app; do
+            helper_apps+=("$helper_app")
+          done < <(
+            find "$app_path/Contents/Frameworks" \
+              -maxdepth 1 \
+              -type d \
+              -name 'HomeRail Helper*.app' \
+              -print \
+              | sort
+          )
+          if [[ "${#helper_apps[@]}" -ne 4 ]]; then
+            echo "Expected four signed HomeRail Helper apps, found ${#helper_apps[@]}" >&2
+            exit 1
+          fi
+          for signed_bundle in "$app_path" "${helper_apps[@]}"; do
+            entitlements="$(codesign -d --entitlements - "$signed_bundle" 2>&1)"
+            if ! printf '%s\n' "$entitlements" | awk '
+              /\[Key\] com\.apple\.security\.device\.audio-input$/ {
+                saw_key = 1
+                next
+              }
+              saw_key && /\[Key\]/ {
+                exit 1
+              }
+              saw_key && /\[Bool\] true$/ {
+                found = 1
+                exit 0
+              }
+              END {
+                exit found ? 0 : 1
+              }
+            '; then
+              printf '%s\n' "$entitlements" >&2
+              echo "Missing enabled microphone entitlement on $signed_bundle" >&2
+              exit 1
+            fi
+          done
           xcrun stapler validate "$app_path"
           spctl --assess --type execute --verbose=2 "$app_path"
 

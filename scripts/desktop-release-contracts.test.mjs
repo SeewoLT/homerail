@@ -34,6 +34,10 @@ const releaseDocs = fs.readFileSync(
   path.join(repoRoot, "docs", "desktop-release.md"),
   "utf8",
 );
+const macEntitlements = fs.readFileSync(
+  path.join(repoRoot, "scripts", "desktop-release", "entitlements.mac.plist"),
+  "utf8",
+);
 const currentPublicVersion = JSON.parse(
   fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
 ).version;
@@ -294,6 +298,8 @@ test("candidate signs macOS, explicitly leaves Windows Alpha unsigned, and creat
   const macBuild = candidateStep("Build, sign, and notarize macOS app");
   assert.match(macBuild, /--config\.forceCodeSigning=true/);
   assert.match(macBuild, /--config\.mac\.notarize=true/);
+  assert.match(macBuild, /--config\.mac\.entitlements=/);
+  assert.match(macBuild, /--config\.mac\.entitlementsInherit=/);
   assert.equal((candidateWorkflow.match(/--config\.forceCodeSigning=true/g) ?? []).length, 1);
   assert.equal((candidateWorkflow.match(/--config\.publish\.channel=/g) ?? []).length, 2);
   assert.match(candidateWorkflow, /verify:update-metadata/);
@@ -303,6 +309,11 @@ test("candidate signs macOS, explicitly leaves Windows Alpha unsigned, and creat
   assert.match(candidateWorkflow, /asset_name="\$\{asset#\.\/\}"/);
   const macVerification = candidateStep("Verify macOS package, signature, and notarization");
   assert.match(macVerification, /codesign --verify --deep --strict/);
+  assert.match(macVerification, /HomeRail Helper\*\.app/);
+  assert.match(macVerification, /Expected four signed HomeRail Helper apps/);
+  assert.match(macVerification, /codesign -d --entitlements -/);
+  assert.match(macVerification, /com\\\.apple\\\.security\\\.device\\\.audio-input/);
+  assert.match(macVerification, /Missing enabled microphone entitlement/);
   assert.match(macVerification, /xcrun stapler validate/);
   assert.match(macVerification, /spctl --assess/);
   const macUpload = candidateStep("Upload macOS candidate assets");
@@ -311,6 +322,13 @@ test("candidate signs macOS, explicitly leaves Windows Alpha unsigned, and creat
   }
   assert.doesNotMatch(macUpload, /desktop\/dist-electron\/\*\.yml/);
   assert.match(candidateWorkflow, /release-candidate\.mjs create/);
+});
+
+test("macOS release entitlements enable microphone input for the app and helpers", () => {
+  assert.match(
+    macEntitlements,
+    /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/,
+  );
 });
 
 test("Windows candidate runs Node 24 CI before building and smoke-testing unsigned Alpha", () => {
