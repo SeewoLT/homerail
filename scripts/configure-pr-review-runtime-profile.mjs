@@ -2,13 +2,11 @@
 
 import { pathToFileURL } from "node:url";
 
-export const PR_REVIEW_ARBITER_AGENTS = Object.freeze([
-  "evidence_voter",
-  "false_positive_voter",
-  "coverage_voter",
-  "refiner",
-  "publisher",
-]);
+export const PR_REVIEW_MODEL_AGENTS = Object.freeze({
+  qwen_reviewer: "primary",
+  kimi_reviewer: "arbiter",
+  glm_reviewer: "third",
+});
 
 function nonEmpty(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -43,21 +41,28 @@ export function selectRuntimeSetting(settings, selector, role) {
   return setting;
 }
 
-export function prReviewRuntimeProfileYaml({ profileId, primary, arbiter }) {
-  if (primary.id === arbiter.id) {
-    throw new Error("PR Review primary and arbiter roles must use different LLM settings");
+export function prReviewRuntimeProfileYaml({
+  profileId,
+  workflowId = "pr-review",
+  primary,
+  arbiter,
+  third,
+}) {
+  if (new Set([primary.id, arbiter.id, third.id]).size !== 3) {
+    throw new Error("PR Review requires three distinct LLM settings");
   }
+  const settingsByRole = { primary, arbiter, third };
   return [
     `profile_id: ${yamlString(profileId)}`,
-    "workflow_id: pr-review",
-    "description: Mixed-model PR review with an independent arbitration boundary.",
+    `workflow_id: ${yamlString(workflowId)}`,
+    "description: Three-model PR review with one independent vote per model.",
     "default:",
     `  llm_setting_id: ${yamlString(primary.id)}`,
     "  agent_type: claude-sdk",
     "agents:",
-    ...PR_REVIEW_ARBITER_AGENTS.flatMap((agentId) => [
+    ...Object.entries(PR_REVIEW_MODEL_AGENTS).flatMap(([agentId, role]) => [
       `  ${agentId}:`,
-      `    llm_setting_id: ${yamlString(arbiter.id)}`,
+      `    llm_setting_id: ${yamlString(settingsByRole[role].id)}`,
       "    agent_type: claude-sdk",
     ]),
     "",
@@ -85,28 +90,31 @@ async function request(managerUrl, pathname, init) {
 export async function configurePrReviewRuntimeProfile({
   managerUrl = process.env.HOMERAIL_MANAGER_URL ?? "http://127.0.0.1:29191",
   profileId = process.env.HOMERAIL_PR_REVIEW_PROFILE_ID ?? "pr-review-mixed",
+  workflowId = process.env.HOMERAIL_PR_REVIEW_WORKFLOW_ID ?? "pr-review",
   primarySelector = process.env.HOMERAIL_PR_REVIEW_PRIMARY_MODEL,
   arbiterSelector = process.env.HOMERAIL_PR_REVIEW_ARBITER_MODEL,
+  thirdSelector = process.env.HOMERAIL_PR_REVIEW_THIRD_MODEL,
 } = {}) {
   const normalizedManagerUrl = managerUrl.replace(/\/+$/, "");
   const listed = await request(normalizedManagerUrl, "/api/llm/settings");
   const settings = Array.isArray(listed?.settings) ? listed.settings : [];
   const primary = selectRuntimeSetting(settings, primarySelector, "primary");
   const arbiter = selectRuntimeSetting(settings, arbiterSelector, "arbiter");
-  const yamlText = prReviewRuntimeProfileYaml({ profileId, primary, arbiter });
+  const third = selectRuntimeSetting(settings, thirdSelector, "third");
+  const yamlText = prReviewRuntimeProfileYaml({ profileId, workflowId, primary, arbiter, third });
   const synced = await request(normalizedManagerUrl, "/api/dag/profiles/sync", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       yaml_text: yamlText,
-      workflow_id: "pr-review",
-      source_path: "stable-runner:pr-review-mixed",
+      workflow_id: workflowId,
+      source_path: `stable-runner:${profileId}`,
     }),
   });
-  if (synced?.profile?.profile_id !== profileId || synced?.profile?.workflow_id !== "pr-review") {
+  if (synced?.profile?.profile_id !== profileId || synced?.profile?.workflow_id !== workflowId) {
     throw new Error("Manager synced an unexpected PR Review runtime profile");
   }
-  return { profileId, primary, arbiter, yamlText };
+  return { profileId, primary, arbiter, third, yamlText };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

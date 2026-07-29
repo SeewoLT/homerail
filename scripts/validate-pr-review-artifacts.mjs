@@ -18,7 +18,7 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
   const artifacts = new Map(
     (Array.isArray(command.artifacts) ? command.artifacts : []).map((artifact) => [artifact?.name, artifact]),
   );
-  for (const name of ["pr-review.json", "pr-review.md", "pr-privacy-review.json"]) {
+  for (const name of ["pr-review.json"]) {
     invariant(artifacts.get(name)?.status === "ready", `${name} is not ready in command.json`);
   }
 
@@ -40,57 +40,64 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
 
   if (quorum.passed) {
     invariant(command.status === "completed", "a passed quorum did not produce a completed run");
-    invariant(["pass", "findings"].includes(report.status), "a passed quorum has an invalid report status");
+    invariant(report.status === "pass", "a passed quorum has an invalid report status");
   } else {
     invariant(command.status === "cancelled", "a rejected quorum did not produce a cancelled run");
-    invariant(report.status === "inconclusive", "a rejected quorum did not produce an inconclusive report");
+    invariant(["findings", "inconclusive"].includes(report.status), "a rejected quorum has an invalid report status");
   }
   if (report.status === "pass") invariant(report.actionable_count === 0, "a passing report has actionable findings");
   if (report.status === "findings") {
     invariant(Number.isInteger(report.actionable_count) && report.actionable_count > 0, "a findings report has no actionable findings");
   }
+  invariant(Array.isArray(report.findings), "report findings are missing");
+  invariant(report.actionable_count === report.findings.length, "actionable_count does not match report findings");
   invariant(
-    Array.isArray(report.reviewer_results) && report.reviewer_results.length === 4,
-    "report does not contain four reviewer results",
+    Array.isArray(report.reviewer_results) && report.reviewer_results.length === 3,
+    "report does not contain three model reviewer results",
   );
   const reviewerNames = new Set();
-  const reviewedByFile = new Map();
+  let approvals = 0;
+  let changesRequested = 0;
   for (const reviewer of report.reviewer_results) {
     invariant(reviewer && typeof reviewer === "object" && !Array.isArray(reviewer), "reviewer result is not an object");
-    invariant(["runtime", "security", "tests", "frontend"].includes(reviewer.reviewer), "reviewer result has an invalid identity");
+    invariant(["qwen", "kimi", "glm"].includes(reviewer.reviewer), "reviewer result has an invalid model identity");
     reviewerNames.add(reviewer.reviewer);
     invariant(["complete", "failed"].includes(reviewer.status), `${reviewer.reviewer} reviewer status is invalid`);
+    invariant(["approve", "request_changes", "abstain"].includes(reviewer.vote), `${reviewer.reviewer} reviewer vote is invalid`);
+    invariant(Array.isArray(reviewer.findings), `${reviewer.reviewer} findings are missing`);
     invariant(Array.isArray(reviewer.reviewed_files), `${reviewer.reviewer} reviewed_files is missing`);
     invariant(Array.isArray(reviewer.unreviewed_files), `${reviewer.reviewer} unreviewed_files is missing`);
     invariant(typeof reviewer.evidence_truncated === "boolean", `${reviewer.reviewer} evidence_truncated is missing`);
     const reviewedFiles = new Set(reviewer.reviewed_files);
     for (const file of reviewer.reviewed_files) {
       invariant(typeof file === "string" && file.length > 0, `${reviewer.reviewer} reviewed_files contains an invalid path`);
-      const reviewers = reviewedByFile.get(file) ?? new Set();
-      reviewers.add(reviewer.reviewer);
-      reviewedByFile.set(file, reviewers);
     }
     for (const file of reviewer.unreviewed_files) {
       invariant(typeof file === "string" && file.length > 0, `${reviewer.reviewer} unreviewed_files contains an invalid path`);
       invariant(!reviewedFiles.has(file), `${reviewer.reviewer} both reviewed and skipped ${file}`);
     }
-    if (report.status !== "inconclusive") {
-      invariant(reviewer.status === "complete", `${reviewer.reviewer} reviewer did not complete`);
+    if (reviewer.status === "complete") {
       invariant(reviewer.evidence_truncated === false, `${reviewer.reviewer} used truncated evidence`);
+      invariant(reviewer.unreviewed_files.length === 0, `${reviewer.reviewer} left changed files unreviewed`);
+      if (reviewer.vote === "approve") {
+        approvals++;
+        invariant(reviewer.findings.length === 0, `${reviewer.reviewer} approved with actionable findings`);
+      } else {
+        invariant(reviewer.vote === "request_changes", `${reviewer.reviewer} completed without a decisive vote`);
+        changesRequested++;
+        invariant(reviewer.findings.length > 0, `${reviewer.reviewer} requested changes without findings`);
+      }
+    } else {
+      invariant(reviewer.vote === "abstain", `${reviewer.reviewer} failed without abstaining`);
+      invariant(reviewer.evidence_truncated === true, `${reviewer.reviewer} failed without marking incomplete evidence`);
     }
   }
-  invariant(reviewerNames.size === 4, "report reviewer identities are not distinct");
-  if (report.status !== "inconclusive") {
-    for (const reviewer of report.reviewer_results) {
-      for (const file of reviewer.unreviewed_files) {
-        const independentReviewers = new Set(reviewedByFile.get(file) ?? []);
-        independentReviewers.delete(reviewer.reviewer);
-        invariant(
-          independentReviewers.size >= 2,
-          `${reviewer.reviewer} left ${file} without two independent reviews`,
-        );
-      }
-    }
+  invariant(reviewerNames.size === 3, "model reviewer identities are not distinct");
+  invariant(quorum.successes === approvals, "published quorum does not match the model approval votes");
+  if (report.status === "pass") invariant(approvals >= 2, "passing report lacks two model approvals");
+  if (report.status === "findings") invariant(changesRequested >= 2, "findings report lacks two request-changes votes");
+  if (report.status === "inconclusive") {
+    invariant(approvals < 2 && changesRequested < 2, "inconclusive report has a two-model consensus");
   }
 
   const runIdLine = `**HomeRail Run ID:** \`${command.run_id}\``;
@@ -162,14 +169,13 @@ export function validatePrivacyArtifact(privacy) {
 }
 
 function main(argv) {
-  invariant(argv.length === 4, "usage: validate-pr-review-artifacts.mjs <command.json> <pr-review.json> <pr-review.md> <pr-privacy-review.json>");
-  const [commandPath, reportPath, markdownPath, privacyPath] = argv;
+  invariant(argv.length === 3, "usage: validate-pr-review-artifacts.mjs <command.json> <pr-review.json> <pr-review.md>");
+  const [commandPath, reportPath, markdownPath] = argv;
   validatePrReviewArtifacts(
     JSON.parse(fs.readFileSync(commandPath, "utf8")),
     JSON.parse(fs.readFileSync(reportPath, "utf8")),
     fs.readFileSync(markdownPath, "utf8"),
   );
-  validatePrivacyArtifact(JSON.parse(fs.readFileSync(privacyPath, "utf8")));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
