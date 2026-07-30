@@ -63,8 +63,13 @@ describe('AgentVoiceCockpit responsive layout', () => {
       cockpitSource.indexOf('async function toggleListening(): Promise<void>'),
       cockpitSource.indexOf('async function setupVoiceHidControl()'),
     )
-    expect(toggleListening).toContain('if (codexLiveVoiceSessionActive.value)')
+    const activeStopGuard =
+      'if (codexLiveVoiceEffective.value && codexLiveVoiceSessionActive.value)'
+    expect(toggleListening).toContain(activeStopGuard)
     expect(toggleListening).toContain('await stopCodexLiveVoice()')
+    expect(toggleListening.indexOf(activeStopGuard)).toBeLessThan(
+      toggleListening.indexOf('if (voiceInputActionLocked.value)')
+    )
     expect(toggleListening).not.toContain('toggleMuted()')
     expect(cockpitSource).toContain(
       'v-if="!codexLiveVoiceEffective && !isTvCompactViewport && (listening || speaking)"'
@@ -116,9 +121,17 @@ describe('AgentVoiceCockpit responsive layout', () => {
     expect(cockpitSource).not.toContain('data-testid="codex-live-voice-end"')
     expect(cockpitSource).toContain(':aria-label="voiceInputButtonLabel"')
     expect(cockpitSource).toContain('@click="toggleListening"')
+    expect(cockpitSource.match(/:disabled="voiceInputActionLocked"/g)).toHaveLength(2)
+    expect(cockpitSource.match(
+      /v-if="codexLiveVoiceEffective && codexLiveVoiceSessionActive"/g
+    )).toHaveLength(2)
     expect(cockpitSource).toContain(
       "if (codexLiveVoiceSessionActive.value) return t('voice.liveVoice.end')"
     )
+    expect(cockpitSource).toContain(
+      'if (codexLiveVoiceClient === client) startCodexLiveVoiceMeter(stream)'
+    )
+    expect(cockpitSource).toContain('if (codexLiveVoiceClient !== client) return')
   })
 
   it('uses a dense glass model popover with an opaque fallback', () => {

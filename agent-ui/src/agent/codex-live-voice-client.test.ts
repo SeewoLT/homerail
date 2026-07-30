@@ -267,6 +267,31 @@ describe('CodexLiveVoiceClient', () => {
     await client.stop()
   })
 
+  it('allows a pending microphone request to be superseded by an explicit stop', async () => {
+    let resolveMedia: ((stream: MediaStream) => void) | undefined
+    const { stream, track } = fakeMedia()
+    const states: CodexLiveVoiceState[] = []
+    const client = new CodexLiveVoiceClient({
+      sessionId: 'voice-stop-while-connecting',
+      getUserMedia: () => new Promise<MediaStream>(resolve => {
+        resolveMedia = resolve
+      }),
+      audioFactory: fakeAudio,
+      onState: state => states.push(state),
+    })
+
+    const startPromise = client.start()
+    await vi.waitFor(() => expect(client.currentState).toBe('connecting'))
+    await client.stop()
+
+    expect(client.currentState).toBe('closed')
+    resolveMedia?.(stream)
+    await expect(startPromise).rejects.toThrow(/superseded/i)
+
+    expect(track.stop).toHaveBeenCalledTimes(1)
+    expect(states.at(-1)).toBe('closed')
+  })
+
   it('rejects text instead of silently dropping it while the WebSocket is unavailable', async () => {
     const socket = new FakeSocket()
     const peer = new FakePeer()

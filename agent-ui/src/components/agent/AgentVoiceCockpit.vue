@@ -695,6 +695,11 @@ const voiceInputLocked = computed(() => {
     onboardingStatus.value.needsOnboarding
   )
 })
+const voiceInputActionLocked = computed(
+  () =>
+    voiceInputLocked.value &&
+    !(codexLiveVoiceEffective.value && codexLiveVoiceSessionActive.value)
+)
 const voiceState = computed(() => {
   if (codexLiveVoiceEffective.value) {
     if (codexLiveVoiceState.value === 'assistant-speaking') return 'speaking'
@@ -1173,7 +1178,6 @@ const composerPlaceholder = computed(() => {
 })
 const voiceInputButtonLabel = computed(() => {
   if (!codexLiveVoiceEffective.value) return t('voice.composer.toggleVoice')
-  if (codexLiveVoiceConnecting.value) return voiceStateText.value
   if (codexLiveVoiceSessionActive.value) return t('voice.liveVoice.end')
   return t('voice.liveVoice.tapToStart')
 })
@@ -3893,7 +3897,7 @@ async function startCodexLiveVoice(): Promise<void> {
     selectedNodeId: selectedGenerativeUiNodeId.value || null,
     getUserMedia: async () => {
       const stream = await createVoiceMediaStream()
-      startCodexLiveVoiceMeter(stream)
+      if (codexLiveVoiceClient === client) startCodexLiveVoiceMeter(stream)
       return stream
     },
     onState: applyCodexLiveVoiceState,
@@ -3903,7 +3907,8 @@ async function startCodexLiveVoice(): Promise<void> {
   try {
     await client.start()
   } catch (err: any) {
-    if (codexLiveVoiceClient === client) codexLiveVoiceClient = null
+    if (codexLiveVoiceClient !== client) return
+    codexLiveVoiceClient = null
     stopCodexLiveVoiceMeter()
     applyCodexLiveVoiceState('error')
     error.value = err?.message || t('voice.liveVoice.error')
@@ -3976,14 +3981,14 @@ function stopCodexLiveVoiceMeter(): void {
 }
 
 async function toggleListening(): Promise<void> {
-  if (voiceInputLocked.value) return
+  if (codexLiveVoiceEffective.value && codexLiveVoiceSessionActive.value) {
+    await stopCodexLiveVoice()
+    return
+  }
+  if (voiceInputActionLocked.value) return
   if (codexLiveVoiceEffective.value) {
     activateNoSleepPlayer()
-    if (codexLiveVoiceSessionActive.value) {
-      await stopCodexLiveVoice()
-    } else {
-      await startCodexLiveVoice()
-    }
+    await startCodexLiveVoice()
     return
   }
   if (!tabCanUseVoiceOutput()) return
@@ -6018,16 +6023,16 @@ function summarizeTask(value: string): string {
               <button
                 class="voice-input-zone"
                 :class="{
-                  'voice-input-zone--active': listening && !voiceInputLocked,
+                  'voice-input-zone--active': listening && !voiceInputActionLocked,
                   'voice-input-zone--speaking': speaking,
-                  'voice-input-zone--locked': voiceInputLocked,
+                  'voice-input-zone--locked': voiceInputActionLocked,
                   'voice-input-zone--agent-running': agentActivityActive && !listening,
                   'voice-input-zone--live': codexLiveVoiceEffective,
                   'voice-input-zone--live-connected':
                     codexLiveVoiceSessionActive && !codexLiveVoiceConnecting
                 }"
                 :title="voiceInputButtonLabel"
-                :disabled="voiceInputLocked"
+                :disabled="voiceInputActionLocked"
                 @click="toggleListening"
               >
                 <span
@@ -6036,11 +6041,7 @@ function summarizeTask(value: string): string {
                   aria-hidden="true"
                 >
                   <X
-                    v-if="
-                      codexLiveVoiceEffective &&
-                      codexLiveVoiceSessionActive &&
-                      !codexLiveVoiceConnecting
-                    "
+                    v-if="codexLiveVoiceEffective && codexLiveVoiceSessionActive"
                     class="h-6 w-6"
                   />
                   <span
@@ -6113,25 +6114,21 @@ function summarizeTask(value: string): string {
                 <button
                   class="voice-composer__mic"
                   :class="{
-                    'voice-composer__mic--active': listening && !voiceInputLocked,
+                    'voice-composer__mic--active': listening && !voiceInputActionLocked,
                     'voice-composer__mic--speaking': speaking,
-                    'voice-composer__mic--locked': voiceInputLocked,
+                    'voice-composer__mic--locked': voiceInputActionLocked,
                     'voice-composer__mic--live': codexLiveVoiceEffective,
                     'voice-composer__mic--live-connected':
                       codexLiveVoiceSessionActive && !codexLiveVoiceConnecting
                   }"
                   type="button"
                   :title="voiceInputButtonLabel"
-                  :disabled="voiceInputLocked"
+                  :disabled="voiceInputActionLocked"
                   :aria-label="voiceInputButtonLabel"
                   @click="toggleListening"
                 >
                   <X
-                    v-if="
-                      codexLiveVoiceEffective &&
-                      codexLiveVoiceSessionActive &&
-                      !codexLiveVoiceConnecting
-                    "
+                    v-if="codexLiveVoiceEffective && codexLiveVoiceSessionActive"
                     class="h-6 w-6"
                   />
                   <span
