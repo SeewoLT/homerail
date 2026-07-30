@@ -64,8 +64,8 @@ jobs:
           test -f "$stable_release/assets/orchestrations/pr-review.yaml.template"
           test -f "$stable_release/homerail_cli/dist/cli.js"
           test -f "$stable_release/scripts/configure-pr-review-runtime-profile.mjs"
+          test -f "$stable_release/scripts/render-pr-review-markdown.mjs"
           test -f "$stable_release/scripts/validate-pr-review-artifacts.mjs"
-          test -f "$stable_release/scripts/report-pr-privacy-advisory.mjs"
           adapter_mode=release
           if [ ! -f "$stable_release/scripts/run-pr-review-stable-runner.sh" ]; then
             if [ "$BOOTSTRAP_ALLOWED" != "true" ]; then
@@ -165,16 +165,6 @@ jobs:
               echo
               echo 'No review conclusion was produced. Inspect the stable DAG run and uploaded diagnostics.'
             } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Privacy advisory (human inspection only)
-        if: always()
-        continue-on-error: true
-        run: |
-          if [ -s "$HOMERAIL_PR_REVIEW_ARTIFACT_DIR/pr-privacy-review.json" ]; then
-            "${{ steps.stable.outputs.node }}" \
-              "${{ steps.stable.outputs.release }}/scripts/report-pr-privacy-advisory.mjs" \
-              "$HOMERAIL_PR_REVIEW_ARTIFACT_DIR/pr-privacy-review.json"
           fi
 
       - name: Upload review evidence

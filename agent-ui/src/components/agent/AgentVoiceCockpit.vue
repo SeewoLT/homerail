@@ -39,6 +39,7 @@ import {
 } from '@/agent/voice-session-restore'
 import {
   CodexLiveVoiceClient,
+  codexLiveVoiceOwnsAudio,
   type CodexLiveVoiceEvent,
   type CodexLiveVoiceState
 } from '@/agent/codex-live-voice-client'
@@ -424,6 +425,7 @@ let speechQueueRunning = false
 let ttsBroadcastChannel: BroadcastChannel | null = null
 let currentTtsSource: AudioBufferSourceNode | null = null
 let currentTtsAudioReject: ((error: Error) => void) | null = null
+let ttsSpeechAbort: AbortController | null = null
 let ttsPlaybackGeneration = 0
 let screenWakeLock: { release: () => Promise<void> } | null = null
 let noSleepPlayerActive = false
@@ -533,8 +535,7 @@ const codexLiveVoiceEffective = computed(
     onboardingStatus.value.liveVoiceEffective
 )
 const codexLiveVoiceSessionActive = computed(
-  () =>
-    !['idle', 'error', 'closed'].includes(codexLiveVoiceState.value)
+  () => codexLiveVoiceOwnsAudio(codexLiveVoiceState.value)
 )
 const codexLiveVoiceConnecting = computed(
   () =>
@@ -694,6 +695,11 @@ const voiceInputLocked = computed(() => {
     onboardingStatus.value.needsOnboarding
   )
 })
+const voiceInputActionLocked = computed(
+  () =>
+    voiceInputLocked.value &&
+    !(codexLiveVoiceEffective.value && codexLiveVoiceSessionActive.value)
+)
 const voiceState = computed(() => {
   if (codexLiveVoiceEffective.value) {
     if (codexLiveVoiceState.value === 'assistant-speaking') return 'speaking'
@@ -1172,7 +1178,6 @@ const composerPlaceholder = computed(() => {
 })
 const voiceInputButtonLabel = computed(() => {
   if (!codexLiveVoiceEffective.value) return t('voice.composer.toggleVoice')
-  if (codexLiveVoiceConnecting.value) return voiceStateText.value
   if (codexLiveVoiceSessionActive.value) return t('voice.liveVoice.end')
   return t('voice.liveVoice.tapToStart')
 })
@@ -3383,6 +3388,13 @@ async function submitDraft(force = false): Promise<void> {
 async function speak(text: string): Promise<void> {
   const clean = text.trim()
   if (!clean) return
+  if (codexLiveVoiceSessionActive.value) {
+    recordTtsDebug(
+      'tts_speak_skipped',
+      `reason=codex_live_voice_active text="${previewSpeechText(clean)}"`
+    )
+    return
+  }
   if (!voiceOutputEnabled.value) {
     recordTtsDebug('tts_output_disabled', `跳过已关闭的语音输出：${previewSpeechText(clean)}`)
     return
@@ -3397,12 +3409,14 @@ async function speak(text: string): Promise<void> {
   pcmChunks = []
   spokenText.value = clean
   speaking.value = true
+  const requestAbort = new AbortController()
+  ttsSpeechAbort = requestAbort
   try {
     recordTtsDebug(
       'tts_speech_request',
       `generation=${playbackToken} text="${previewSpeechText(clean)}"`
     )
-    const response = await speechStream(clean, undefined, false)
+    const response = await speechStream(clean, undefined, false, requestAbort.signal)
     recordTtsDebug(
       'tts_speech_response',
       `generation=${playbackToken} status=${response.status} content-type=${response.headers.get('content-type') || ''}`
@@ -3427,7 +3441,12 @@ async function speak(text: string): Promise<void> {
     await playTtsBlob(blob)
     recordTtsDebug('tts_playback_complete', `generation=${playbackToken}`)
   } catch (err: any) {
-    if (err?.message === 'TTS playback cancelled') {
+    if (
+      err?.name === 'AbortError' ||
+      err?.message === 'TTS playback cancelled' ||
+      playbackToken !== ttsPlaybackGeneration ||
+      codexLiveVoiceSessionActive.value
+    ) {
       recordTtsDebug('tts_speak_cancelled', `generation=${playbackToken}`, 'warning')
       return
     }
@@ -3439,6 +3458,7 @@ async function speak(text: string): Promise<void> {
     voiceConfigError.value = `${t('voice.errors.tts')}: ${err?.message || t('voice.errors.unknown')}`
     throw err
   } finally {
+    if (ttsSpeechAbort === requestAbort) ttsSpeechAbort = null
     if (playbackToken === ttsPlaybackGeneration) speaking.value = false
   }
 }
@@ -3450,6 +3470,13 @@ async function speakText(text: string): Promise<void> {
 function enqueueSpeechEvent(event: VoiceSpeechEvent, source = 'stream'): boolean {
   const text = event.text?.trim()
   if (!text) return false
+  if (codexLiveVoiceSessionActive.value) {
+    recordTtsDebug(
+      'tts_enqueue_skipped',
+      `source=${source} reason=codex_live_voice_active channel=${event.channel} text="${previewSpeechText(text)}"`
+    )
+    return false
+  }
   if (!voiceOutputEnabled.value) {
     recordTtsDebug(
       'tts_enqueue_skipped',
@@ -3649,6 +3676,8 @@ function cancelLocalSpeech(reason: string): void {
     `reason=${reason} generation=${previousGeneration}->${ttsPlaybackGeneration} dropped=${dropped} running=${speechQueueRunning}`,
     reason === 'unmount' ? 'debug' : 'warning'
   )
+  ttsSpeechAbort?.abort()
+  ttsSpeechAbort = null
   stopNativeTtsPlayback()
   try {
     currentTtsSource?.stop(0)
@@ -3768,8 +3797,13 @@ async function playTtsBlob(blob: Blob): Promise<void> {
 }
 
 function applyCodexLiveVoiceState(state: CodexLiveVoiceState): void {
+  const wasActive = codexLiveVoiceSessionActive.value
   codexLiveVoiceState.value = state
-  const active = !['idle', 'error', 'closed'].includes(state)
+  const active = codexLiveVoiceOwnsAudio(state)
+  if (active && !wasActive) {
+    cancelLocalSpeech('codex_live_voice_audio_owner')
+    broadcastVoiceActivity('listening')
+  }
   const microphoneActive = [
     'listening',
     'user-speaking',
@@ -3849,7 +3883,6 @@ async function startCodexLiveVoice(): Promise<void> {
   const sessionId = workspace.value?.session_id
   if (!sessionId || !codexLiveVoiceEffective.value) return
   if (codexLiveVoiceClient) await stopCodexLiveVoice(false)
-  cancelLocalSpeech('codex_live_voice_started')
   closeVoiceInputAfterSubmit()
   voiceTurnAbort?.abort()
   voiceTurnAbort = null
@@ -3864,7 +3897,7 @@ async function startCodexLiveVoice(): Promise<void> {
     selectedNodeId: selectedGenerativeUiNodeId.value || null,
     getUserMedia: async () => {
       const stream = await createVoiceMediaStream()
-      startCodexLiveVoiceMeter(stream)
+      if (codexLiveVoiceClient === client) startCodexLiveVoiceMeter(stream)
       return stream
     },
     onState: applyCodexLiveVoiceState,
@@ -3874,7 +3907,8 @@ async function startCodexLiveVoice(): Promise<void> {
   try {
     await client.start()
   } catch (err: any) {
-    if (codexLiveVoiceClient === client) codexLiveVoiceClient = null
+    if (codexLiveVoiceClient !== client) return
+    codexLiveVoiceClient = null
     stopCodexLiveVoiceMeter()
     applyCodexLiveVoiceState('error')
     error.value = err?.message || t('voice.liveVoice.error')
@@ -3947,14 +3981,14 @@ function stopCodexLiveVoiceMeter(): void {
 }
 
 async function toggleListening(): Promise<void> {
-  if (voiceInputLocked.value) return
+  if (codexLiveVoiceEffective.value && codexLiveVoiceSessionActive.value) {
+    await stopCodexLiveVoice()
+    return
+  }
+  if (voiceInputActionLocked.value) return
   if (codexLiveVoiceEffective.value) {
     activateNoSleepPlayer()
-    if (codexLiveVoiceSessionActive.value) {
-      await stopCodexLiveVoice()
-    } else {
-      await startCodexLiveVoice()
-    }
+    await startCodexLiveVoice()
     return
   }
   if (!tabCanUseVoiceOutput()) return
@@ -5829,22 +5863,6 @@ function summarizeTask(value: string): string {
             <div class="voice-control__deck">
               <div
                 v-if="codexLiveVoiceEffective"
-                class="flex items-center gap-2 rounded-full border border-[var(--hr-info-border)] bg-[var(--hr-info-soft)] px-3 py-1.5 text-xs text-[var(--hr-info)]"
-                data-testid="codex-live-voice-managed"
-              >
-                <span>{{ t('voice.liveVoice.managed') }}</span>
-                <button
-                  v-if="codexLiveVoiceSessionActive"
-                  type="button"
-                  class="rounded-full border border-[var(--hr-info-border)] px-2 py-0.5 font-medium hover:bg-[var(--hr-surface-2)]"
-                  data-testid="codex-live-voice-end"
-                  @click="stopCodexLiveVoice()"
-                >
-                  {{ t('voice.liveVoice.end') }}
-                </button>
-              </div>
-              <div
-                v-if="codexLiveVoiceEffective"
                 class="codex-live-voice-meter"
                 :class="{
                   'codex-live-voice-meter--active': codexLiveVoiceHumanInputActive,
@@ -6005,16 +6023,16 @@ function summarizeTask(value: string): string {
               <button
                 class="voice-input-zone"
                 :class="{
-                  'voice-input-zone--active': listening && !voiceInputLocked,
+                  'voice-input-zone--active': listening && !voiceInputActionLocked,
                   'voice-input-zone--speaking': speaking,
-                  'voice-input-zone--locked': voiceInputLocked,
+                  'voice-input-zone--locked': voiceInputActionLocked,
                   'voice-input-zone--agent-running': agentActivityActive && !listening,
                   'voice-input-zone--live': codexLiveVoiceEffective,
                   'voice-input-zone--live-connected':
                     codexLiveVoiceSessionActive && !codexLiveVoiceConnecting
                 }"
                 :title="voiceInputButtonLabel"
-                :disabled="voiceInputLocked"
+                :disabled="voiceInputActionLocked"
                 @click="toggleListening"
               >
                 <span
@@ -6023,11 +6041,7 @@ function summarizeTask(value: string): string {
                   aria-hidden="true"
                 >
                   <X
-                    v-if="
-                      codexLiveVoiceEffective &&
-                      codexLiveVoiceSessionActive &&
-                      !codexLiveVoiceConnecting
-                    "
+                    v-if="codexLiveVoiceEffective && codexLiveVoiceSessionActive"
                     class="h-6 w-6"
                   />
                   <span
@@ -6100,25 +6114,21 @@ function summarizeTask(value: string): string {
                 <button
                   class="voice-composer__mic"
                   :class="{
-                    'voice-composer__mic--active': listening && !voiceInputLocked,
+                    'voice-composer__mic--active': listening && !voiceInputActionLocked,
                     'voice-composer__mic--speaking': speaking,
-                    'voice-composer__mic--locked': voiceInputLocked,
+                    'voice-composer__mic--locked': voiceInputActionLocked,
                     'voice-composer__mic--live': codexLiveVoiceEffective,
                     'voice-composer__mic--live-connected':
                       codexLiveVoiceSessionActive && !codexLiveVoiceConnecting
                   }"
                   type="button"
                   :title="voiceInputButtonLabel"
-                  :disabled="voiceInputLocked"
+                  :disabled="voiceInputActionLocked"
                   :aria-label="voiceInputButtonLabel"
                   @click="toggleListening"
                 >
                   <X
-                    v-if="
-                      codexLiveVoiceEffective &&
-                      codexLiveVoiceSessionActive &&
-                      !codexLiveVoiceConnecting
-                    "
+                    v-if="codexLiveVoiceEffective && codexLiveVoiceSessionActive"
                     class="h-6 w-6"
                   />
                   <span

@@ -383,7 +383,7 @@ class PrReviewToolAgent implements AgentClient {
   ): AsyncIterable<AgentEvent> {
     const tool = tools.find((item) => item.name === "run_pr_review");
     if (!tool) throw new Error("run_pr_review tool missing");
-    const input = { repo: "xiaotianfotos/homerail", pr: 25, expected_usage: 0 };
+    const input = { repo: "xiaotianfotos/homerail", pr: 25 };
     yield { type: "tool_use", id: "tool-pr-review", name: "run_pr_review", input };
     const result = await tool.handler(input);
     yield {
@@ -1007,8 +1007,6 @@ describe("manager-agent server", () => {
         head: "b".repeat(40),
         base_clone_url: "https://github.example/xiaotianfotos/homerail.git",
         head_clone_url: "https://github.example/contributor/homerail.git",
-        expected_usage: 0,
-        budget_key: expect.stringMatching(/^pr-review:xiaotianfotos\/homerail:\d{4}-\d{2}-\d{2}$/),
       });
     } finally {
       await close(server);

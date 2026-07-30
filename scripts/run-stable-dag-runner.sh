@@ -15,7 +15,8 @@ case "$TASK" in
     # cancellation, artifact retrieval, diagnostics, and upload.
     TIMEOUT_SECONDS="${HOMERAIL_PR_REVIEW_TIMEOUT_SECONDS:-4200}"
     PROFILE_SCRIPT="$HOMERAIL_STABLE_RELEASE/scripts/configure-pr-review-runtime-profile.mjs"
-    ARTIFACT_NAMES=(pr-review.json pr-review.md pr-privacy-review.json)
+    MARKDOWN_SCRIPT="$HOMERAIL_STABLE_RELEASE/scripts/render-pr-review-markdown.mjs"
+    ARTIFACT_NAMES=(pr-review.json)
     ;;
   auto-fix)
     INPUT="${HOMERAIL_AUTO_FIX_INPUT:-}"
@@ -67,6 +68,9 @@ COMMAND_PATH="$ARTIFACT_DIR/command.json"
 COMMAND_TMP="$COMMAND_PATH.tmp"
 STDERR_PATH="$ARTIFACT_DIR/command.stderr.log"
 rm -f "$COMMAND_PATH" "$COMMAND_TMP" "$STDERR_PATH"
+if [ "$TASK" = "pr-review" ]; then
+  rm -f "$ARTIFACT_DIR/pr-review.md" "$ARTIFACT_DIR/pr-review.md.tmp"
+fi
 
 RUN_ID="${HOMERAIL_STABLE_RUN_ID:-$(
   "$HOMERAIL_STABLE_NODE" -e 'process.stdout.write(require("node:crypto").randomUUID())'
@@ -85,6 +89,17 @@ collect_run_evidence() {
       stable_hr dag artifact "$run_id" "$artifact" --output "$ARTIFACT_DIR/$artifact" >/dev/null 2>&1 || true
     done
   fi
+}
+
+render_pr_review_markdown() {
+  if [ "$TASK" != "pr-review" ] || [ ! -s "$COMMAND_PATH" ] || [ ! -s "$ARTIFACT_DIR/pr-review.json" ]; then
+    return 0
+  fi
+  "$HOMERAIL_STABLE_NODE" "$MARKDOWN_SCRIPT" \
+    "$COMMAND_PATH" \
+    "$ARTIFACT_DIR/pr-review.json" \
+    >"$ARTIFACT_DIR/pr-review.md.tmp"
+  mv "$ARTIFACT_DIR/pr-review.md.tmp" "$ARTIFACT_DIR/pr-review.md"
 }
 
 RUN_ARGS=(
@@ -144,6 +159,7 @@ RUN_STATUS="$(
 
 if [ "$RUN_STATUS" != "completed" ]; then
   collect_run_evidence "$RUN_ID"
+  render_pr_review_markdown
   if [ "$TASK" = "auto-fix" ]; then
     "$HOMERAIL_STABLE_NODE" "$CHECKPOINT_SCRIPT" record "$INPUT_FILE" "$RUN_ID" >"$ARTIFACT_DIR/checkpoint.json" || true
   fi
@@ -157,14 +173,14 @@ for artifact in "${ARTIFACT_NAMES[@]}"; do
   stable_hr dag artifact "$RUN_ID" "$artifact" --output "$ARTIFACT_DIR/$artifact"
   test -s "$ARTIFACT_DIR/$artifact"
 done
+render_pr_review_markdown
 
 case "$TASK" in
   pr-review)
     "$HOMERAIL_STABLE_NODE" "$HOMERAIL_STABLE_RELEASE/scripts/validate-pr-review-artifacts.mjs" \
       "$COMMAND_PATH" \
       "$ARTIFACT_DIR/pr-review.json" \
-      "$ARTIFACT_DIR/pr-review.md" \
-      "$ARTIFACT_DIR/pr-privacy-review.json"
+      "$ARTIFACT_DIR/pr-review.md"
     ;;
   auto-fix)
     "$HOMERAIL_STABLE_NODE" "$HOMERAIL_STABLE_RELEASE/scripts/validate-auto-fix-artifacts.mjs" \

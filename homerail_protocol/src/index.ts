@@ -1,12 +1,18 @@
 /**
- * HomeRail Protocol — v0.1.0-alpha.2
+ * HomeRail Protocol
  *
  * Single source of truth for all runtime communication between
  * homerail_worker, homerail_node, and homerail_manager.
- * @version 0.1.0-alpha.2
+ * @version 0.1.0-alpha.3
  */
 
-export const PROTOCOL_VERSION = "0.1.0-alpha.2";
+/**
+ * Compatibility contract shared by Manager and Worker.
+ *
+ * This is intentionally independent from the HomeRail release version. Bump it
+ * only when a Manager/Worker wire or runtime contract changes incompatibly.
+ */
+export const WORKER_CONTRACT_VERSION = "1";
 
 export * from "./types.js";
 export * from "./dag-activity.js";

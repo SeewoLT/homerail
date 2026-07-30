@@ -8,7 +8,7 @@ import { readFileSync, readdirSync } from "fs";
 import { resolve, basename } from "path";
 import { encode, decode, stableStringify } from "../src/codec.js";
 import { validateMessage } from "../src/validation.js";
-import { PROTOCOL_VERSION } from "../src/index.js";
+import { WORKER_CONTRACT_VERSION } from "../src/index.js";
 
 const FIXTURES_DIR = resolve(__dirname, "..", "fixtures");
 
@@ -97,10 +97,8 @@ describe("No-drift: TS codec faithfully round-trips fixtures", () => {
 });
 
 describe("Cross-version markers", () => {
-  it("PROTOCOL_VERSION is defined and semver parseable", () => {
-    expect(PROTOCOL_VERSION).toMatch(
-      /^\d+\.\d+\.\d+(?:-(?:alpha|beta)(?:\.(?:0|[1-9]\d*))+)?$/,
-    );
+  it("WORKER_CONTRACT_VERSION is a positive integer marker", () => {
+    expect(WORKER_CONTRACT_VERSION).toMatch(/^[1-9]\d*$/);
   });
 
   for (const file of fixtureFiles) {

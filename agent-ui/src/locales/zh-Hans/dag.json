@@ -76,6 +76,11 @@
     "skipped": "本次启动跳过了 worker 镜像构建，Docker DAG 可能暂时不可用。",
     "status": "DAG 资源状态",
     "manage": "管理 DAG 运行环境",
-    "manageDescription": "打开设置，检查 Docker 或构建 Worker 镜像。"
+    "manageDescription": "打开设置，检查 Docker 或构建 Worker 镜像。",
+    "dockerUnavailable": "Docker 不可用",
+    "imageMissing": "缺少 Worker 镜像",
+    "imageStale": "Worker 镜像需重建",
+    "buildFailed": "镜像构建失败",
+    "sourceUnavailable": "Worker 源不可用"
   }
 }

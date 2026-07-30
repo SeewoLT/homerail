@@ -98,12 +98,13 @@ describe('DagEnvironmentSettings', () => {
     return root
   }
 
-  it('shows relevant HomeRail image metadata and enables asynchronous rebuild', async () => {
+  it('shows user-facing Worker readiness without internal compatibility metadata', async () => {
     const element = await mount()
 
     expect(element.textContent).toContain('homerail-worker:latest')
-    expect(element.textContent).toContain('source-123')
-    expect(element.textContent).toContain('当前版本')
+    expect(element.textContent).not.toContain('source-123')
+    expect(element.textContent).not.toContain('协议')
+    expect(element.textContent).not.toContain('0.1.0')
 
     element.querySelector<HTMLButtonElement>('[data-testid="dag-environment-build"]')?.click()
     await flush()
@@ -134,7 +135,7 @@ describe('DagEnvironmentSettings', () => {
     button.click()
     await flush()
 
-    expect(element.textContent).toContain('正在构建 Worker 镜像')
+    expect(element.textContent).toContain('正在更新 Worker')
     expect(element.textContent).not.toContain('Building homerail-worker:latest.')
     expect(button.disabled).toBe(true)
   })
@@ -202,9 +203,35 @@ describe('DagEnvironmentSettings', () => {
     }
     const element = await mount()
 
-    expect(element.textContent).toContain('Worker 镜像需要针对当前 HomeRail 版本重新构建')
-    expect(element.textContent).toContain('镜像与当前 HomeRail 源码不一致，请重新构建')
+    expect(element.textContent).toContain('Worker 需要更新')
+    expect(element.textContent).toContain('请更新 Worker')
     expect(element.textContent).not.toContain('does not match the current HomeRail source')
+    expect(element.textContent).not.toContain('源码')
+    expect(element.textContent).not.toContain('协议')
     expect(element.querySelector<HTMLButtonElement>('[data-testid="dag-environment-build"]')?.disabled).toBe(false)
+  })
+
+  it('presents contract incompatibility as a normal Worker update', async () => {
+    api.status = {
+      ...baseStatus(),
+      worker_image: {
+        status: 'error',
+        image: 'homerail-worker:latest',
+        reason: 'incompatible',
+        reason_code: 'worker_image_incompatible',
+        compatibility: 'incompatible',
+        message: 'internal contract mismatch',
+      },
+      images: [{
+        ...baseStatus().images[0]!,
+        compatibility: 'incompatible',
+      }],
+    }
+    const element = await mount()
+
+    expect(element.textContent).toContain('Worker 需要更新')
+    expect(element.textContent).toContain('请更新 Worker')
+    expect(element.textContent).not.toContain('协议')
+    expect(element.textContent).not.toContain('internal contract mismatch')
   })
 })

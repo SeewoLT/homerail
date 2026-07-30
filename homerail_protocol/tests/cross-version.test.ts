@@ -1,26 +1,24 @@
 /**
  * Cross-version compatibility tests.
- * @version 0.1.0-alpha.2
+ * @version 0.1.0-alpha.3
  */
 
 import { describe, it, expect } from "vitest";
-import { PROTOCOL_VERSION } from "../src/index.js";
+import { WORKER_CONTRACT_VERSION } from "../src/index.js";
 import { MessageClassMap } from "../src/codec.js";
 import { allSchemas } from "../src/schemas.js";
 import { readFileSync, readdirSync } from "fs";
 import { resolve } from "path";
 
-describe("Protocol version consistency", () => {
-  it("PROTOCOL_VERSION matches package.json version", () => {
+describe("Worker contract version consistency", () => {
+  it("keeps the Worker contract independent from the package release version", () => {
     const pkgPath = resolve(__dirname, "..", "package.json");
     const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-    expect(PROTOCOL_VERSION).toBe(pkg.version);
+    expect(WORKER_CONTRACT_VERSION).not.toBe(pkg.version);
   });
 
-  it("PROTOCOL_VERSION is a valid semver", () => {
-    const semverRegex =
-      /^\d+\.\d+\.\d+(?:-(?:alpha|beta)(?:\.(?:0|[1-9]\d*))+)?$/;
-    expect(semverRegex.test(PROTOCOL_VERSION)).toBe(true);
+  it("uses a stable positive integer contract marker", () => {
+    expect(WORKER_CONTRACT_VERSION).toMatch(/^[1-9]\d*$/);
   });
 
   it("source files reference the protocol version", () => {

@@ -8,7 +8,7 @@ import {
   HOMERAIL_WORKER_PROTOCOL_LABEL,
   HOMERAIL_WORKER_SOURCE_LABEL,
   HOMERAIL_WORKER_VERSION_LABEL,
-  PROTOCOL_VERSION,
+  WORKER_CONTRACT_VERSION,
 } from "homerail-protocol";
 import {
   DagEnvironmentController,
@@ -46,6 +46,50 @@ function currentWorkerVersion(): string {
   return packageJson.version;
 }
 
+function fingerprintFixture(): string {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-worker-fingerprint-"));
+  tempDirs.push(repoRoot);
+  const files: Record<string, string> = {
+    "homerail_worker/Dockerfile": "FROM node:22\n",
+    "homerail_worker/package.json": JSON.stringify({
+      name: "homerail-worker",
+      version: "0.1.0-alpha.1",
+      dependencies: { "homerail-protocol": "file:../homerail_protocol" },
+    }),
+    "homerail_worker/package-lock.json": JSON.stringify({
+      name: "homerail-worker",
+      version: "0.1.0-alpha.1",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "homerail-worker", version: "0.1.0-alpha.1" },
+        "../homerail_protocol": { name: "homerail-protocol", version: "0.1.0-alpha.1" },
+      },
+    }),
+    "homerail_worker/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+    "homerail_worker/src/index.ts": "export const worker = true;\n",
+    "homerail_protocol/package.json": JSON.stringify({
+      name: "homerail-protocol",
+      version: "0.1.0-alpha.1",
+    }),
+    "homerail_protocol/package-lock.json": JSON.stringify({
+      name: "homerail-protocol",
+      version: "0.1.0-alpha.1",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "homerail-protocol", version: "0.1.0-alpha.1" },
+      },
+    }),
+    "homerail_protocol/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+    "homerail_protocol/src/index.ts": "export const contract = 1;\n",
+  };
+  for (const [relativePath, content] of Object.entries(files)) {
+    const target = path.join(repoRoot, relativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content, "utf8");
+  }
+  return repoRoot;
+}
+
 function dockerVersion() {
   return {
     stdout: JSON.stringify({
@@ -65,7 +109,7 @@ function dockerInfo() {
 
 function imageInspection(
   fingerprint: string,
-  protocol = PROTOCOL_VERSION,
+  protocol = WORKER_CONTRACT_VERSION,
   workerVersion = currentWorkerVersion(),
 ) {
   return {
@@ -87,6 +131,56 @@ function imageInspection(
     stderr: "",
   };
 }
+
+it("ignores release-only package metadata in the Worker source fingerprint", () => {
+  const repoRoot = fingerprintFixture();
+  const original = dagWorkerSourceFingerprint(repoRoot);
+
+  for (const relativePath of [
+    "homerail_worker/package.json",
+    "homerail_worker/package-lock.json",
+    "homerail_protocol/package.json",
+    "homerail_protocol/package-lock.json",
+  ]) {
+    const filePath = path.join(repoRoot, relativePath);
+    const metadata = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+      version?: string;
+      packages?: Record<string, { version?: string }>;
+    };
+    metadata.version = "0.1.0-beta.99";
+    if (metadata.packages?.[""]) metadata.packages[""].version = "0.1.0-beta.99";
+    if (metadata.packages?.["../homerail_protocol"]) {
+      metadata.packages["../homerail_protocol"].version = "0.1.0-beta.99";
+    }
+    fs.writeFileSync(filePath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  }
+
+  expect(dagWorkerSourceFingerprint(repoRoot)).toBe(original);
+});
+
+it("changes the Worker source fingerprint when build-relevant content changes", () => {
+  const repoRoot = fingerprintFixture();
+  const original = dagWorkerSourceFingerprint(repoRoot);
+  fs.appendFileSync(
+    path.join(repoRoot, "homerail_worker", "src", "index.ts"),
+    "export const changed = true;\n",
+  );
+
+  expect(dagWorkerSourceFingerprint(repoRoot)).not.toBe(original);
+});
+
+it("changes the Worker source fingerprint when build dependencies change", () => {
+  const repoRoot = fingerprintFixture();
+  const original = dagWorkerSourceFingerprint(repoRoot);
+  const packagePath = path.join(repoRoot, "homerail_worker", "package.json");
+  const metadata = JSON.parse(fs.readFileSync(packagePath, "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+  metadata.dependencies.zod = "^4.0.0";
+  fs.writeFileSync(packagePath, JSON.stringify(metadata), "utf8");
+
+  expect(dagWorkerSourceFingerprint(repoRoot)).not.toBe(original);
+});
 
 it("classifies a missing Docker CLI without throwing or blocking Manager startup", async () => {
   const runner: DagEnvironmentCommandRunner = vi.fn(async () => {
@@ -335,7 +429,7 @@ it("reports image and connected Worker compatibility independently", async () =>
   });
 });
 
-it("marks matching-protocol Workers with an older package version as stale", () => {
+it("does not rebuild a matching-contract Worker for a release-only version difference", () => {
   const fingerprint = dagWorkerSourceFingerprint(currentRepoRoot())!;
   registerWorker({
     worker_id: "older-version-worker",
@@ -345,7 +439,7 @@ it("marks matching-protocol Workers with an older package version as stale", () 
     capabilities: [],
     runtime_identity: {
       worker_version: "0.0.9",
-      protocol_version: PROTOCOL_VERSION,
+      protocol_version: WORKER_CONTRACT_VERSION,
       source_fingerprint: fingerprint,
     },
     registered_at: Date.now(),
@@ -359,7 +453,7 @@ it("marks matching-protocol Workers with an older package version as stale", () 
   expect(controller.getStatus().workers[0]).toMatchObject({
     worker_id: "older-version-worker",
     worker_version: "0.0.9",
-    compatibility: "stale",
+    compatibility: "current",
   });
 });
 
@@ -399,7 +493,7 @@ it("queues one asynchronous build, streams output, and probes the resulting imag
 
   await vi.waitFor(() => expect(spawnImpl).toHaveBeenCalledTimes(1));
   expect(spawnImpl.mock.calls[0]?.[1]).toEqual(expect.arrayContaining([
-    "--build-arg", `HOMERAIL_WORKER_PROTOCOL_VERSION=${PROTOCOL_VERSION}`,
+    "--build-arg", `HOMERAIL_WORKER_PROTOCOL_VERSION=${WORKER_CONTRACT_VERSION}`,
     "--build-arg", `HOMERAIL_WORKER_VERSION=${currentWorkerVersion()}`,
   ]));
   stdout.write("step one\n");
