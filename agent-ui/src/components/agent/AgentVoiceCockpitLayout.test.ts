@@ -63,13 +63,75 @@ describe('AgentVoiceCockpit responsive layout', () => {
       cockpitSource.indexOf('async function toggleListening(): Promise<void>'),
       cockpitSource.indexOf('async function setupVoiceHidControl()'),
     )
-    expect(toggleListening).toContain('if (codexLiveVoiceSessionActive.value)')
+    const activeStopGuard =
+      'if (codexLiveVoiceEffective.value && codexLiveVoiceSessionActive.value)'
+    expect(toggleListening).toContain(activeStopGuard)
     expect(toggleListening).toContain('await stopCodexLiveVoice()')
+    expect(toggleListening.indexOf(activeStopGuard)).toBeLessThan(
+      toggleListening.indexOf('if (voiceInputActionLocked.value)')
+    )
     expect(toggleListening).not.toContain('toggleMuted()')
     expect(cockpitSource).toContain(
       'v-if="!codexLiveVoiceEffective && !isTvCompactViewport && (listening || speaking)"'
     )
     expect(cockpitSource).toContain('await refreshOnboarding()')
+  })
+
+  it('gives active Live Voice exclusive ownership of audio output', () => {
+    expect(cockpitSource).toContain(
+      '() => codexLiveVoiceOwnsAudio(codexLiveVoiceState.value)'
+    )
+
+    const speak = cockpitSource.slice(
+      cockpitSource.indexOf('async function speak(text: string)'),
+      cockpitSource.indexOf('async function speakText(text: string)'),
+    )
+    expect(speak).toContain('if (codexLiveVoiceSessionActive.value)')
+    expect(speak).toContain('reason=codex_live_voice_active')
+    expect(speak.indexOf('if (codexLiveVoiceSessionActive.value)')).toBeLessThan(
+      speak.indexOf('speechStream(clean'),
+    )
+    expect(speak).toContain('requestAbort.signal')
+
+    const enqueue = cockpitSource.slice(
+      cockpitSource.indexOf('function enqueueSpeechEvent('),
+      cockpitSource.indexOf('async function drainSpeechQueue()'),
+    )
+    expect(enqueue).toContain('if (codexLiveVoiceSessionActive.value)')
+    expect(enqueue).toContain('reason=codex_live_voice_active')
+
+    const cancel = cockpitSource.slice(
+      cockpitSource.indexOf('function cancelLocalSpeech('),
+      cockpitSource.indexOf('async function unlockTtsDomPlayback()'),
+    )
+    expect(cancel).toContain('ttsSpeechAbort?.abort()')
+    expect(cancel).toContain('speechEventQueue = []')
+
+    const applyState = cockpitSource.slice(
+      cockpitSource.indexOf('function applyCodexLiveVoiceState('),
+      cockpitSource.indexOf('function handleCodexLiveVoiceEvent('),
+    )
+    expect(applyState).toContain('if (active && !wasActive)')
+    expect(applyState).toContain("cancelLocalSpeech('codex_live_voice_audio_owner')")
+    expect(applyState).toContain("broadcastVoiceActivity('listening')")
+  })
+
+  it('uses the main voice button as the only Live Voice start and stop control', () => {
+    expect(cockpitSource).not.toContain('data-testid="codex-live-voice-managed"')
+    expect(cockpitSource).not.toContain('data-testid="codex-live-voice-end"')
+    expect(cockpitSource).toContain(':aria-label="voiceInputButtonLabel"')
+    expect(cockpitSource).toContain('@click="toggleListening"')
+    expect(cockpitSource.match(/:disabled="voiceInputActionLocked"/g)).toHaveLength(2)
+    expect(cockpitSource.match(
+      /v-if="codexLiveVoiceEffective && codexLiveVoiceSessionActive"/g
+    )).toHaveLength(2)
+    expect(cockpitSource).toContain(
+      "if (codexLiveVoiceSessionActive.value) return t('voice.liveVoice.end')"
+    )
+    expect(cockpitSource).toContain(
+      'if (codexLiveVoiceClient === client) startCodexLiveVoiceMeter(stream)'
+    )
+    expect(cockpitSource).toContain('if (codexLiveVoiceClient !== client) return')
   })
 
   it('uses a dense glass model popover with an opaque fallback', () => {
