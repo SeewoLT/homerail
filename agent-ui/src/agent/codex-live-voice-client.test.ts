@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   CodexLiveVoiceClient,
+  codexLiveVoiceOwnsAudio,
   type CodexLiveVoiceEvent,
   type CodexLiveVoiceState,
 } from './codex-live-voice-client'
@@ -59,6 +60,27 @@ class FakeDataChannel extends EventTarget {
     this.dispatchEvent(new Event('close'))
   }
 }
+
+describe('Codex Live Voice audio ownership', () => {
+  it.each<CodexLiveVoiceState>([
+    'connecting',
+    'listening',
+    'user-speaking',
+    'manager-working',
+    'assistant-speaking',
+    'muted',
+    'reconnecting',
+  ])('owns audio while the session state is %s', state => {
+    expect(codexLiveVoiceOwnsAudio(state)).toBe(true)
+  })
+
+  it.each<CodexLiveVoiceState>(['idle', 'error', 'closed'])(
+    'releases audio ownership when the session state is %s',
+    state => {
+      expect(codexLiveVoiceOwnsAudio(state)).toBe(false)
+    },
+  )
+})
 
 class FakePeer extends EventTarget {
   iceGatheringState: RTCIceGatheringState = 'complete'

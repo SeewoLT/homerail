@@ -15,6 +15,16 @@ export type CodexLiveVoiceState =
   | 'error'
   | 'closed'
 
+const CODEX_LIVE_VOICE_INACTIVE_STATES = new Set<CodexLiveVoiceState>([
+  'idle',
+  'error',
+  'closed',
+])
+
+export function codexLiveVoiceOwnsAudio(state: CodexLiveVoiceState): boolean {
+  return !CODEX_LIVE_VOICE_INACTIVE_STATES.has(state)
+}
+
 type CodexLiveVoiceActivityState =
   | 'listening'
   | 'user-speaking'

@@ -72,6 +72,55 @@ describe('AgentVoiceCockpit responsive layout', () => {
     expect(cockpitSource).toContain('await refreshOnboarding()')
   })
 
+  it('gives active Live Voice exclusive ownership of audio output', () => {
+    expect(cockpitSource).toContain(
+      '() => codexLiveVoiceOwnsAudio(codexLiveVoiceState.value)'
+    )
+
+    const speak = cockpitSource.slice(
+      cockpitSource.indexOf('async function speak(text: string)'),
+      cockpitSource.indexOf('async function speakText(text: string)'),
+    )
+    expect(speak).toContain('if (codexLiveVoiceSessionActive.value)')
+    expect(speak).toContain('reason=codex_live_voice_active')
+    expect(speak.indexOf('if (codexLiveVoiceSessionActive.value)')).toBeLessThan(
+      speak.indexOf('speechStream(clean'),
+    )
+    expect(speak).toContain('requestAbort.signal')
+
+    const enqueue = cockpitSource.slice(
+      cockpitSource.indexOf('function enqueueSpeechEvent('),
+      cockpitSource.indexOf('async function drainSpeechQueue()'),
+    )
+    expect(enqueue).toContain('if (codexLiveVoiceSessionActive.value)')
+    expect(enqueue).toContain('reason=codex_live_voice_active')
+
+    const cancel = cockpitSource.slice(
+      cockpitSource.indexOf('function cancelLocalSpeech('),
+      cockpitSource.indexOf('async function unlockTtsDomPlayback()'),
+    )
+    expect(cancel).toContain('ttsSpeechAbort?.abort()')
+    expect(cancel).toContain('speechEventQueue = []')
+
+    const applyState = cockpitSource.slice(
+      cockpitSource.indexOf('function applyCodexLiveVoiceState('),
+      cockpitSource.indexOf('function handleCodexLiveVoiceEvent('),
+    )
+    expect(applyState).toContain('if (active && !wasActive)')
+    expect(applyState).toContain("cancelLocalSpeech('codex_live_voice_audio_owner')")
+    expect(applyState).toContain("broadcastVoiceActivity('listening')")
+  })
+
+  it('uses the main voice button as the only Live Voice start and stop control', () => {
+    expect(cockpitSource).not.toContain('data-testid="codex-live-voice-managed"')
+    expect(cockpitSource).not.toContain('data-testid="codex-live-voice-end"')
+    expect(cockpitSource).toContain(':aria-label="voiceInputButtonLabel"')
+    expect(cockpitSource).toContain('@click="toggleListening"')
+    expect(cockpitSource).toContain(
+      "if (codexLiveVoiceSessionActive.value) return t('voice.liveVoice.end')"
+    )
+  })
+
   it('uses a dense glass model popover with an opaque fallback', () => {
     expect(cockpitSource).toContain('background: var(--hr-bg-raised);')
     expect(cockpitSource).toContain(
