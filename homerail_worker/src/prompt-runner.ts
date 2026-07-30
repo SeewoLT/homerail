@@ -423,6 +423,7 @@ export async function runPrompt(
   const nodeUsage: AgentUsage = {};
   let nodeDurationMs: number | undefined;
   let nodeNumTurns: number | undefined;
+  let lastUsageEmission: string | undefined;
   let workspaceBefore: WorkspaceSnapshot | undefined;
   let terminalActivityEmitted = false;
   let promptResult: PromptRunResult = {
@@ -594,6 +595,7 @@ export async function runPrompt(
           // we replace rather than accumulate. Other adapters that emit a
           // single final aggregate behave the same way.
           Object.assign(nodeUsage, event.usage);
+          emitUsage();
           break;
         case "done":
           if (event.usage) Object.assign(nodeUsage, event.usage);
@@ -729,14 +731,22 @@ export async function runPrompt(
       || nodeUsage.cache_read_input_tokens !== undefined
       || nodeUsage.cache_creation_input_tokens !== undefined;
     if (!hasUsage) return;
+    const usage = {
+      input_tokens: nodeUsage.input_tokens ?? 0,
+      output_tokens: nodeUsage.output_tokens ?? 0,
+      cache_read_input_tokens: nodeUsage.cache_read_input_tokens ?? 0,
+      cache_creation_input_tokens: nodeUsage.cache_creation_input_tokens ?? 0,
+    };
+    const signature = JSON.stringify({
+      usage,
+      duration_ms: nodeDurationMs,
+      num_turns: nodeNumTurns,
+    });
+    if (signature === lastUsageEmission) return;
+    lastUsageEmission = signature;
     sendStream({
       event: "usage",
-      usage: {
-        input_tokens: nodeUsage.input_tokens ?? 0,
-        output_tokens: nodeUsage.output_tokens ?? 0,
-        cache_read_input_tokens: nodeUsage.cache_read_input_tokens ?? 0,
-        cache_creation_input_tokens: nodeUsage.cache_creation_input_tokens ?? 0,
-      },
+      usage,
       duration_ms: nodeDurationMs,
       num_turns: nodeNumTurns,
     });

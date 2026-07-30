@@ -50,7 +50,22 @@
     "noTask": "No task description",
     "logs": "Chat logs",
     "noLogs": "No logs for this node",
-    "managerExecuted": "Executed by Manager control logic; no worker or model is dispatched."
+    "managerExecuted": "Executed by Manager control logic; no worker or model is dispatched.",
+    "execution": "Execution",
+    "model": "Model",
+    "provider": "Provider",
+    "backend": "Agent backend",
+    "protocol": "Protocol",
+    "tokenUsage": "Token usage",
+    "inputTokens": "Input",
+    "outputTokens": "Output",
+    "cacheReadTokens": "Cache read",
+    "cacheCreationTokens": "Cache write",
+    "totalTokens": "Total",
+    "totalTokensHint": "Input + output + cache read + cache creation tokens",
+    "context": "Context usage",
+    "nodeCumulative": "Cumulative for this node",
+    "unknown": "—"
   },
   "nodeTypes": {
     "legend": "DAG execution node legend",

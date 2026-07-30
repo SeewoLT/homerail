@@ -50,7 +50,22 @@
     "noTask": "無任務描述",
     "logs": "聊天日誌",
     "noLogs": "該節點暫無日誌",
-    "managerExecuted": "由 Manager 控制邏輯執行，不會調度 Worker 或模型。"
+    "managerExecuted": "由 Manager 控制邏輯執行，不會調度 Worker 或模型。",
+    "execution": "執行資訊",
+    "model": "模型",
+    "provider": "提供商",
+    "backend": "Agent 後端",
+    "protocol": "協議",
+    "tokenUsage": "Token 用量",
+    "inputTokens": "輸入",
+    "outputTokens": "輸出",
+    "cacheReadTokens": "快取讀取",
+    "cacheCreationTokens": "快取寫入",
+    "totalTokens": "合計",
+    "totalTokensHint": "輸入 + 輸出 + 快取讀取 + 快取寫入 Token",
+    "context": "上下文用量",
+    "nodeCumulative": "目前節點累計",
+    "unknown": "—"
   },
   "nodeTypes": {
     "legend": "DAG 執行節點圖例",

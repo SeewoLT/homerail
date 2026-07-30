@@ -13,7 +13,9 @@ export interface DAGAgentConfig {
   llm_setting_id?: string;
   llm?: {
     provider?: string;
+    provider_display_name?: string;
     model?: string;
+    model_display_name?: string;
     api_key?: string;
     base_url?: string;
     protocol?: string;

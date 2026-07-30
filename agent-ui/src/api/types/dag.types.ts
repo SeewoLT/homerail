@@ -215,7 +215,19 @@ export interface DAGNodeMetrics {
     output: number
     cache_read: number
     cache_creation: number
+    total: number
   } | null
+  execution: {
+    provider_id?: string
+    provider_display_name?: string
+    model_name?: string
+    model_display_name?: string
+    agent_backend?: string
+    protocol?: string
+    context_limit?: number
+    context_usage_pct?: number
+  } | null
+  usage_scope: 'node_cumulative'
   usage_available: boolean
   duration_ms: number | null
   num_turns: number | null
@@ -235,6 +247,7 @@ export interface DAGRunMetrics {
       output: number
       cache_read: number
       cache_creation: number
+      total: number
     }
     usage_available: boolean
     cost_usd: number | null

@@ -16,6 +16,7 @@ export const WORKER_CONTRACT_VERSION = "1";
 
 export * from "./types.js";
 export * from "./dag-activity.js";
+export * from "./dag-observability.js";
 export * from "./dag-worker-skill-context.js";
 export * from "./dag-credentials.js";
 export * from "./dag-actor-surface-patch.js";

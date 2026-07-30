@@ -40,7 +40,9 @@ describe("agent runtime resolver", () => {
 
     expect(resolved).toMatchObject({
       provider_name: "",
+      provider_display_name: "OpenAI",
       model: "codex-account-model",
+      model_display_name: "codex-account-model",
       api_key: "",
       base_url: "",
       protocol: "codex_appserver",
@@ -71,6 +73,7 @@ describe("agent runtime resolver", () => {
       provider_id: "kimi",
       endpoint_id: "kimi_coding_plan",
       model_name: "kimi-k2.7-code",
+      display_name: "Kimi Coding",
       api_key: "pk-test-kimi",
       protocol: "openai_compatible",
       plan_type: "coding_plan",
@@ -92,7 +95,9 @@ describe("agent runtime resolver", () => {
     for (const resolved of [manager, dag]) {
       expect(resolved).toMatchObject({
         provider_name: "kimi_cn",
+        provider_display_name: expect.any(String),
         model: "kimi-for-coding",
+        model_display_name: "Kimi Coding",
         api_key: "pk-test-kimi",
         base_url: "https://api.kimi.com/coding/v1",
         protocol: "openai_compatible",
