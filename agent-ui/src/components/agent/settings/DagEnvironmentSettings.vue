@@ -16,7 +16,6 @@ import {
   dagEnvironmentGuidanceKey,
   dagEnvironmentReasonCode,
 } from '@/composables/useDagEnvironmentGuidance'
-import type { DagEnvironmentCompatibility } from '@/api/services/dag-environment-api'
 
 const { t, locale } = useI18n()
 const { status, loading, action, error, check, build } = useDagEnvironment()
@@ -72,17 +71,6 @@ const statusSummary = computed(() => {
   if (worker.status === 'skipped') return t('settings.environment.state.skipped')
   return t('settings.environment.state.unavailable')
 })
-
-function compatibilityLabel(value: DagEnvironmentCompatibility): string {
-  return t(`settings.environment.compatibility.${value}`)
-}
-
-function compatibilityClass(value: DagEnvironmentCompatibility): string {
-  if (value === 'current') return 'text-[var(--hr-success)] border-[var(--hr-success-border)] bg-[var(--hr-success-soft)]'
-  if (value === 'incompatible') return 'text-[var(--hr-danger)] border-[var(--hr-danger-border)] bg-[var(--hr-danger-soft)]'
-  if (value === 'stale') return 'text-[var(--hr-warning)] border-[var(--hr-warning-border)] bg-[var(--hr-warning-soft)]'
-  return 'text-[var(--hr-text-3)] border-[var(--hr-border)] bg-[var(--hr-surface-2)]'
-}
 
 const guidance = computed(() => {
   const key = dagEnvironmentGuidanceKey(status.value, dagEnvironmentReasonCode(status.value))
@@ -177,7 +165,7 @@ function shortId(value: string | undefined): string {
         </div>
       </div>
 
-      <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div class="mt-5 grid gap-3 sm:grid-cols-3">
         <div class="rounded-lg border border-[var(--hr-border)] bg-[var(--hr-panel)] p-3">
           <div class="text-xs text-[var(--hr-text-3)]">{{ t('settings.environment.dockerEngine') }}</div>
           <div class="mt-1 text-sm font-medium text-[var(--hr-text-1)]">
@@ -193,16 +181,11 @@ function shortId(value: string | undefined): string {
           <div class="mt-1 text-xs text-[var(--hr-text-3)]">{{ shortId(selectedImage?.id) }}</div>
         </div>
         <div class="rounded-lg border border-[var(--hr-border)] bg-[var(--hr-panel)] p-3">
-          <div class="text-xs text-[var(--hr-text-3)]">{{ t('settings.environment.sourceFingerprint') }}</div>
-          <div class="mt-1 font-mono text-sm text-[var(--hr-text-1)]">{{ status?.source.fingerprint || '—' }}</div>
-          <div class="mt-1 text-xs text-[var(--hr-text-3)]">Worker {{ status?.source.worker_version || '—' }}</div>
-        </div>
-        <div class="rounded-lg border border-[var(--hr-border)] bg-[var(--hr-panel)] p-3">
-          <div class="text-xs text-[var(--hr-text-3)]">{{ t('settings.environment.protocolVersion') }}</div>
-          <div class="mt-1 font-mono text-sm text-[var(--hr-text-1)]">{{ status?.source.protocol_version || '—' }}</div>
-          <div class="mt-1 text-xs text-[var(--hr-text-3)]">
+          <div class="text-xs text-[var(--hr-text-3)]">{{ t('settings.environment.workersTitle') }}</div>
+          <div class="mt-1 text-sm font-medium text-[var(--hr-text-1)]">
             {{ t('settings.environment.connectedWorkers', { count: status?.workers.length || 0 }) }}
           </div>
+          <div class="mt-1 text-xs text-[var(--hr-text-3)]">{{ t('settings.environment.workersOnDemand') }}</div>
         </div>
       </div>
     </div>
@@ -217,7 +200,7 @@ function shortId(value: string | undefined): string {
         <div
           v-for="image in status.images"
           :key="image.id"
-          class="grid gap-3 px-4 py-4 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_auto]"
+          class="px-4 py-4"
         >
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">
@@ -227,19 +210,6 @@ function shortId(value: string | undefined): string {
               </span>
             </div>
             <div class="mt-1 text-xs text-[var(--hr-text-3)]">{{ shortId(image.id) }} · {{ formatSize(image.size_bytes) }} · {{ formatDate(image.created_at) }}</div>
-          </div>
-          <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-            <span class="text-[var(--hr-text-3)]">{{ t('settings.environment.workerVersion') }}</span>
-            <span class="font-mono text-[var(--hr-text-2)]">{{ image.worker_version || '—' }}</span>
-            <span class="text-[var(--hr-text-3)]">{{ t('settings.environment.protocolVersion') }}</span>
-            <span class="font-mono text-[var(--hr-text-2)]">{{ image.protocol_version || '—' }}</span>
-            <span class="text-[var(--hr-text-3)]">{{ t('settings.environment.fingerprint') }}</span>
-            <span class="font-mono text-[var(--hr-text-2)]">{{ image.source_fingerprint || '—' }}</span>
-          </div>
-          <div>
-            <span class="inline-flex rounded-full border px-2.5 py-1 text-xs" :class="compatibilityClass(image.compatibility)">
-              {{ compatibilityLabel(image.compatibility) }}
-            </span>
           </div>
         </div>
       </div>
@@ -254,18 +224,11 @@ function shortId(value: string | undefined): string {
         <h3 class="font-medium text-[var(--hr-text-1)]">{{ t('settings.environment.workersTitle') }}</h3>
       </div>
       <div v-if="status?.workers.length" class="divide-y divide-[var(--hr-border)]">
-        <div v-for="worker in status.workers" :key="worker.worker_id" class="grid gap-3 px-4 py-3 md:grid-cols-[1fr_1fr_auto]">
+        <div v-for="worker in status.workers" :key="worker.worker_id" class="px-4 py-3">
           <div>
             <div class="font-mono text-sm text-[var(--hr-text-1)]">{{ worker.worker_id }}</div>
             <div class="mt-1 text-xs text-[var(--hr-text-3)]">{{ worker.status }} · {{ formatDate(worker.registered_at) }}</div>
           </div>
-          <div class="text-xs text-[var(--hr-text-2)]">
-            Worker {{ worker.worker_version || '—' }} · Protocol {{ worker.protocol_version || '—' }}
-            <div class="mt-1 font-mono text-[var(--hr-text-3)]">{{ worker.source_fingerprint || '—' }}</div>
-          </div>
-          <span class="h-fit rounded-full border px-2.5 py-1 text-xs" :class="compatibilityClass(worker.compatibility)">
-            {{ compatibilityLabel(worker.compatibility) }}
-          </span>
         </div>
       </div>
       <div v-else class="px-4 py-8 text-center text-sm text-[var(--hr-text-3)]">{{ t('settings.environment.noWorkers') }}</div>
