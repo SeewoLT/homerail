@@ -11,7 +11,7 @@ import {
   HOMERAIL_WORKER_REVISION_LABEL,
   HOMERAIL_WORKER_SOURCE_LABEL,
   HOMERAIL_WORKER_VERSION_LABEL,
-  PROTOCOL_VERSION,
+  WORKER_CONTRACT_VERSION,
 } from "homerail-protocol";
 import { getHomerailHome } from "../config/env.js";
 import { emit } from "../events/bus.js";
@@ -218,6 +218,46 @@ export function resolveDagEnvironmentRepoRoot(env: NodeJS.ProcessEnv = process.e
   return path.resolve(here, "../../..");
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function fingerprintContent(relativePath: string, content: Buffer): Buffer | string {
+  const normalizedPath = relativePath.split(path.sep).join("/");
+  const isPackageJson = normalizedPath === "homerail_worker/package.json"
+    || normalizedPath === "homerail_protocol/package.json";
+  const isPackageLock = normalizedPath === "homerail_worker/package-lock.json"
+    || normalizedPath === "homerail_protocol/package-lock.json";
+  if (!isPackageJson && !isPackageLock) return content;
+
+  try {
+    const parsed = JSON.parse(content.toString("utf8")) as Record<string, unknown>;
+    delete parsed.version;
+    if (isPackageLock && typeof parsed.packages === "object" && parsed.packages !== null) {
+      const packages = parsed.packages as Record<string, unknown>;
+      for (const workspacePath of ["", "../homerail_protocol"]) {
+        const metadata = packages[workspacePath];
+        if (typeof metadata === "object" && metadata !== null) {
+          delete (metadata as Record<string, unknown>).version;
+        }
+      }
+    }
+    return stableJson(parsed);
+  } catch {
+    // Invalid package metadata must still affect the fingerprint and surface in
+    // the later build instead of being silently ignored.
+    return content;
+  }
+}
+
 function addPathToHash(hash: ReturnType<typeof createHash>, repoRoot: string, relativePath: string): void {
   const absolutePath = path.join(repoRoot, relativePath);
   if (!fs.existsSync(absolutePath)) return;
@@ -231,7 +271,7 @@ function addPathToHash(hash: ReturnType<typeof createHash>, repoRoot: string, re
   if (!stat.isFile()) return;
   hash.update(relativePath.split(path.sep).join("/"));
   hash.update("\0");
-  hash.update(fs.readFileSync(absolutePath));
+  hash.update(fingerprintContent(relativePath, fs.readFileSync(absolutePath)));
   hash.update("\0");
 }
 
@@ -323,12 +363,10 @@ function compatibleWithSource(
   protocolVersion: string | undefined,
   fingerprint: string | undefined,
   sourceFingerprint: string | undefined,
-  workerVersion?: string,
-  sourceWorkerVersion?: string,
 ): ImageCompatibility {
-  if (protocolVersion && protocolVersion !== PROTOCOL_VERSION) return "incompatible";
-  if (workerVersion && sourceWorkerVersion && workerVersion !== sourceWorkerVersion) return "stale";
+  if (protocolVersion && protocolVersion !== WORKER_CONTRACT_VERSION) return "incompatible";
   if (!sourceFingerprint) return "unknown";
+  if (!protocolVersion) return "stale";
   if (!fingerprint) return "stale";
   return fingerprint === sourceFingerprint ? "current" : "stale";
 }
@@ -353,7 +391,7 @@ function defaultStatus(
       repo_root: repoRoot,
       fingerprint,
       worker_version: readPackageVersion(repoRoot),
-      protocol_version: PROTOCOL_VERSION,
+      protocol_version: WORKER_CONTRACT_VERSION,
       image_revision: nonEmpty(env.HOMERAIL_BUILD_REVISION) ?? nonEmpty(env.GITHUB_SHA),
     },
     worker_image: {
@@ -410,7 +448,7 @@ export class DagEnvironmentController {
       available: Boolean(sourceFingerprint),
       fingerprint: sourceFingerprint,
       worker_version: readPackageVersion(this.repoRoot),
-      protocol_version: PROTOCOL_VERSION,
+      protocol_version: WORKER_CONTRACT_VERSION,
     };
     this.status.workers = this.connectedWorkers(sourceFingerprint);
     return cloneStatus(this.status);
@@ -628,7 +666,7 @@ export class DagEnvironmentController {
           image: this.workerImage,
           reason: "incompatible",
           reason_code: "worker_image_incompatible",
-          message: `${this.workerImage} uses an incompatible Worker protocol.`,
+          message: `${this.workerImage} needs to be updated before starting new DAG runs.`,
           updated_at: this.now(),
           error: "Rebuild the Worker image before starting new DAG runs.",
           compatibility: selected.compatibility,
@@ -639,7 +677,7 @@ export class DagEnvironmentController {
           image: this.workerImage,
           reason: "stale",
           reason_code: "worker_image_stale",
-          message: `${this.workerImage} does not match the current HomeRail source.`,
+          message: `${this.workerImage} needs to be updated before starting new DAG runs.`,
           updated_at: this.now(),
           error: "Rebuild the Worker image before starting new DAG runs.",
           compatibility: selected.compatibility,
@@ -709,7 +747,6 @@ export class DagEnvironmentController {
     }
 
     const sourceFingerprint = dagWorkerSourceFingerprint(this.repoRoot);
-    const sourceWorkerVersion = readPackageVersion(this.repoRoot);
     const byId = new Map<string, DagEnvironmentImage>();
     for (const inspection of inspections) {
       const id = nonEmpty(inspection.Id);
@@ -741,8 +778,6 @@ export class DagEnvironmentController {
           protocol,
           source,
           sourceFingerprint,
-          workerVersion,
-          sourceWorkerVersion,
         ),
         selected: tags.includes(this.workerImage),
       };
@@ -803,12 +838,12 @@ export class DagEnvironmentController {
       "-f",
       "homerail_worker/Dockerfile",
       "--label", `${HOMERAIL_WORKER_SOURCE_LABEL}=${fingerprint}`,
-      "--label", `${HOMERAIL_WORKER_PROTOCOL_LABEL}=${PROTOCOL_VERSION}`,
+      "--label", `${HOMERAIL_WORKER_PROTOCOL_LABEL}=${WORKER_CONTRACT_VERSION}`,
       "--label", `${HOMERAIL_WORKER_VERSION_LABEL}=${workerVersion}`,
       "--label", `${HOMERAIL_WORKER_REVISION_LABEL}=${revision}`,
       "--label", `${HOMERAIL_WORKER_CREATED_LABEL}=${created}`,
       "--build-arg", `HOMERAIL_WORKER_SOURCE_FINGERPRINT=${fingerprint}`,
-      "--build-arg", `HOMERAIL_WORKER_PROTOCOL_VERSION=${PROTOCOL_VERSION}`,
+      "--build-arg", `HOMERAIL_WORKER_PROTOCOL_VERSION=${WORKER_CONTRACT_VERSION}`,
       "--build-arg", `HOMERAIL_WORKER_VERSION=${workerVersion}`,
       "--build-arg", `HOMERAIL_WORKER_IMAGE_REVISION=${revision}`,
       "-t", this.workerImage,
@@ -965,7 +1000,6 @@ export class DagEnvironmentController {
   }
 
   private connectedWorkers(sourceFingerprint: string | undefined): DagEnvironmentWorker[] {
-    const sourceWorkerVersion = readPackageVersion(this.repoRoot);
     return getAllWorkers().map((worker) => {
       const identity = worker.runtime_identity;
       return {
@@ -980,8 +1014,6 @@ export class DagEnvironmentController {
           identity?.protocol_version,
           identity?.source_fingerprint,
           sourceFingerprint,
-          identity?.worker_version,
-          sourceWorkerVersion,
         ),
       };
     });

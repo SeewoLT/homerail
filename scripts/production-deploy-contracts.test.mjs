@@ -34,10 +34,10 @@ test("production deployment is atomic, health checked, and rollback capable", ()
   assert.match(deploy, /flock -w 60/);
   assert.match(deploy, /homerail-worker:production-/);
   assert.match(deploy, /org\.homerail\.worker\.source_fingerprint=\$WORKER_SOURCE_FINGERPRINT/);
-  assert.match(deploy, /org\.homerail\.worker\.protocol_version=\$WORKER_PROTOCOL_VERSION/);
+  assert.match(deploy, /org\.homerail\.worker\.protocol_version=\$WORKER_CONTRACT_VERSION/);
   assert.match(deploy, /org\.opencontainers\.image\.version=\$WORKER_VERSION/);
   assert.match(deploy, /HOMERAIL_WORKER_SOURCE_FINGERPRINT=\$WORKER_SOURCE_FINGERPRINT/);
-  assert.match(deploy, /HOMERAIL_WORKER_PROTOCOL_VERSION=\$WORKER_PROTOCOL_VERSION/);
+  assert.match(deploy, /HOMERAIL_WORKER_PROTOCOL_VERSION=\$WORKER_CONTRACT_VERSION/);
   assert.match(deploy, /HOMERAIL_WORKER_VERSION=\$WORKER_VERSION/);
   assert.match(deploy, /HOMERAIL_WORKER_IMAGE_REVISION=\$REVISION/);
   assert.match(deploy, /HOMERAIL_PRODUCTION_HEALTH_ATTEMPTS:-60/);
@@ -341,7 +341,7 @@ test("production deployment preserves database compatibility across success and 
         + "process.exit(Number(process.env.FAKE_SMOKE_EXIT || 0));\n",
     );
     write("homerail_protocol/package.json", '{"type":"module"}\n');
-    write("homerail_protocol/dist/index.js", 'export const PROTOCOL_VERSION = "0.1.0";\n');
+    write("homerail_protocol/dist/index.js", 'export const WORKER_CONTRACT_VERSION = "1";\n');
     write("homerail_worker/package.json", '{"version":"0.1.0"}\n');
     write("agent-ui/dist/index.html", "<!doctype html>\n");
     write("homerail_worker/Dockerfile", "FROM scratch\n");
@@ -455,11 +455,11 @@ test("production deployment preserves database compatibility across success and 
     assert.doesNotMatch(dockerRemovals, new RegExp(`homerail-worker:production-${previousRevision.slice(0, 12)}`));
     const dockerBuildArgs = fs.readFileSync(passed.dockerBuildArgsPath, "utf8");
     assert.match(dockerBuildArgs, new RegExp(`org\\.homerail\\.worker\\.source_fingerprint=${workerFingerprint}`));
-    assert.match(dockerBuildArgs, /org\.homerail\.worker\.protocol_version=0\.1\.0/);
+    assert.match(dockerBuildArgs, /org\.homerail\.worker\.protocol_version=1/);
     assert.match(dockerBuildArgs, /org\.opencontainers\.image\.version=0\.1\.0/);
     assert.match(dockerBuildArgs, new RegExp(`org\\.opencontainers\\.image\\.revision=${revision}`));
     assert.match(dockerBuildArgs, new RegExp(`HOMERAIL_WORKER_SOURCE_FINGERPRINT=${workerFingerprint}`));
-    assert.match(dockerBuildArgs, /HOMERAIL_WORKER_PROTOCOL_VERSION=0\.1\.0/);
+    assert.match(dockerBuildArgs, /HOMERAIL_WORKER_PROTOCOL_VERSION=1/);
     assert.match(dockerBuildArgs, /HOMERAIL_WORKER_VERSION=0\.1\.0/);
     assert.match(dockerBuildArgs, new RegExp(`HOMERAIL_WORKER_IMAGE_REVISION=${revision}`));
     const unit = fs.readFileSync(passed.unitPath, "utf8");

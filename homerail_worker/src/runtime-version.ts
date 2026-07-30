@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { PROTOCOL_VERSION } from "homerail-protocol";
+import { WORKER_CONTRACT_VERSION } from "homerail-protocol";
 
 export interface WorkerRuntimeIdentity {
   worker_version: string;
@@ -28,7 +28,7 @@ export function resolveWorkerRuntimeIdentity(
 ): WorkerRuntimeIdentity {
   return {
     worker_version: env.HOMERAIL_WORKER_VERSION?.trim() || WORKER_RUNTIME_VERSION,
-    protocol_version: env.HOMERAIL_WORKER_PROTOCOL_VERSION?.trim() || PROTOCOL_VERSION,
+    protocol_version: env.HOMERAIL_WORKER_PROTOCOL_VERSION?.trim() || WORKER_CONTRACT_VERSION,
     source_fingerprint: env.HOMERAIL_WORKER_SOURCE_FINGERPRINT?.trim() || undefined,
     image_revision: env.HOMERAIL_WORKER_IMAGE_REVISION?.trim() || undefined,
   };
