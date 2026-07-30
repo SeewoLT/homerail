@@ -33,6 +33,12 @@ import { createBuiltinToolBudgetHook } from "./builtin-tool-budget.js";
 const HANDOFF_ONLY_THINKING_BUDGET = 2048;
 const HANDOFF_STOP = Symbol("claude-sdk-handoff-stop");
 const DAG_TOOLS_MCP_SERVER_NAME = "dag-tools";
+const AGENT_USAGE_KEYS = [
+  "input_tokens",
+  "output_tokens",
+  "cache_read_input_tokens",
+  "cache_creation_input_tokens",
+] as const satisfies ReadonlyArray<keyof AgentUsage>;
 
 interface ClaudeSkillProjectionRuntime {
   configDir: string;
@@ -181,6 +187,7 @@ interface SdkModule {
 interface SdkMessage {
   type: string;
   message?: {
+    id?: string;
     content?: Array<{
       type: string;
       text?: string;
@@ -452,6 +459,7 @@ export class ClaudeSdkAdapter implements AgentClient {
     // Declared outside try so the final `done` yield (after finally) can
     // read them even when the query loop never ran (e.g. early SDK error).
     const accumulatedUsage: AgentUsage = {};
+    const assistantUsageByMessageId = new Map<string, AgentUsage>();
     let finalDurationMs: number | undefined;
     let finalNumTurns: number | undefined;
     let messageCount = 0;
@@ -725,27 +733,51 @@ export class ClaudeSdkAdapter implements AgentClient {
             };
             stderrTail = "";
           }
-          // Extract usage from this message. Per-message usage on assistant
-          // turns is additive (each turn's input/output); the result message
-          // carries an aggregate we prefer when present.
+          // Extract usage from this message. Claude-compatible providers can
+          // repeat one assistant message id for thinking, text, and tool-use
+          // snapshots. Treat those as replacements for the same turn rather
+          // than independent deltas. The result message carries an aggregate
+          // we prefer when present.
           const msgUsage = msg.message?.usage ?? msg.usage;
           let usageChanged = false;
           if (msgUsage) {
-            usageChanged = true;
             if (msg.type === "result") {
               // Result message carries the authoritative aggregate — replace.
-              accumulatedUsage.input_tokens = msgUsage.input_tokens ?? accumulatedUsage.input_tokens;
-              accumulatedUsage.output_tokens = msgUsage.output_tokens ?? accumulatedUsage.output_tokens;
-              accumulatedUsage.cache_read_input_tokens = msgUsage.cache_read_input_tokens ?? accumulatedUsage.cache_read_input_tokens;
-              accumulatedUsage.cache_creation_input_tokens = msgUsage.cache_creation_input_tokens ?? accumulatedUsage.cache_creation_input_tokens;
+              for (const key of AGENT_USAGE_KEYS) {
+                const value = msgUsage[key];
+                if (value !== undefined && value !== accumulatedUsage[key]) {
+                  accumulatedUsage[key] = value;
+                  usageChanged = true;
+                }
+              }
               finalDurationMs = msg.duration_ms;
               finalNumTurns = msg.num_turns;
             } else {
-              // Per-turn delta — accumulate.
-              accumulatedUsage.input_tokens = (accumulatedUsage.input_tokens ?? 0) + (msgUsage.input_tokens ?? 0);
-              accumulatedUsage.output_tokens = (accumulatedUsage.output_tokens ?? 0) + (msgUsage.output_tokens ?? 0);
-              accumulatedUsage.cache_read_input_tokens = (accumulatedUsage.cache_read_input_tokens ?? 0) + (msgUsage.cache_read_input_tokens ?? 0);
-              accumulatedUsage.cache_creation_input_tokens = (accumulatedUsage.cache_creation_input_tokens ?? 0) + (msgUsage.cache_creation_input_tokens ?? 0);
+              const messageId = msg.message?.id?.trim();
+              if (messageId) {
+                const previous = assistantUsageByMessageId.get(messageId);
+                const next: AgentUsage = { ...previous };
+                for (const key of AGENT_USAGE_KEYS) {
+                  if (msgUsage[key] !== undefined) next[key] = msgUsage[key];
+                }
+                for (const key of AGENT_USAGE_KEYS) {
+                  if (previous?.[key] === next[key]) continue;
+                  accumulatedUsage[key] = (accumulatedUsage[key] ?? 0)
+                    - (previous?.[key] ?? 0)
+                    + (next[key] ?? 0);
+                  usageChanged = true;
+                }
+                assistantUsageByMessageId.set(messageId, next);
+              } else {
+                // Providers without stable message ids still expose per-turn
+                // deltas, so preserve the existing additive fallback.
+                for (const key of AGENT_USAGE_KEYS) {
+                  const value = msgUsage[key];
+                  if (value === undefined) continue;
+                  accumulatedUsage[key] = (accumulatedUsage[key] ?? 0) + value;
+                  usageChanged = true;
+                }
+              }
             }
           }
           // Emit a usage event inline (carrying the running total) so the
