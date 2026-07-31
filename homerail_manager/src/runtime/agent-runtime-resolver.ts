@@ -21,6 +21,8 @@ import {
 } from "../persistence/provider-catalog.js";
 import {
   CODEX_RESPONSES_PROTOCOL,
+  codexResponsesModelSupport,
+  resolveCodexProviderModelProfile,
   DEFAULT_MANAGER_AGENT_RUNTIME_AGENT_TYPE,
   ManagerAgentRuntimePlacement,
   isDisabledDirectLlmAgentType,
@@ -41,6 +43,8 @@ export interface AgentRuntimeResolutionInput {
   settingId?: string;
   harness?: ManagerAgentHarness | string | null;
   agentType?: string | null;
+  reasoningEffort?: string | null;
+  serviceTier?: string | null;
 }
 
 export interface AgentRuntimeResolution {
@@ -55,6 +59,8 @@ export interface AgentRuntimeResolution {
   agent_type: string;
   runtime_placement: ManagerAgentRuntimePlacementValue;
   llm_setting_id?: string;
+  reasoning_effort?: string;
+  service_tier?: string | null;
 }
 
 function runtimePlacementForAgentType(agentType: string, surface: AgentRuntimeSurface): ManagerAgentRuntimePlacementValue {
@@ -145,7 +151,7 @@ function settingForInput(input: AgentRuntimeResolutionInput): LLMSetting {
 function agentTypeForSetting(setting: LLMSetting, input: AgentRuntimeResolutionInput): string {
   const explicit = requestedAgentType(input);
   const requested = explicit ?? DEFAULT_MANAGER_AGENT_RUNTIME_AGENT_TYPE;
-  if (isKimiProviderId(setting.provider_id) && explicit !== managerAgentHarnessDefinition("claude_agent_sdk").agent_type) {
+  if (isKimiProviderId(setting.provider_id) && explicit === undefined) {
     return managerAgentHarnessDefinition("kimi_code").agent_type;
   }
   if (requested === "kimi_code") {
@@ -183,6 +189,8 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
       protocol: "codex_appserver",
       agent_type: definition.agent_type,
       runtime_placement: definition.runtime_placement,
+      ...(input.reasoningEffort?.trim() ? { reasoning_effort: input.reasoningEffort.trim() } : {}),
+      service_tier: input.serviceTier?.trim() || null,
     };
   }
 
@@ -197,6 +205,9 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
     findCatalogEndpoint(setting.provider_id, setting.endpoint_id),
     model,
   );
+  if (agentType === "codex_appserver" && codexResponsesModelSupport(setting.provider_id, model) === "unsupported") {
+    throw new Error(`Codex app-server Responses is not supported for ${setting.provider_id}/${model}`);
+  }
   if (!baseUrl) {
     if (agentType === "claude-sdk") {
       throw new Error(`Claude SDK requires an Anthropic-compatible endpoint for ${setting.provider_id}/${setting.model_name}; Chat Completions endpoints are not supported for harness execution. Configure an Anthropic base URL or use the Kimi Code harness for Kimi.`);
@@ -205,6 +216,26 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
       throw new Error(`Codex app-server requires a Responses endpoint for ${setting.provider_id}/${setting.model_name}`);
     }
     throw new Error(`No compatible base URL for ${input.surface === "manager_agent" ? "Manager Agent" : "DAG"} setting ${setting.provider_id}/${setting.model_name}`);
+  }
+  let reasoningEffort: string | undefined;
+  let serviceTier: string | null | undefined;
+  if (agentType === "codex_appserver") {
+    const modelProfile = resolveCodexProviderModelProfile(setting.provider_id, model);
+    reasoningEffort = input.reasoningEffort?.trim() || modelProfile?.default_reasoning_effort;
+    const supportedEfforts = modelProfile?.supported_reasoning_efforts;
+    if (reasoningEffort && supportedEfforts && !supportedEfforts.some((effort) => effort === reasoningEffort)) {
+      throw new Error(
+        `Codex Responses model '${setting.provider_id}/${model}' does not support reasoning effort '${reasoningEffort}'. ` +
+        `Supported values: ${supportedEfforts.join(", ")}.`,
+      );
+    }
+    serviceTier = input.serviceTier?.trim() || null;
+    const supportedTiers = modelProfile?.supported_service_tiers;
+    if (serviceTier && supportedTiers && !supportedTiers.includes(serviceTier)) {
+      throw new Error(
+        `Codex Responses model '${setting.provider_id}/${model}' does not support service tier '${serviceTier}'.`,
+      );
+    }
   }
   return {
     provider_name: setting.provider_id,
@@ -226,5 +257,7 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
     agent_type: agentType,
     runtime_placement: runtimePlacementForAgentType(agentType, input.surface),
     llm_setting_id: setting.id,
+    ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+    ...(serviceTier !== undefined ? { service_tier: serviceTier } : {}),
   };
 }

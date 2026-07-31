@@ -181,4 +181,45 @@ default:
       expected_profile_id: "mismatched",
     })).toThrow(/workflow identity mismatch/);
   });
+
+  it("projects Codex reasoning controls from a runtime profile into dispatch", () => {
+    const setting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-flash",
+      api_key: "sk-test-deepseek",
+      is_active: true,
+      is_default: true,
+    });
+    upsertDagWorkflowFromYaml({ yaml_text: WORKFLOW_YAML });
+    upsertDagRuntimeProfileFromYaml({
+      yaml_text: `
+profile_id: deepseek-codex
+workflow_id: db-workflow
+default:
+  llm_setting_id: ${setting.id}
+  agent_type: codex_appserver
+  reasoning_effort: none
+  service_tier: null
+`,
+    });
+
+    const dispatcher = new FakeDAGDispatcher();
+    const orchestrator = new ChangeOrchestrator(new GraphExecutor(dispatcher));
+    orchestrator.createAndRun({
+      workflowId: "db-workflow",
+      profile: "deepseek-codex",
+    });
+
+    expect(dispatcher.dispatched[0]?.agentConfig).toMatchObject({
+      agent_type: "codex_appserver",
+      llm: {
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        protocol: "responses_compatible",
+        reasoning_effort: "none",
+        service_tier: null,
+      },
+    });
+  });
 });

@@ -62,6 +62,8 @@ export function resolveManagerAgentConfig(
     modelName,
     settingId,
     harness,
+    reasoningEffort: effort,
+    serviceTier: normalizedServiceTier,
   });
   if (resolved.runtime_placement === "container") {
     throw new Error("Manager Agent must run on the host");
@@ -71,7 +73,7 @@ export function resolveManagerAgentConfig(
     runtime_placement: resolved.runtime_placement,
     project_id: projectId,
     project_workspace: resolveProjectWorkspace(projectId),
-    reasoning_effort: effort ?? "low",
-    service_tier: normalizedServiceTier,
+    reasoning_effort: resolved.reasoning_effort ?? effort ?? "low",
+    service_tier: resolved.service_tier ?? normalizedServiceTier,
   };
 }

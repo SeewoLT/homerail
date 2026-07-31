@@ -4257,6 +4257,8 @@ function _withDispatchCredentials(agentConfig: DAGAgentConfig): DispatchCredenti
       providerName: provider,
       modelName: model,
       agentType: agentConfig.agent_type,
+      reasoningEffort: agentConfig.llm?.reasoning_effort,
+      serviceTier: agentConfig.llm?.service_tier,
     });
     return {
       ok: true,
@@ -4273,6 +4275,8 @@ function _withDispatchCredentials(agentConfig: DAGAgentConfig): DispatchCredenti
           base_url: resolved.base_url,
           protocol: resolved.protocol,
           anthropic_auth_mode: resolved.anthropic_auth_mode,
+          reasoning_effort: resolved.reasoning_effort,
+          service_tier: resolved.service_tier,
         },
       },
     };

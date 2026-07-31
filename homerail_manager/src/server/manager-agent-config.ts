@@ -8,9 +8,13 @@ import {
   findActiveCodexCompatibleSetting,
   findActiveClaudeSdkCompatibleSetting,
   findActiveLlmRuntimeSetting,
+  getSetting,
 } from "../persistence/llm-settings.js";
 import { resolveManagerAgentConfig } from "./manager-agent-runtime-config.js";
-import { normalizeManagerAgentHarness } from "homerail-protocol";
+import {
+  normalizeManagerAgentHarness,
+  resolveCodexProviderModelProfile,
+} from "homerail-protocol";
 import { listCodexModels, type CodexModel, type CodexModelCatalog } from "./codex-models.js";
 import type { ManagerAgentConfig } from "../persistence/manager-agent-config.js";
 import {
@@ -108,6 +112,10 @@ function normalizedServiceTier(value: string | null): string | null {
   return value === "fast" ? "priority" : value;
 }
 
+function providerDefaultReasoningEffort(providerId?: string, model?: string): string | undefined {
+  return resolveCodexProviderModelProfile(providerId, model)?.default_reasoning_effort;
+}
+
 function patchedConfig(patch: Record<string, unknown>): ManagerAgentConfig {
   const current = readManagerAgentConfig();
   const settingId = _string(patch.llm_setting_id);
@@ -145,19 +153,32 @@ function patchedConfig(patch: Record<string, unknown>): ManagerAgentConfig {
     : normalizedServiceTier(serviceTier);
   if (harness === "codex_appserver") {
     const switchingToCodex = current.harness !== "codex_appserver";
-    const useAutomaticProvider = switchingToCodex && settingId === undefined && providerName === undefined;
+    const useExplicitSubscriptionModel = switchingToCodex && modelName !== undefined &&
+      settingId === undefined && providerName === undefined;
+    const useAutomaticProvider = switchingToCodex && settingId === undefined &&
+      providerName === undefined && modelName === undefined;
     const preferredSetting = useAutomaticProvider
       ? findActiveCodexCompatibleSetting()
+      : undefined;
+    const explicitSetting = typeof settingId === "string" ? getSetting(settingId) : undefined;
+    const providerSelectionChanged = switchingToCodex || settingId !== undefined ||
+      providerName !== undefined || modelName !== undefined;
+    const selectedProviderId = preferredSetting?.provider_id ?? explicitSetting?.provider_id ??
+      (typeof providerName === "string" ? providerName : undefined);
+    const selectedModel = preferredSetting?.model_name ?? explicitSetting?.model_name ??
+      (typeof modelName === "string" ? modelName : undefined);
+    const selectedProviderDefault = providerSelectionChanged && !useExplicitSubscriptionModel
+      ? providerDefaultReasoningEffort(selectedProviderId, selectedModel)
       : undefined;
     return {
       ...current,
       harness,
       live_voice_enabled: liveVoiceEnabled,
       live_voice_voice: liveVoiceVoice,
-      llm_setting_id: preferredSetting?.id ?? (useAutomaticProvider ? null : mergedSettingId),
-      provider_name: preferredSetting?.provider_id ?? (useAutomaticProvider ? null : mergedProviderName),
+      llm_setting_id: preferredSetting?.id ?? (useAutomaticProvider || useExplicitSubscriptionModel ? null : mergedSettingId),
+      provider_name: preferredSetting?.provider_id ?? (useAutomaticProvider || useExplicitSubscriptionModel ? null : mergedProviderName),
       model_name: preferredSetting?.model_name ?? (useAutomaticProvider && modelName === undefined ? null : mergedModelName),
-      reasoning_effort: mergedReasoningEffort,
+      reasoning_effort: reasoningEffort ?? selectedProviderDefault ?? mergedReasoningEffort,
       service_tier: mergedServiceTier,
       generative_ui_mode: generativeUiMode,
     };
@@ -301,6 +322,13 @@ export async function validateAndSaveManagerAgentConfig(
       throw validationError(error);
     }
   }
+  const providerBackedCodex = next.harness === "codex_appserver"
+    && Boolean(next.llm_setting_id || next.provider_name);
+  if (next.live_voice_enabled && providerBackedCodex) {
+    throw validationError(new Error(
+      "Live Voice is not supported for provider-backed Codex Responses runtimes. Disable Live Voice or use subscription Codex.",
+    ));
+  }
   if (patch.live_voice_enabled === true) {
     if (next.harness !== "codex_appserver") {
       throw validationError(new Error("Live Voice requires the Codex app-server Manager runtime."));
@@ -373,6 +401,7 @@ export async function ensurePreferredManagerAgentConfig(
       llm_setting_id: codexSetting.id,
       provider_name: codexSetting.provider_id,
       model_name: codexSetting.model_name,
+      reasoning_effort: providerDefaultReasoningEffort(codexSetting.provider_id, codexSetting.model_name),
       service_tier: null,
     });
     validateManagerConfig(next);

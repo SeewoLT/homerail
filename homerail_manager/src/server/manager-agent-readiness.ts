@@ -245,10 +245,18 @@ export function managerAgentReadiness(
 
   if (runtimeConfig.runtime_placement === "host") {
     const codex = codexStatus();
+    const providerBackedCodex = Boolean(config.llm_setting_id || config.provider_name);
     readiness.checks.codex = codex;
     readiness.live_voice_effective = config.live_voice_enabled
       && config.harness === "codex_appserver"
+      && !providerBackedCodex
       && codex.live_voice.supported;
+    if (config.live_voice_enabled && providerBackedCodex) {
+      blockers.push({
+        code: "codex_provider_live_voice_unsupported",
+        message: "Live Voice is not supported for provider-backed Codex Responses runtimes",
+      });
+    }
     if (!codex.available) {
       const binaryDiagnostic = codex.diagnostics.find((item) => (
         item.code === "codex_binary_not_found" || item.code === "codex_binary_unusable"

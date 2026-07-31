@@ -141,10 +141,12 @@ describe("Host Codex app-server protocol params", () => {
       apiKey: "sk-secret",
       baseUrl: "https://api.deepseek.com",
       protocol: "responses_compatible",
+      model_catalog_path: "/tmp/deepseek-models.json",
     });
     expect(args[0]).toBe("app-server");
     expect(args.join(" ")).toContain("model_providers.homerail_responses.wire_api=\"responses\"");
     expect(args.join(" ")).toContain("https://api.deepseek.com");
+    expect(args.join(" ")).toContain("model_catalog_json=\"/tmp/deepseek-models.json\"");
     expect(args.join(" ")).not.toContain("sk-secret");
   });
 

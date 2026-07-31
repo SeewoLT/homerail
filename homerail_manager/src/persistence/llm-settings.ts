@@ -8,6 +8,7 @@ import {
 } from "./secret-store.js";
 import { normalizeStatus, type ProviderStatus } from "./status.js";
 import { nowIso } from "./time.js";
+import { codexResponsesModelSupport } from "homerail-protocol";
 import {
   baseUrlForProtocol,
   canonicalModelNameForEndpoint,
@@ -1551,6 +1552,9 @@ export function resolveClaudeSdkBaseUrlForSetting(setting: LLMSetting): string |
 }
 
 export function resolveCodexResponsesBaseUrlForSetting(setting: LLMSetting): string | undefined {
+  if (codexResponsesModelSupport(setting.provider_id, setting.model_name) === "unsupported") {
+    return undefined;
+  }
   const provider = getProvider(setting.provider_id);
   const endpoint = _endpointForSetting(setting, provider);
   const lockedEndpoint = _isLockedCatalogEndpoint(setting.provider_id, endpoint);

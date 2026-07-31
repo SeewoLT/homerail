@@ -12,6 +12,7 @@ import {
   codexCommandForSpawn,
   codexCommandEnvironment,
   resolveUsableCodexBinary,
+  runCodexCommandSync,
   terminateCodexProcess,
 } from "./codex-binary.js";
 import {
@@ -27,6 +28,8 @@ import type { ManagerAgentRuntimeConfig } from "./manager-agent-runtime-config.j
 import {
   CODEX_RESPONSES_PROTOCOL,
   HOMERAIL_CODEX_MODEL_PROVIDER_ID,
+  buildCodexProviderModelCatalogFromBundled,
+  resolveCodexResponsesProviderProfile,
   buildManagerAgentSystemPrompt,
   codexResponsesAppServerArgs,
   codexResponsesProviderEnvironment,
@@ -181,6 +184,7 @@ interface AgentRunContext {
   abortSignal?: AbortSignal;
   reasoning_effort?: ManagerAgentReasoningEffort;
   service_tier?: string | null;
+  model_catalog_path?: string;
   /** Prompt without replayed chat history, used after resuming a persisted native thread. */
   resumedPrompt?: string;
 }
@@ -297,12 +301,13 @@ export function _setHostCodexAgentEventRunnerForTest(runner?: HostCodexAgentEven
   hostAgentEventRunnerOverride = runner;
 }
 
-export function _buildCodexAppServerArgsForTest(context?: Pick<AgentRunContext, "provider" | "baseUrl" | "apiKey" | "protocol">): string[] {
+export function _buildCodexAppServerArgsForTest(context?: Pick<AgentRunContext, "provider" | "baseUrl" | "apiKey" | "protocol" | "model_catalog_path">): string[] {
   return context?.protocol === CODEX_RESPONSES_PROTOCOL
     ? codexResponsesAppServerArgs({
         providerName: context.provider,
         baseUrl: context.baseUrl,
         apiKey: context.apiKey,
+        modelCatalogPath: context.model_catalog_path,
       })
     : ["app-server"];
 }
@@ -386,6 +391,26 @@ const CLIENT_TITLE = "HomeRail Host Codex Manager Agent";
 const DEFAULT_CODEX_BIN = "codex";
 const RESPONSE_TIMEOUT_MS = 60_000;
 const NATIVE_THREAD_CONTRACT_VERSION = "developer-instructions-v1";
+const BUNDLED_CODEX_CATALOG_CACHE = new Map<string, string>();
+
+function writePrivateFileAtomically(filePath: string, content: string): void {
+  try {
+    if (fs.readFileSync(filePath, "utf8") === content) return;
+  } catch {
+    // Missing or stale files are replaced below.
+  }
+  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporaryPath, content, { encoding: "utf8", mode: 0o600 });
+  try {
+    fs.renameSync(temporaryPath, filePath);
+  } finally {
+    try {
+      fs.unlinkSync(temporaryPath);
+    } catch {
+      // renameSync already consumed the temporary file on success.
+    }
+  }
+}
 
 interface HostCodexNativeSession {
   threadId: string;
@@ -2578,6 +2603,9 @@ class HostCodexAppServerAdapter {
       return;
     }
     try {
+      if (context.protocol === CODEX_RESPONSES_PROTOCOL) {
+        context.model_catalog_path = this.materializeProviderModelCatalog(context);
+      }
       this.process = spawn(codexCommandForSpawn(
         this.codexBin,
       ), _buildCodexAppServerArgsForTest(context), {
@@ -2628,6 +2656,8 @@ class HostCodexAppServerAdapter {
         tool_count: tools.length,
         home: os.homedir(),
         service_tier: context.service_tier ?? null,
+        reasoning_effort: context.reasoning_effort ?? null,
+        provider_model_catalog: Boolean(context.model_catalog_path),
       });
       const initResult = await this.sendRequest("initialize", {
         clientInfo: {
@@ -2836,6 +2866,38 @@ class HostCodexAppServerAdapter {
       env.CODEX_HOME = codexHome;
     }
     return codexCommandEnvironment(this.codexBin, env);
+  }
+
+  private materializeProviderModelCatalog(context: AgentRunContext): string | undefined {
+    if (!resolveCodexResponsesProviderProfile(context.provider)) return undefined;
+    let bundledCatalog = BUNDLED_CODEX_CATALOG_CACHE.get(this.codexBin);
+    if (!bundledCatalog) {
+      const result = runCodexCommandSync(this.codexBin, ["debug", "models", "--bundled"], {
+        timeoutMs: 15_000,
+        env: managerAgentChildEnv(),
+      });
+      if (result.status !== 0 || !result.stdout.trim()) {
+        throw new Error(`Unable to load bundled Codex model metadata: ${result.stderr.trim() || `exit ${result.status}`}`);
+      }
+      bundledCatalog = result.stdout;
+      BUNDLED_CODEX_CATALOG_CACHE.set(this.codexBin, bundledCatalog);
+    }
+    const catalog = buildCodexProviderModelCatalogFromBundled(
+      context.provider,
+      context.model,
+      bundledCatalog,
+    );
+    if (!catalog) return undefined;
+    const isolatedHome = path.join(getHomerailHome(), "runtime", "codex-provider-home");
+    const codexHome = path.join(isolatedHome, ".codex");
+    fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+    const digest = createHash("sha256")
+      .update(`${context.provider ?? "provider"}\0${context.model}`)
+      .digest("hex")
+      .slice(0, 16);
+    const catalogPath = path.join(codexHome, `models-${digest}.json`);
+    writePrivateFileAtomically(catalogPath, JSON.stringify(catalog));
+    return catalogPath;
   }
 
   private async sendRequest(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {

@@ -96,6 +96,10 @@ export interface AgentRunContext {
   model: string;
   apiKey: string;
   baseUrl: string;
+  /** Codex Responses reasoning effort selected by the runtime profile. */
+  reasoningEffort?: string;
+  /** Optional provider service tier; null means provider default. */
+  serviceTier?: string | null;
   /** Claude-compatible gateway credential header contract. */
   anthropicAuthMode?: "api_key" | "auth_token";
   maxIterations?: number;

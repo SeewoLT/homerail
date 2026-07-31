@@ -115,6 +115,69 @@ describe("agent runtime resolver", () => {
     });
   });
 
+  it("applies DeepSeek Codex capabilities to both Manager and DAG resolution", () => {
+    const setting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-flash",
+      api_key: "sk-test-deepseek",
+      is_active: true,
+      is_default: true,
+    });
+
+    const defaults = resolveAgentRuntimeConfig({
+      surface: "manager_agent",
+      settingId: setting.id,
+      harness: "codex_appserver",
+    });
+    expect(defaults).toMatchObject({
+      protocol: "responses_compatible",
+      base_url: "https://api.deepseek.com",
+      reasoning_effort: "high",
+      service_tier: null,
+    });
+
+    expect(resolveAgentRuntimeConfig({
+      surface: "dag",
+      settingId: setting.id,
+      agentType: "codex_appserver",
+      reasoningEffort: "none",
+    })).toMatchObject({
+      reasoning_effort: "none",
+      runtime_placement: "container",
+    });
+
+    expect(() => resolveAgentRuntimeConfig({
+      surface: "dag",
+      settingId: setting.id,
+      agentType: "codex_appserver",
+      reasoningEffort: "medium",
+    })).toThrow("Supported values: none, low, high, max");
+
+    expect(() => resolveAgentRuntimeConfig({
+      surface: "dag",
+      settingId: setting.id,
+      agentType: "codex_appserver",
+      serviceTier: "priority",
+    })).toThrow("does not support service tier 'priority'");
+  });
+
+  it("fails closed for DeepSeek models without Responses support", () => {
+    const setting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-pro",
+      api_key: "sk-test-deepseek",
+      is_active: true,
+      is_default: true,
+    });
+    expect(() => resolveAgentRuntimeConfig({
+      surface: "manager_agent",
+      settingId: setting.id,
+      harness: "codex_appserver",
+    })).toThrow("Responses is not supported for deepseek/deepseek-v4-pro");
+  });
+
   it("does not invent a Codex model when the catalog selection is missing", () => {
     expect(() => resolveAgentRuntimeConfig({
       surface: "manager_agent",
@@ -218,6 +281,25 @@ describe("agent runtime resolver", () => {
       runtime_placement: "host_shell",
       llm_setting_id: setting.id,
     });
+  });
+
+  it("does not silently replace an explicit Codex harness with Kimi Code", () => {
+    const setting = createSetting({
+      provider_id: "kimi",
+      endpoint_id: "kimi_coding_plan",
+      model_name: "kimi-k2.7-code",
+      api_key: "pk-test-kimi",
+      protocol: "openai_compatible",
+      plan_type: "coding_plan",
+      is_active: true,
+      is_default: true,
+    });
+
+    expect(() => resolveAgentRuntimeConfig({
+      surface: "manager_agent",
+      settingId: setting.id,
+      harness: "codex_appserver",
+    })).toThrow("Codex app-server requires a Responses endpoint");
   });
 
   it("uses Bearer auth for the Aliyun Token Plan Anthropic gateway", () => {

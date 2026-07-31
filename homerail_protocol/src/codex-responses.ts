@@ -11,10 +11,23 @@ export const CODEX_RESPONSES_PROTOCOL = "responses_compatible" as const;
 export const HOMERAIL_CODEX_MODEL_PROVIDER_ID = "homerail_responses" as const;
 export const HOMERAIL_CODEX_API_KEY_ENV = "HOMERAIL_CODEX_API_KEY" as const;
 
+const CODEX_PROVIDER_ISOLATION_FEATURES = [
+  "apps",
+  "plugins",
+  "remote_plugin",
+  "plugin_sharing",
+  "skill_search",
+  "skill_mcp_dependency_install",
+  "multi_agent",
+  "multi_agent_v2",
+] as const;
+
 export interface CodexResponsesProviderConfig {
   providerName?: string;
   baseUrl: string;
   apiKey?: string;
+  /** Isolated Codex model catalog generated for the selected provider/model. */
+  modelCatalogPath?: string;
 }
 
 function tomlString(value: string): string {
@@ -33,7 +46,7 @@ export function codexResponsesAppServerArgs(
   const baseUrl = normalizeCodexResponsesBaseUrl(input.baseUrl);
   if (!baseUrl) throw new Error("Codex Responses provider base URL is required");
   const providerName = input.providerName?.trim() || "HomeRail Responses";
-  return [
+  const args = [
     "app-server",
     "-c",
     `model_providers.${HOMERAIL_CODEX_MODEL_PROVIDER_ID}.name=${tomlString(providerName)}`,
@@ -49,7 +62,17 @@ export function codexResponsesAppServerArgs(
     `model_provider=${tomlString(HOMERAIL_CODEX_MODEL_PROVIDER_ID)}`,
     "-c",
     "skills.bundled.enabled=false",
+    "-c",
+    `shell_environment_policy.exclude=[${tomlString(HOMERAIL_CODEX_API_KEY_ENV)}]`,
   ];
+  const modelCatalogPath = input.modelCatalogPath?.trim();
+  if (modelCatalogPath) {
+    args.push("-c", `model_catalog_json=${tomlString(modelCatalogPath)}`);
+  }
+  for (const feature of CODEX_PROVIDER_ISOLATION_FEATURES) {
+    args.push("-c", `features.${feature}=false`);
+  }
+  return args;
 }
 
 export function codexResponsesProviderEnvironment(
