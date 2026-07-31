@@ -375,6 +375,11 @@ function selectGenerativeUiNode(payload: { node_id: string }): void {
 
 let mediaStream: MediaStream | null = null
 let codexLiveVoiceClient: CodexLiveVoiceClient | null = null
+// Session identity of the currently active Live Voice client. Async workspace
+// events are only applied when they belong to this session, so a reconnect
+// (or a stale event from a previous client) cannot yank the canvas to a
+// different/empty owner. See issue #168 acceptance criterion #3.
+let codexLiveVoiceSessionId: string | null = null
 let codexLiveVoiceMeterAudioContext: AudioContext | null = null
 let codexLiveVoiceMeterAnalyser: AnalyserNode | null = null
 let codexLiveVoiceMeterSource: MediaStreamAudioSourceNode | null = null
@@ -3858,6 +3863,19 @@ function applyCodexLiveVoiceState(state: CodexLiveVoiceState): void {
 function handleCodexLiveVoiceEvent(event: CodexLiveVoiceEvent): void {
   const eventWorkspace = event.workspace
   if (eventWorkspace && typeof eventWorkspace === 'object' && !Array.isArray(eventWorkspace)) {
+    // Only apply workspace updates that belong to the active Live Voice
+    // session. A reconnect creates a new client bound to a session id; events
+    // arriving from a previous/stale client (or a transient empty
+    // manager_run_id) must not overwrite the current canvas owner.
+    const eventSessionId = (eventWorkspace as { session_id?: unknown }).session_id
+    if (
+      codexLiveVoiceSessionId
+      && typeof eventSessionId === 'string'
+      && eventSessionId
+      && eventSessionId !== codexLiveVoiceSessionId
+    ) {
+      return
+    }
     workspace.value = eventWorkspace as VoiceWorkspace
     const latestUserText = [...workspace.value.conversation]
       .reverse()
@@ -3940,9 +3958,13 @@ async function startCodexLiveVoice(): Promise<void> {
   codexLiveVoiceClient = client
   try {
     await client.start()
+    // Only stamp the active session identity once the client has actually
+    // started, so a failed start does not claim the session.
+    if (codexLiveVoiceClient === client) codexLiveVoiceSessionId = sessionId
   } catch (err: any) {
     if (codexLiveVoiceClient !== client) return
     codexLiveVoiceClient = null
+    codexLiveVoiceSessionId = null
     stopCodexLiveVoiceMeter()
     applyCodexLiveVoiceState('error')
     error.value = err?.message || t('voice.liveVoice.error')
@@ -3952,6 +3974,7 @@ async function startCodexLiveVoice(): Promise<void> {
 async function stopCodexLiveVoice(notifyServer = true): Promise<void> {
   const client = codexLiveVoiceClient
   codexLiveVoiceClient = null
+  codexLiveVoiceSessionId = null
   if (client) await client.stop(notifyServer).catch(() => undefined)
   stopCodexLiveVoiceMeter()
   codexLiveVoiceMuted.value = false

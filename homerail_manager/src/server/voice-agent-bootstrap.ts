@@ -765,6 +765,19 @@ function syncWorkspaceRunIds(workspace: VoiceWorkspace, runIds: string[]): void 
   workspace.manager_run_id = unique.length ? unique[unique.length - 1] : null;
 }
 
+/**
+ * Decide whether the current Live Voice run-id list should be written back to
+ * the persisted workspace. An empty list (e.g. right after reconnect, before any
+ * Manager tool has run) must NEVER clear an existing `manager_run_id` pointer —
+ * doing so yanks the canvas owner and forces the UI back onto the canonical
+ * view. This mirrors the guard the non-Live-Voice turn path already applies.
+ *
+ * Extracted as a pure helper so the policy is unit-testable. See issue #168.
+ */
+export function shouldSyncLiveVoiceRunIds(runIds: readonly string[]): boolean {
+  return runIds.length > 0;
+}
+
 function syncVoiceWorkspaceTables(workspace: VoiceWorkspace): void {
   const db = getDb();
   const sessionStatus = workspace.progress_brief.status === "error" ? "failed" : workspace.progress_brief.status;
@@ -2129,7 +2142,7 @@ export async function createCodexLiveVoiceBinding(input: {
       // persisted canvas-owner pointer with an empty list. This keeps a
       // reconnect (or any flush before a Manager tool has run) from clearing
       // `manager_run_id` and forcing the UI back onto the canonical view.
-      if (state.createdRunIds.length) {
+      if (shouldSyncLiveVoiceRunIds(state.createdRunIds)) {
         syncWorkspaceRunIds(next, state.createdRunIds);
       }
       applyVoiceSurfaceFromResult(next, {

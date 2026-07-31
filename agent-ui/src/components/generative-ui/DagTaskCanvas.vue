@@ -325,7 +325,19 @@ onMounted(() => {
   window.addEventListener('online', scheduleRefresh)
   document.addEventListener('visibilitychange', onVisibilityChange)
   unsubscribeEvents = voiceWs.on('*', message => {
-    if (message.type.startsWith('DAG_') || message.type.startsWith('dag:')) scheduleRefresh()
+    if (!message.type.startsWith('DAG_') && !message.type.startsWith('dag:')) return
+    // The shared `voiceWs` singleton fans every DAG event to every mounted
+    // canvas. Only refresh when the event actually belongs to this canvas's
+    // run, so a reconnect burst of events from other runs does not churn this
+    // surface or race the owner pointer. See issue #168 acceptance criterion #3.
+    const payload = (message.payload ?? message.data ?? {}) as { runId?: unknown; run_id?: unknown }
+    const eventRunId = typeof payload.runId === 'string'
+      ? payload.runId
+      : typeof payload.run_id === 'string'
+        ? payload.run_id
+        : ''
+    if (!eventRunId || eventRunId !== props.runId) return
+    scheduleRefresh()
   })
   unsubscribeState = voiceWs.onStateChange(state => {
     if (state === 'connected') scheduleRefresh()
