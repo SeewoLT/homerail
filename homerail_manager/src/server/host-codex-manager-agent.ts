@@ -90,9 +90,12 @@ const PLUGIN_TOOL_FAILURE_STATUSES = new Set(["failed", "denied", "cancelled"]);
  * `error_code` (if any) should NOT be treated as a failure. Per the plugin-tool
  * protocol, `error_code` only accompanies terminal failure records, but we scope
  * defensively so an informational `error_code` on a `committed`/`running`
- * outcome is never misclassified as a tool error.
+ * outcome is never misclassified as a tool error. `projected` is included so the
+ * local-projection envelope invariant (projected is non-terminal and non-error,
+ * for host/worker parity) is enforced structurally even if a future change
+ * attaches an `error_code` to it.
  */
-const PLUGIN_TOOL_NON_FAILURE_STATUSES = new Set(["committed", "running"]);
+const PLUGIN_TOOL_NON_FAILURE_STATUSES = new Set(["committed", "running", "projected"]);
 
 /**
  * Inspect a raw plugin-tool response body (the value returned by
@@ -1933,11 +1936,19 @@ export function createManagerTools(
         // is_error by pluginToolResult) is not counted as a satisfied
         // required tool call. Mirrors how the adapter and successfulToolCallNames
         // classify results. See issue #168.
-        state.objectiveToolCalls.push({ name: "skill_view_present", success: result.is_error !== true });
-        return { content: [{
-          type: "text",
-          text: JSON.stringify(compactManagerAgentSkillViewPresentResult(resultBody, responseText)),
-        }] };
+        const presentIsError = result.is_error === true;
+        state.objectiveToolCalls.push({ name: "skill_view_present", success: !presentIsError });
+        // Propagate is_error onto the model-visible tool result too — otherwise a
+        // non-throwing failure envelope (data.status=failed) would still reach the
+        // model as success even though the objective is marked failed, recreating
+        // the #168 false-success on this path.
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(compactManagerAgentSkillViewPresentResult(resultBody, responseText)),
+          }],
+          is_error: presentIsError || undefined,
+        };
       },
     });
     tools.push({

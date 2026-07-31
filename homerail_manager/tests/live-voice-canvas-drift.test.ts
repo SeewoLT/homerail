@@ -67,6 +67,13 @@ describe("isPluginToolEnvelopeFailure (issue #168 false-success)", () => {
     expect(isPluginToolEnvelopeFailure({ status: "projected", committed: false })).toBe(false);
   });
 
+  it("does NOT flag a projected envelope even if a future error_code is attached", () => {
+    // Defensive: the projected invariant must hold structurally, not rely on the
+    // runtime never attaching error_code to a projection.
+    expect(isPluginToolEnvelopeFailure({ status: "projected", committed: false, error_code: "x" })).toBe(false);
+    expect(isPluginToolEnvelopeFailure({ success: true, data: { status: "projected", error_code: "x" } })).toBe(false);
+  });
+
   it("does not flag a committed outcome", () => {
     expect(isPluginToolEnvelopeFailure({ success: true, data: { status: "committed" } })).toBe(false);
   });
