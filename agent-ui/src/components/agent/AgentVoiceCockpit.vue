@@ -3985,11 +3985,12 @@ async function startCodexLiveVoice(): Promise<void> {
     },
   })
   codexLiveVoiceClient = client
+  // Stamp the session identity before `await client.start()` so workspace
+  // events arriving during startup are already session-validated. The catch
+  // block clears it on failure, so a failed start does not claim the session.
+  codexLiveVoiceSessionId = sessionId
   try {
     await client.start()
-    // Only stamp the active session identity once the client has actually
-    // started, so a failed start does not claim the session.
-    if (codexLiveVoiceClient === client) codexLiveVoiceSessionId = sessionId
   } catch (err: any) {
     if (codexLiveVoiceClient !== client) return
     codexLiveVoiceClient = null
