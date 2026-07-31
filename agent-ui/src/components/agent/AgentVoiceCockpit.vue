@@ -38,6 +38,7 @@ import {
   resolveVoiceSessionProjectRestore,
   VoiceSessionTransitionGuard,
 } from '@/agent/voice-session-restore'
+import { VoiceCurrentSessionWriter } from '@/agent/voice-current-session-writer'
 import {
   CodexLiveVoiceClient,
   codexLiveVoiceOwnsAudio,
@@ -367,6 +368,17 @@ function beginVoiceSessionTransition(): number {
 
 function completeVoiceSessionTransition(generation: number): void {
   if (voiceSessionTransitions.isCurrent(generation)) sessionTransitioning.value = false
+}
+
+// Serialized, generation-gated writer for the current-session server pointer.
+// Prevents rapid A→B session switches from leaving the server pointer stuck on
+// the stale A request (issue #168). See voice-current-session-writer.ts.
+const currentSessionWriter = new VoiceCurrentSessionWriter(
+  voiceSessionTransitions,
+  (sessionId) => setCurrentVoiceSession(sessionId),
+)
+function submitCurrentSessionWrite(sessionId: string | null, generation: number | undefined): void {
+  currentSessionWriter.submit(sessionId, generation)
 }
 
 function selectGenerativeUiNode(payload: { node_id: string }): void {
@@ -1491,8 +1503,8 @@ async function startSession(): Promise<void> {
       const res = await createVoiceSession(store.managerProjectId)
       if (!voiceSessionTransitions.isCurrent(generation)) return
       workspace.value = res.data
-      // 新建的会话成为当前会话，更新服务端指针。
-      void setCurrentVoiceSession(workspace.value?.session_id ?? null)
+      // 新建的会话成为当前会话，更新服务端指针（串行化，避免乱序写）。
+      submitCurrentSessionWrite(workspace.value?.session_id ?? null, generation)
     }
     rememberSpokenAssistantMessages(workspace.value)
     optimisticConversationItems.value = []
@@ -1536,7 +1548,7 @@ async function createFreshVoiceSession(): Promise<void> {
       resetSubmittedTranscriptClear()
       statusFocusApplied = false
       completeVoiceSessionTransition(generation)
-      void setCurrentVoiceSession(reusableSessionId)
+      submitCurrentSessionWrite(reusableSessionId, generation)
       await loadVoiceSessionShortcuts()
       void voiceSidebarRef.value?.refresh()
       void nextTick(() => voiceSidebarRef.value?.ensureGamepadFocus())
@@ -1553,7 +1565,7 @@ async function createFreshVoiceSession(): Promise<void> {
     resetSubmittedTranscriptClear()
     statusFocusApplied = false
     completeVoiceSessionTransition(generation)
-    void setCurrentVoiceSession(workspace.value?.session_id ?? null)
+    submitCurrentSessionWrite(workspace.value?.session_id ?? null, generation)
     await loadVoiceSessionShortcuts()
     void voiceSidebarRef.value?.refresh()
     void nextTick(() => voiceSidebarRef.value?.ensureGamepadFocus())
@@ -1619,7 +1631,9 @@ async function handleVoiceProjectSelected(_projectId: string): Promise<void> {
 
 async function handleVoiceSessionSelected(sessionId: string): Promise<void> {
   if (workspace.value?.session_id === sessionId) {
-    void setCurrentVoiceSession(sessionId)
+    // 已选中即当前：快速路径，无 generation token，串行化但不做 generation 复检
+    // （此分支与完整切换流程互斥，不会与 A→B 竞态并发）。
+    submitCurrentSessionWrite(sessionId, undefined)
     return
   }
   const previousWorkspace = workspace.value
@@ -1646,8 +1660,8 @@ async function handleVoiceSessionSelected(sessionId: string): Promise<void> {
     const runId = workspace.value?.manager_run_id
     if (runId) store.setRunId(runId)
     completeVoiceSessionTransition(generation)
-    // 更新服务端当前 session 指针，让其他设备刷新后看到同一个 session。
-    void setCurrentVoiceSession(sessionId)
+    // 更新服务端当前 session 指针（串行化 + generation 复检，避免 A→B 乱序写）。
+    submitCurrentSessionWrite(sessionId, generation)
   } catch (err: any) {
     if (voiceSessionTransitions.isCurrent(generation)) {
       workspace.value = previousWorkspace
@@ -3955,8 +3969,20 @@ async function startCodexLiveVoice(): Promise<void> {
       if (codexLiveVoiceClient === client) startCodexLiveVoiceMeter(stream)
       return stream
     },
-    onState: applyCodexLiveVoiceState,
-    onEvent: handleCodexLiveVoiceEvent,
+    // Bind both callbacks to this specific client instance: once stopCodexLiveVoice
+    // (or a newer start) replaces codexLiveVoiceClient, any in-flight callback from
+    // this client (workspace, transcript, state, error) is dropped. This closes the
+    // fail-open gap — the previous shared callbacks kept accepting events from a
+    // stale/old client whenever codexLiveVoiceSessionId was null. Mirrors the
+    // getUserMedia guard above. See issue #168 acceptance criterion #3.
+    onState: (state) => {
+      if (codexLiveVoiceClient !== client) return
+      applyCodexLiveVoiceState(state)
+    },
+    onEvent: (event) => {
+      if (codexLiveVoiceClient !== client) return
+      handleCodexLiveVoiceEvent(event)
+    },
   })
   codexLiveVoiceClient = client
   try {
