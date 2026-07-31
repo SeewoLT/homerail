@@ -629,15 +629,23 @@ export function setupWorkerWebSocket(
               msg.data,
             );
             // Persist per-node token usage when the worker reports a
-            // "usage" stream event. The worker emits cumulative totals,
-            // so we append a record; the metrics endpoint treats the last
-            // record per node as authoritative.
+            // "usage" stream event. Each execution scope is cumulative;
+            // the metrics endpoint keeps the latest snapshot per scope and
+            // then sums those scopes into the node lifetime total.
             if (msg.data.event === "usage") {
               const rawUsage = msg.data.usage as { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | undefined;
               if (rawUsage) {
+                const scope = {
+                  ...(typeof msg.data.session_id === "string" ? { session_id: msg.data.session_id } : {}),
+                  ...(typeof msg.data.round_id === "string" ? { round_id: msg.data.round_id } : {}),
+                  ...(typeof msg.data.generation === "number" ? { generation: msg.data.generation } : {}),
+                  ...(typeof msg.data.command_id === "string" ? { command_id: msg.data.command_id } : {}),
+                  ...(typeof msg.data.execution_id === "string" ? { execution_id: msg.data.execution_id } : {}),
+                };
                 appendNodeUsage({
                   runId,
                   nodeId,
+                  ...(Object.keys(scope).length > 0 ? { scope } : {}),
                   usage: {
                     input_tokens: Number(rawUsage.input_tokens ?? 0),
                     output_tokens: Number(rawUsage.output_tokens ?? 0),

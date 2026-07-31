@@ -4266,7 +4266,9 @@ function _withDispatchCredentials(agentConfig: DAGAgentConfig): DispatchCredenti
         llm: {
           ...agentConfig.llm,
           provider: resolved.provider_name,
+          provider_display_name: resolved.provider_display_name,
           model: resolved.model,
+          model_display_name: resolved.model_display_name,
           api_key: resolved.api_key,
           base_url: resolved.base_url,
           protocol: resolved.protocol,

@@ -8,6 +8,7 @@ import type {
 } from "../orchestration/graph.js";
 import type { DAGRunCounters, DAGRunLimits } from "../runtime/active-runs.js";
 import type { DagRunStatus } from "./status.js";
+import type { DagNodeUsageScope } from "homerail-protocol";
 
 export interface PersistedGraphNode {
   node_id: string;
@@ -119,12 +120,15 @@ export interface ChatEntry {
   timestamp: number;
 }
 
-/** Token usage snapshot reported by a worker for a single node. The worker
- * emits cumulative totals once per node (on handoff, normal completion, or
- * error). Persisted to Manager SQLite; the last record per node wins. */
+/**
+ * Token usage snapshot reported by a Worker for one node turn. Snapshots from
+ * the same scope replace one another; final metrics sum the latest snapshot
+ * from every scope to produce a cumulative node total.
+ */
 export interface NodeUsageRecord {
   runId: string;
   nodeId: string;
+  scope?: DagNodeUsageScope;
   usage: {
     input_tokens: number;
     output_tokens: number;

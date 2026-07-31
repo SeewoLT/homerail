@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
+import type { DAGRunMetrics } from '@/api/types/dag.types'
 import { i18n } from '@/plugins/i18n'
 import DagNodeDetailDrawer from './DagNodeDetailDrawer.vue'
 
@@ -177,6 +178,8 @@ describe('DagNodeDetailDrawer', () => {
             tool_calls: 0,
             tool_failures: 0,
             tokens: null,
+            execution: null,
+            usage_scope: 'node_cumulative',
             usage_available: false,
             duration_ms: null,
             num_turns: null,
@@ -187,7 +190,7 @@ describe('DagNodeDetailDrawer', () => {
         totals: {
           tool_calls: 0,
           tool_failures: 0,
-          tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0 },
+          tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0 },
           usage_available: false,
           cost_usd: null,
         },
@@ -204,5 +207,147 @@ describe('DagNodeDetailDrawer', () => {
       .toContain('Manager logic · QUORUM')
     expect(root.textContent).toContain('no worker or model is dispatched')
     expect(root.querySelector('.dag-detail-drawer')?.textContent).not.toContain('tokens')
+  })
+
+  it('shows persisted execution identity and updates cumulative token categories live', async () => {
+    const metrics = ref<DAGRunMetrics>({
+      run_id: 'run-1',
+      status: 'completed',
+      nodes: {
+        prepare_repository: {
+          node_id: 'prepare_repository',
+          node_name: 'prepare_repository',
+          agent_name: 'prepare_repository',
+          status: 'completed',
+          tool_calls: 3,
+          tool_failures: 0,
+          tokens: {
+            input: 12_000,
+            output: 3_000,
+            cache_read: 4_000,
+            cache_creation: 1_000,
+            total: 20_000,
+          },
+          execution: {
+            provider_id: 'anthropic',
+            provider_display_name: 'Anthropic',
+            model_name: 'claude-sonnet-4-20250514',
+            model_display_name: 'Claude Sonnet 4',
+            agent_backend: 'claude-sdk',
+            protocol: 'anthropic_compatible',
+            context_limit: 200_000,
+            context_usage_pct: 10,
+          },
+          usage_scope: 'node_cumulative',
+          usage_available: true,
+          duration_ms: 2_500,
+          num_turns: 2,
+          started_at: null,
+          completed_at: null,
+        },
+      },
+      totals: {
+        tool_calls: 3,
+        tool_failures: 0,
+        tokens: {
+          input: 12_000,
+          output: 3_000,
+          cache_read: 4_000,
+          cache_creation: 1_000,
+          total: 20_000,
+        },
+        usage_available: true,
+        cost_usd: null,
+      },
+    })
+    const Harness = defineComponent({
+      setup() {
+        return () => h(DagNodeDetailDrawer, {
+          metrics: metrics.value,
+          selectedNodeId: 'prepare_repository',
+          open: true,
+          panelFocus: 'logs',
+          expandedPanels: new Set(['logs']),
+        })
+      },
+    })
+
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(Harness)
+    app.use(i18n)
+    app.mount(root)
+
+    expect(root.querySelector('[data-testid="dag-execution-model"]')?.textContent).toContain('Claude Sonnet 4')
+    expect(root.textContent).toContain('claude-sonnet-4-20250514')
+    expect(root.querySelector('[data-testid="dag-execution-provider"]')?.textContent).toContain('Anthropic')
+    expect(root.querySelector('[data-testid="dag-execution-backend"]')?.textContent).toContain('claude-sdk')
+    expect(root.querySelector('[data-testid="dag-execution-protocol"]')?.textContent).toContain('anthropic_compatible')
+    expect(root.querySelector('[data-testid="dag-execution-total-tokens"]')?.textContent).toContain('20.0K')
+    expect(root.textContent).toContain('12.0K')
+    expect(root.textContent).toContain('3.0K')
+    expect(root.textContent).toContain('4.0K')
+    expect(root.textContent).toContain('1.0K')
+    expect(root.textContent).toContain('10.0%')
+    expect(root.textContent).toContain('200.0K')
+    expect(root.textContent).toContain('Cumulative for this node')
+
+    metrics.value.nodes.prepare_repository.tokens = {
+      input: 13_000,
+      output: 4_000,
+      cache_read: 4_000,
+      cache_creation: 1_000,
+      total: 22_000,
+    }
+    await nextTick()
+
+    expect(root.querySelector('[data-testid="dag-execution-total-tokens"]')?.textContent).toContain('22.0K')
+    expect(root.querySelector('.dag-detail-drawer')).not.toBeNull()
+  })
+
+  it('renders unavailable worker identity and usage as dashes instead of zeroes', () => {
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(DagNodeDetailDrawer, {
+      metrics: {
+        run_id: 'run-1',
+        status: 'running',
+        nodes: {
+          prepare_repository: {
+            node_id: 'prepare_repository',
+            node_name: 'prepare_repository',
+            agent_name: 'prepare_repository',
+            status: 'running',
+            tool_calls: 0,
+            tool_failures: 0,
+            tokens: null,
+            execution: null,
+            usage_scope: 'node_cumulative',
+            usage_available: false,
+            duration_ms: null,
+            num_turns: null,
+            started_at: null,
+            completed_at: null,
+          },
+        },
+        totals: {
+          tool_calls: 0,
+          tool_failures: 0,
+          tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0 },
+          usage_available: false,
+          cost_usd: null,
+        },
+      },
+      selectedNodeId: 'prepare_repository',
+      open: true,
+      panelFocus: 'logs',
+      expandedPanels: new Set(['logs']),
+    })
+    app.use(i18n)
+    app.mount(root)
+
+    expect(root.querySelector('[data-testid="dag-execution-model"]')?.textContent?.trim()).toBe('—')
+    expect(root.querySelector('[data-testid="dag-execution-total-tokens"]')?.textContent?.trim()).toBe('—')
+    expect(root.querySelector('[data-testid="dag-node-execution"]')?.textContent).not.toContain('0 tokens')
   })
 })

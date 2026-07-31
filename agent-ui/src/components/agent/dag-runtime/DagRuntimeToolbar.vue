@@ -50,7 +50,7 @@ const executionStatusLabel = computed(() => {
 const totals = computed(() => {
   if (props.metrics) {
     return {
-      tokens: props.metrics.totals.tokens.input + props.metrics.totals.tokens.output + props.metrics.totals.tokens.cache_read,
+      tokens: props.metrics.totals.tokens.total,
       toolCalls: props.metrics.totals.tool_calls,
       failures: props.metrics.totals.tool_failures,
       available: props.metrics.totals.usage_available,
@@ -59,7 +59,12 @@ const totals = computed(() => {
   // 降级：从 store.nodes 本地累加（无 usage 时）
   let tokens = 0, calls = 0, fails = 0
   for (const n of store.nodes) {
-    if (n.token_usage) tokens += n.token_usage.input_tokens + n.token_usage.output_tokens + n.token_usage.cache_read_input_tokens
+    if (n.token_usage) {
+      tokens += n.token_usage.input_tokens
+        + n.token_usage.output_tokens
+        + n.token_usage.cache_read_input_tokens
+        + n.token_usage.cache_creation_input_tokens
+    }
   }
   return { tokens, toolCalls: calls, failures: fails, available: tokens > 0 }
 })

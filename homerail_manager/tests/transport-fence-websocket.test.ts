@@ -584,6 +584,75 @@ describe("round-aware terminal websocket transport", () => {
   });
 
   it.each(["worker", "node"] as const)(
+    "persists current fenced %s usage with its cumulative execution scope",
+    async (sourceType) => {
+      const runId = `run-${sourceType}-usage-scope`;
+      const envelope = startRoundTwo(runId);
+      const sessionId = envelope.sessionId!;
+      const commandId = `${runId}-command-2`;
+      const { server, ws, sourceId } = await openTransport(sourceType, runId, () => undefined);
+      const lease = acquireDagActorLease({
+        run_id: runId,
+        actor_id: "researcher",
+        target_type: sourceType,
+        target_id: sourceId,
+      });
+
+      try {
+        ws.send(JSON.stringify({
+          type: "stream",
+          data: {
+            event: "usage",
+            run_id: runId,
+            node_id: "actor",
+            session_id: sessionId,
+            round_id: "round-0002",
+            actor_id: "researcher",
+            generation: 1,
+            lease_generation: lease.lease_generation,
+            command_id: commandId,
+            execution_id: "execution-1",
+            usage: {
+              input_tokens: 101,
+              output_tokens: 23,
+              cache_read_input_tokens: 17,
+              cache_creation_input_tokens: 5,
+            },
+            duration_ms: 1_250,
+            num_turns: 2,
+          },
+        }));
+        await delay(50);
+
+        expect(loadNodeUsages(runId)).toEqual([
+          expect.objectContaining({
+            runId,
+            nodeId: "actor",
+            scope: {
+              session_id: sessionId,
+              round_id: "round-0002",
+              generation: 1,
+              command_id: commandId,
+              execution_id: "execution-1",
+            },
+            usage: {
+              input_tokens: 101,
+              output_tokens: 23,
+              cache_read_input_tokens: 17,
+              cache_creation_input_tokens: 5,
+            },
+            duration_ms: 1_250,
+            num_turns: 2,
+          }),
+        ]);
+      } finally {
+        ws.terminate();
+        await closeServer(server);
+      }
+    },
+  );
+
+  it.each(["worker", "node"] as const)(
     "routes only current fenced %s Actor surface patches without mirroring raw body data",
     async (sourceType) => {
       const runId = `run-${sourceType}-actor-surface-patch`;

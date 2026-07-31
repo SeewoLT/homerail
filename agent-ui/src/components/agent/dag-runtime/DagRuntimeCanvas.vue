@@ -113,7 +113,7 @@ function nodeRadius(metrics: DAGNodeMetrics | undefined, semantic: DagRuntimeNod
   // 基础半径 28（触摸目标 ≥44px 直径），按 token 消耗适度放大（对数缩放）
   const base = 28
   if (!metrics?.tokens) return base
-  const total = metrics.tokens.input + metrics.tokens.output + metrics.tokens.cache_read
+  const total = metrics.tokens.total
   if (total <= 0) return base
   return Math.min(38, base + Math.log2(total / 1000 + 1) * 2.5)
 }
@@ -124,7 +124,7 @@ function badgeTexts(metrics?: DAGNodeMetrics): string[] {
   if (metrics.tool_calls > 0) badges.push(`🔧${metrics.tool_calls}`)
   if (metrics.tool_failures > 0) badges.push(`✗${metrics.tool_failures}`)
   if (metrics.tokens) {
-    const total = metrics.tokens.input + metrics.tokens.output + metrics.tokens.cache_read
+    const total = metrics.tokens.total
     if (total > 0) badges.push(fmtTokens(total))
   }
   return badges
@@ -588,7 +588,7 @@ function drawBadges(ctx: CanvasRenderingContext2D, node: RuntimeNode): void {
     badges.push({ text: `✗${m.tool_failures}`, color: canvasPalette.danger })
   }
   if (m.tokens) {
-    const total = m.tokens.input + m.tokens.output + m.tokens.cache_read
+    const total = m.tokens.total
     if (total > 0) {
       badges.push({ text: fmtTokens(total), color: canvasPalette.success })
     }
