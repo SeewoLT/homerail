@@ -49,6 +49,17 @@ export function authorizeAdminProxyRequest(
   return { allowed: true }
 }
 
+/**
+ * Browsers do not consistently forward Sec-Fetch-Site on WebSocket upgrades.
+ * Once the UI proxy has independently verified the browser-facing Origin and
+ * Host, it can restore the same-origin marker for Manager's upgrade boundary.
+ */
+export function trustedWebSocketProxyFetchSite(
+  request: UiMutationRequestTrust,
+): 'same-origin' | undefined {
+  return authorizeAdminProxyRequest(request).allowed ? 'same-origin' : undefined
+}
+
 function singleHeader(value: string | string[] | undefined): string | undefined {
   if (typeof value !== 'string' || !value || /[\r\n]/.test(value)) return undefined
   return value

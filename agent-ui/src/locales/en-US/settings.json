@@ -8,6 +8,7 @@
     "git": "Git",
     "providers": "Providers & Models",
     "voice": "Voice",
+    "experimental": "Experimental",
     "device": "WireGuard",
     "skills": "Skills",
     "plugins": "Plugins",
@@ -20,6 +21,7 @@
     "git": "Manage Git server tokens. Projects and repositories are linked when adding a directory.",
     "providers": "Manage providers, model capabilities, and locally encrypted model settings.",
     "voice": "Configure voice output and button controls.",
+    "experimental": "Manage interface capabilities that are still being refined.",
     "skills": "Inspect capabilities detected from the static Skills directory.",
     "plugins": "Inspect resolved plugin capabilities and enable or disable optional scenes.",
     "default": "Configure local capabilities used by HomeRail Agent UI."
@@ -78,6 +80,15 @@
         "not-available": "No newer update on this channel",
         "error": "Update check failed"
       }
+    }
+  },
+  "experimental": {
+    "title": "Experimental features",
+    "description": "These features are still being validated and may change as feedback comes in.",
+    "badge": "Experimental",
+    "liveVoiceImmersive": {
+      "title": "Live Voice immersive interface",
+      "description": "After Codex Live Voice connects, automatically collapse the top bar, sidebars, and composer so only generative UI and the bottom input waveform remain. Restore the full interface when the connection ends."
     }
   },
   "environment": {
