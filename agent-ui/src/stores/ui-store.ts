@@ -39,6 +39,8 @@ import {
 } from '@/appearance/appearance-registry'
 
 export type NotificationType = 'success' | 'error' | 'warning' | 'info'
+export const LIVE_VOICE_IMMERSIVE_STORAGE_KEY =
+  'homerail.experimental.liveVoiceImmersive'
 
 export interface Notification {
   id: string
@@ -73,6 +75,10 @@ export const useUiStore = defineStore('ui', () => {
   const notifications = ref<Notification[]>([])
 
   const locale = useStorage<AppLocale>(LOCALE_STORAGE_KEY, resolveInitialLocale())
+  const liveVoiceImmersiveEnabled = useStorage<boolean>(
+    LIVE_VOICE_IMMERSIVE_STORAGE_KEY,
+    false,
+  )
 
   // --------------------------------------------------------------------------
   // Getters
@@ -187,6 +193,10 @@ export const useUiStore = defineStore('ui', () => {
     applyLocaleToDocument(normalized)
   }
 
+  function setLiveVoiceImmersiveEnabled(enabled: boolean) {
+    liveVoiceImmersiveEnabled.value = enabled
+  }
+
   // --------------------------------------------------------------------------
   // Initialization
   // --------------------------------------------------------------------------
@@ -218,6 +228,7 @@ export const useUiStore = defineStore('ui', () => {
     loadingMessage,
     notifications,
     locale,
+    liveVoiceImmersiveEnabled,
 
     // Getters
     isDarkMode,
@@ -239,6 +250,7 @@ export const useUiStore = defineStore('ui', () => {
     showWarning,
     showInfo,
     setLocale,
+    setLiveVoiceImmersiveEnabled,
     initialize
   }
 })

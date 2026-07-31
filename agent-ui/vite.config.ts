@@ -8,6 +8,7 @@ import viteCompression from 'vite-plugin-compression2'
 import {
   authorizeAdminProxyRequest,
   isProtectedApiMutation,
+  trustedWebSocketProxyFetchSite,
 } from './src/admin-proxy-trust'
 
 // Dev server gzip compression plugin
@@ -113,6 +114,17 @@ export default defineConfig({
         changeOrigin: true,
         secure: false,
         rewrite: (path) => path,
+        configure(proxy) {
+          proxy.on('proxyReqWs', (proxyReq, req) => {
+            const fetchSite = trustedWebSocketProxyFetchSite({
+              protocol: 'encrypted' in req.socket && req.socket.encrypted ? 'https' : 'http',
+              host: req.headers.host,
+              origin: req.headers.origin,
+              secFetchSite: req.headers['sec-fetch-site'],
+            })
+            if (fetchSite) proxyReq.setHeader('sec-fetch-site', fetchSite)
+          })
+        },
       },
       '/artifacts': {
         target: managerHttpTarget,

@@ -8,6 +8,7 @@
     "git": "Git",
     "providers": "供應商與模型",
     "voice": "語音",
+    "experimental": "實驗性功能",
     "device": "WireGuard",
     "skills": "Skills",
     "plugins": "外掛",
@@ -20,6 +21,7 @@
     "git": "管理 Git Server token。項目和倉庫在新增目錄時關聯。",
     "providers": "維護供應商、模型能力和本地加密保存的模型配置。",
     "voice": "配置語音播報和按鍵控制。",
+    "experimental": "管理仍在打磨、可能繼續調整的介面能力。",
     "skills": "查看從靜態 Skills 目錄偵測到的能力說明。",
     "plugins": "查看已解析的外掛能力，並啓用或停用可選場景。",
     "default": "配置 HomeRail Agent UI 使用的本地能力。"
@@ -78,6 +80,15 @@
         "not-available": "此通道暫無更高版本",
         "error": "更新檢查失敗"
       }
+    }
+  },
+  "experimental": {
+    "title": "實驗性功能",
+    "description": "這些功能仍在驗證中，可能隨著使用回饋繼續調整。",
+    "badge": "實驗性",
+    "liveVoiceImmersive": {
+      "title": "Live Voice 沉浸介面",
+      "description": "Codex Live Voice 連線成功後自動收起頂部列、側欄和輸入區，只保留生成式 UI 與底部音量波形；中斷連線後自動恢復完整介面。"
     }
   },
   "environment": {
