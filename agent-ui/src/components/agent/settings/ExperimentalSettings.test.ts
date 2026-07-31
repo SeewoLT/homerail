@@ -24,7 +24,7 @@ describe('ExperimentalSettings', () => {
     root = null
   })
 
-  it('enables Live Voice immersion by default and persists the device toggle', async () => {
+  it('disables Live Voice immersion by default and persists the device toggle', async () => {
     const pinia = createPinia()
     root = document.createElement('div')
     document.body.appendChild(root)
@@ -38,14 +38,14 @@ describe('ExperimentalSettings', () => {
       '[data-testid="agent-settings-live-voice-immersive-toggle"]'
     )
 
-    expect(uiStore.liveVoiceImmersiveEnabled).toBe(true)
-    expect(toggle?.getAttribute('aria-checked')).toBe('true')
+    expect(uiStore.liveVoiceImmersiveEnabled).toBe(false)
+    expect(toggle?.getAttribute('aria-checked')).toBe('false')
 
     toggle?.click()
     await nextTick()
 
-    expect(uiStore.liveVoiceImmersiveEnabled).toBe(false)
-    expect(toggle?.getAttribute('aria-checked')).toBe('false')
-    expect(localStorage.getItem(LIVE_VOICE_IMMERSIVE_STORAGE_KEY)).toBe('false')
+    expect(uiStore.liveVoiceImmersiveEnabled).toBe(true)
+    expect(toggle?.getAttribute('aria-checked')).toBe('true')
+    expect(localStorage.getItem(LIVE_VOICE_IMMERSIVE_STORAGE_KEY)).toBe('true')
   })
 })

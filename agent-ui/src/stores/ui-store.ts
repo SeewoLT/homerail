@@ -77,7 +77,7 @@ export const useUiStore = defineStore('ui', () => {
   const locale = useStorage<AppLocale>(LOCALE_STORAGE_KEY, resolveInitialLocale())
   const liveVoiceImmersiveEnabled = useStorage<boolean>(
     LIVE_VOICE_IMMERSIVE_STORAGE_KEY,
-    true,
+    false,
   )
 
   // --------------------------------------------------------------------------
