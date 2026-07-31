@@ -339,6 +339,7 @@ function _usageScopeKey(record: NodeUsageRecord): string {
     scope.round_id ?? "",
     scope.generation ?? null,
     scope.command_id ?? "",
+    scope.execution_id ?? "",
   ]);
 }
 

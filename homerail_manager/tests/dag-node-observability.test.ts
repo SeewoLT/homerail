@@ -131,7 +131,13 @@ describe("DAG node observability", () => {
     appendNodeUsage({
       runId,
       nodeId: "work",
-      scope: { session_id: "session-1", round_id: "round-0002", generation: 1, command_id: "command-2" },
+      scope: {
+        session_id: "session-1",
+        round_id: "round-0002",
+        generation: 1,
+        command_id: "command-2",
+        execution_id: "execution-1",
+      },
       usage: {
         input_tokens: 7,
         output_tokens: 2,
@@ -185,7 +191,13 @@ describe("DAG node observability", () => {
     appendNodeUsage({
       runId,
       nodeId: "work",
-      scope: { session_id: "session-1", round_id: "round-0002", generation: 1, command_id: "command-2" },
+      scope: {
+        session_id: "session-1",
+        round_id: "round-0002",
+        generation: 1,
+        command_id: "command-2",
+        execution_id: "execution-1",
+      },
       usage: {
         input_tokens: 9,
         output_tokens: 4,
@@ -203,6 +215,35 @@ describe("DAG node observability", () => {
       cache_read: 5,
       cache_creation: 3,
       total: 39,
+    });
+
+    // A contract-correction prompt is a separate billed execution even when
+    // it reuses the same session, round, generation, and command fence.
+    appendNodeUsage({
+      runId,
+      nodeId: "work",
+      scope: {
+        session_id: "session-1",
+        round_id: "round-0002",
+        generation: 1,
+        command_id: "command-2",
+        execution_id: "execution-2",
+      },
+      usage: {
+        input_tokens: 3,
+        output_tokens: 2,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      timestamp: 6,
+    });
+    const corrected = await metrics(port, runId);
+    expect(corrected.data.nodes.work.tokens).toEqual({
+      input: 24,
+      output: 12,
+      cache_read: 5,
+      cache_creation: 3,
+      total: 44,
     });
   });
 

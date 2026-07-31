@@ -4,6 +4,7 @@
  * @version 0.1.0
  */
 
+import { randomUUID } from "node:crypto";
 import {
   DEFAULT_MANAGER_AGENT_RUNTIME_AGENT_TYPE,
   normalizeManagerAgentRuntimeAgentType,
@@ -421,6 +422,7 @@ export async function runPrompt(
   // Declared outside try so emitUsage() (a closure defined after the
   // try/catch) and the catch handler can read them even on early failure.
   const nodeUsage: AgentUsage = {};
+  const usageExecutionId = randomUUID();
   let nodeDurationMs: number | undefined;
   let nodeNumTurns: number | undefined;
   let lastUsageEmission: string | undefined;
@@ -746,6 +748,7 @@ export async function runPrompt(
     lastUsageEmission = signature;
     sendStream({
       event: "usage",
+      execution_id: usageExecutionId,
       usage,
       duration_ms: nodeDurationMs,
       num_turns: nodeNumTurns,

@@ -182,6 +182,8 @@ describe("prompt runner", () => {
       .filter((message) => message.type === "stream" && message.data?.event === "usage");
     expect(usageEvents).toHaveLength(3);
     expect(usageEvents.map((message) => message.data.usage.input_tokens)).toEqual([10, 20, 20]);
+    expect(new Set(usageEvents.map((message) => message.data.execution_id)).size).toBe(1);
+    expect(usageEvents[0]?.data.execution_id).toEqual(expect.any(String));
     expect(usageEvents.at(-1)?.data).toMatchObject({
       session_id: "session-live-usage",
       round_id: "round-0002",

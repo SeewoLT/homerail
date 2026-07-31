@@ -611,6 +611,7 @@ describe("round-aware terminal websocket transport", () => {
             generation: 1,
             lease_generation: lease.lease_generation,
             command_id: commandId,
+            execution_id: "execution-1",
             usage: {
               input_tokens: 101,
               output_tokens: 23,
@@ -632,6 +633,7 @@ describe("round-aware terminal websocket transport", () => {
               round_id: "round-0002",
               generation: 1,
               command_id: commandId,
+              execution_id: "execution-1",
             },
             usage: {
               input_tokens: 101,

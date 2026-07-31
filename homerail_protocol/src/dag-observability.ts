@@ -36,6 +36,8 @@ export interface DagNodeUsageScope {
   round_id?: string;
   generation?: number;
   command_id?: string;
+  /** One Worker prompt execution, including contract-correction attempts. */
+  execution_id?: string;
 }
 
 export const DAG_NODE_USAGE_AGGREGATION = "node_cumulative" as const;

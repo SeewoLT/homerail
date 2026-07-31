@@ -625,6 +625,7 @@ export function setupNodeWebSocket(
                   ...(typeof msg.data.round_id === "string" ? { round_id: msg.data.round_id } : {}),
                   ...(typeof msg.data.generation === "number" ? { generation: msg.data.generation } : {}),
                   ...(typeof msg.data.command_id === "string" ? { command_id: msg.data.command_id } : {}),
+                  ...(typeof msg.data.execution_id === "string" ? { execution_id: msg.data.execution_id } : {}),
                 };
                 appendNodeUsage({
                   runId,
