@@ -20,6 +20,7 @@ export interface ManagerAgentRuntimeConfig {
   anthropic_auth_mode?: "api_key" | "auth_token";
   agent_type: string;
   runtime_placement: ManagerAgentHostRuntimePlacement;
+  llm_setting_id?: string;
   project_id?: string;
   project_workspace?: string;
   reasoning_effort?: ManagerAgentReasoningEffort;

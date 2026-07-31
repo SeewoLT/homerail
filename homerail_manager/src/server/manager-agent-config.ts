@@ -5,6 +5,7 @@ import {
   saveManagerAgentConfig,
 } from "../persistence/manager-agent-config.js";
 import {
+  findActiveCodexCompatibleSetting,
   findActiveClaudeSdkCompatibleSetting,
   findActiveLlmRuntimeSetting,
 } from "../persistence/llm-settings.js";
@@ -143,23 +144,19 @@ function patchedConfig(patch: Record<string, unknown>): ManagerAgentConfig {
     ? current.service_tier
     : normalizedServiceTier(serviceTier);
   if (harness === "codex_appserver") {
-    const staleRuntimeSelection = Boolean(settingId || providerName);
-    const currentCodexModel = current.harness === "codex_appserver" ? current.model_name : null;
+    const switchingToCodex = current.harness !== "codex_appserver";
+    const useAutomaticProvider = switchingToCodex && settingId === undefined && providerName === undefined;
+    const preferredSetting = useAutomaticProvider
+      ? findActiveCodexCompatibleSetting()
+      : undefined;
     return {
       ...current,
       harness,
       live_voice_enabled: liveVoiceEnabled,
       live_voice_voice: liveVoiceVoice,
-      llm_setting_id: null,
-      provider_name: null,
-      // Ignore stale HomeRail provider/model patches while Codex is active.
-      // When switching to Codex without an explicit model, leave this null so
-      // validateAndSaveManagerAgentConfig can use the live app-server catalog.
-      model_name: staleRuntimeSelection
-        ? currentCodexModel
-        : modelName === undefined
-          ? currentCodexModel
-          : modelName,
+      llm_setting_id: preferredSetting?.id ?? (useAutomaticProvider ? null : mergedSettingId),
+      provider_name: preferredSetting?.provider_id ?? (useAutomaticProvider ? null : mergedProviderName),
+      model_name: preferredSetting?.model_name ?? (useAutomaticProvider && modelName === undefined ? null : mergedModelName),
       reasoning_effort: mergedReasoningEffort,
       service_tier: mergedServiceTier,
       generative_ui_mode: generativeUiMode,
@@ -275,7 +272,10 @@ export async function validateAndSaveManagerAgentConfig(
       "service_tier",
     ].some((key) => Object.prototype.hasOwnProperty.call(patch, key));
     try {
-      if (!next.model_name || modelSelectionChanged) {
+      const providerBacked = Boolean(next.llm_setting_id || next.provider_name);
+      if (providerBacked) {
+        validateManagerConfig(next);
+      } else if (!next.model_name || modelSelectionChanged) {
         const catalog = await (options.loadCodexModels ?? listCodexModels)();
         if (!next.model_name) {
           const selected = preferredCodexConfig(catalog);
@@ -290,7 +290,7 @@ export async function validateAndSaveManagerAgentConfig(
         validateCodexReasoningEffort(next, catalog);
         validateCodexServiceTier(next, catalog);
       }
-      validateManagerConfig(next);
+      if (!providerBacked) validateManagerConfig(next);
     } catch (error) {
       throw validationError(error);
     }
@@ -326,7 +326,14 @@ export async function ensurePreferredManagerAgentConfig(
 ): Promise<ManagerAgentConfig> {
   const current = readManagerAgentConfig();
   if (hasManagerAgentConfig()) {
-    if (current.harness === "codex_appserver" && autoDetectCodex(options)) {
+    if (current.harness === "codex_appserver" && (current.llm_setting_id || current.provider_name)) {
+      try {
+        validateManagerConfig(current);
+        return current;
+      } catch {
+        // Fall through to another available runtime when the provider-backed config is stale.
+      }
+    } else if (current.harness === "codex_appserver" && autoDetectCodex(options)) {
       try {
         const catalog = await (options.loadCodexModels ?? listCodexModels)();
         try {
@@ -357,6 +364,19 @@ export async function ensurePreferredManagerAgentConfig(
         // Fall through to an available runtime when a stored config is stale.
       }
     }
+  }
+
+  const codexSetting = findActiveCodexCompatibleSetting();
+  if (codexSetting) {
+    const next = saveManagerAgentConfig({
+      harness: "codex_appserver",
+      llm_setting_id: codexSetting.id,
+      provider_name: codexSetting.provider_id,
+      model_name: codexSetting.model_name,
+      service_tier: null,
+    });
+    validateManagerConfig(next);
+    return next;
   }
 
   const claudeSetting = findActiveClaudeSdkCompatibleSetting();

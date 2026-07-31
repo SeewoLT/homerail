@@ -77,30 +77,6 @@ function _normalize(raw?: Record<string, unknown> | null): ManagerAgentConfig {
     ? raw.session_policy as Record<string, unknown>
     : {};
   const harness = _harness(base.harness);
-  if (harness === "codex_appserver") {
-    const rawModel = _string(base.model_name);
-    // Legacy provider references belong to HomeRail-managed runtimes and must
-    // not be converted into a guessed Codex model. A null model lets the
-    // app-server catalog select the account's real default during bootstrap.
-    const modelName = raw?.llm_setting_id || raw?.provider_name ? null : rawModel;
-    return {
-      agent_type: "manager_agent",
-      harness,
-      live_voice_enabled: base.live_voice_enabled === true,
-      live_voice_voice: parseCodexLiveVoiceV3Voice(base.live_voice_voice),
-      llm_setting_id: null,
-      provider_name: null,
-      model_name: modelName,
-      reasoning_effort: _reasoningEffort(base.reasoning_effort),
-      service_tier: _serviceTier(base.service_tier),
-      generative_ui_mode: parseGenerativeUiMode(base.generative_ui_mode),
-      system_prompt: typeof base.system_prompt === "string" ? base.system_prompt : "",
-      session_policy: {
-        ...DEFAULT_MANAGER_AGENT_CONFIG.session_policy,
-        ...sessionPolicy,
-      },
-    };
-  }
   return {
     agent_type: "manager_agent",
     harness,

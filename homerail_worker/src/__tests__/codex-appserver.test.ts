@@ -834,11 +834,12 @@ describe("CodexAppServerAdapter", () => {
     const reqs2 = await waitForStdinRequests(mockProc, 2);
     expect(reqs2[1].method).toBe("thread/start");
     expect(reqs2[1].params).toMatchObject({
-      baseInstructions: "You are a helpful assistant.",
+      baseInstructions: null,
+      developerInstructions: "You are a helpful assistant.",
       cwd: "/test/workspace",
       model: "gpt-4.1",
       approvalPolicy: "never",
-      sandbox: "danger-full-access",
+      sandbox: "workspace-write",
       ephemeral: true,
       dynamicTools: [],
     });

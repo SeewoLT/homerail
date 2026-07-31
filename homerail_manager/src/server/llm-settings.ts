@@ -103,7 +103,7 @@ function _modelProbeBaseUrlForSetting(setting: LLMSetting): string {
   return _normalizedBaseUrl(baseUrl);
 }
 
-type MainModelHarness = "claude_agent_sdk" | "kimi_code";
+type MainModelHarness = "codex_appserver" | "claude_agent_sdk" | "kimi_code";
 
 interface MainModelEndpointProbe {
   available: boolean;
@@ -218,6 +218,9 @@ async function _probeMainModelEndpoint(input: {
 
 async function _detectMainModelRuntime(input: {
   baseUrl: string;
+  anthropicBaseUrl?: string;
+  openAiBaseUrl?: string;
+  responsesBaseUrl?: string;
   apiKey: string;
   model: string;
 }): Promise<{
@@ -230,20 +233,19 @@ async function _detectMainModelRuntime(input: {
   };
 }> {
   const [anthropic, openai, responses] = await Promise.all([
-    _probeMainModelEndpoint({ ...input, endpoint: "anthropic" }),
-    _probeMainModelEndpoint({ ...input, endpoint: "openai" }),
-    _probeMainModelEndpoint({ ...input, endpoint: "responses" }),
+    _probeMainModelEndpoint({ ...input, baseUrl: input.anthropicBaseUrl ?? input.baseUrl, endpoint: "anthropic" }),
+    _probeMainModelEndpoint({ ...input, baseUrl: input.openAiBaseUrl ?? input.baseUrl, endpoint: "openai" }),
+    _probeMainModelEndpoint({ ...input, baseUrl: input.responsesBaseUrl ?? input.baseUrl, endpoint: "responses" }),
   ]);
-  // Claude Agent SDK is the product default whenever the model actually
-  // supports both protocols. Kimi Code is only the OpenAI-compatible fallback.
-  // Responses is retained as discovered endpoint metadata, but it does not
-  // select a harness: neither supported provider-backed harness executes the
-  // Responses protocol directly.
-  const preferredHarness: MainModelHarness | null = anthropic.available
-    ? "claude_agent_sdk"
-    : openai.available
-      ? "kimi_code"
-      : null;
+  // Codex is the preferred provider-backed harness when Responses is really
+  // available. Claude and Kimi remain compatibility fallbacks.
+  const preferredHarness: MainModelHarness | null = responses.available
+    ? "codex_appserver"
+    : anthropic.available
+      ? "claude_agent_sdk"
+      : openai.available
+        ? "kimi_code"
+        : null;
   return {
     available: preferredHarness !== null,
     preferred_harness: preferredHarness,
@@ -562,9 +564,29 @@ export function llmSettingsRoutesHandler(
     _readJsonBody(req)
       .then(async (body) => {
         const b = body as Record<string, unknown>;
-        const baseUrl = typeof b.base_url === "string" ? _normalizedBaseUrl(b.base_url) : "";
-        const apiKey = typeof b.api_key === "string" ? b.api_key.trim() : "";
-        const model = typeof b.model === "string" ? b.model.trim() : "";
+        const settingId = typeof b.setting_id === "string" ? b.setting_id.trim() : "";
+        const setting = settingId ? getSetting(settingId) : undefined;
+        if (settingId && !setting) {
+          _notFound(res, `LLM setting not found: ${settingId}`);
+          return;
+        }
+        const provider = setting ? getProvider(setting.provider_id) : undefined;
+        const endpoint = setting?.endpoint_id
+          ? provider?.endpoints?.find((candidate) => candidate.id === setting.endpoint_id)
+          : undefined;
+        const endpointBaseUrl = (field: "responses_base_url" | "anthropic_base_url" | "chat_completions_base_url"): string => (
+          setting
+            ? _normalizedBaseUrl(setting[field] ?? endpoint?.[field] ?? provider?.[field] ?? "")
+            : ""
+        );
+        const responsesBaseUrl = endpointBaseUrl("responses_base_url");
+        const anthropicBaseUrl = endpointBaseUrl("anthropic_base_url");
+        const openAiBaseUrl = endpointBaseUrl("chat_completions_base_url");
+        const baseUrl = setting
+          ? responsesBaseUrl || anthropicBaseUrl || openAiBaseUrl || _normalizedBaseUrl(setting.base_url ?? endpoint?.base_url ?? provider?.base_url ?? "")
+          : typeof b.base_url === "string" ? _normalizedBaseUrl(b.base_url) : "";
+        const apiKey = setting?.api_key ?? (typeof b.api_key === "string" ? b.api_key.trim() : "");
+        const model = setting?.model_name ?? (typeof b.model === "string" ? b.model.trim() : "");
         if (!baseUrl) {
           _badRequest(res, "Missing required field: base_url");
           return;
@@ -573,7 +595,18 @@ export function llmSettingsRoutesHandler(
           _badRequest(res, "Missing required field: model");
           return;
         }
-        const result = await _detectMainModelRuntime({ baseUrl, apiKey, model });
+        const result = await _detectMainModelRuntime({
+          baseUrl,
+          apiKey,
+          model,
+          ...(setting
+            ? {
+                responsesBaseUrl: responsesBaseUrl || undefined,
+                anthropicBaseUrl: anthropicBaseUrl || undefined,
+                openAiBaseUrl: openAiBaseUrl || undefined,
+              }
+            : {}),
+        });
         _ok(res, result.available ? "Main model runtime detected" : "Main model runtime unavailable", result);
       })
       .catch((err) => {

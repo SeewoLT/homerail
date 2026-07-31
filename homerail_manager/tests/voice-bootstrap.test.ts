@@ -340,7 +340,7 @@ describe("voice bootstrap routes", () => {
     });
   });
 
-  it("does not reinterpret legacy HomeRail provider metadata as a Codex model", async () => {
+  it("preserves explicit provider-backed Codex metadata for runtime validation", async () => {
     const normalized = saveManagerAgentConfig({
       harness: "codex_appserver",
       llm_setting_id: "legacy-setting",
@@ -350,9 +350,9 @@ describe("voice bootstrap routes", () => {
 
     expect(normalized).toMatchObject({
       harness: "codex_appserver",
-      llm_setting_id: null,
-      provider_name: null,
-      model_name: null,
+      llm_setting_id: "legacy-setting",
+      provider_name: "legacy-provider",
+      model_name: "legacy-provider-model",
     });
   });
 

@@ -370,7 +370,7 @@ describe("Codex model catalog", () => {
     });
   });
 
-  it("does not let a stale provider-model patch replace an active Codex model", async () => {
+  it("rejects an unknown provider setting instead of replacing an active subscription Codex model", async () => {
     const catalog: CodexModelCatalog = {
       binary: "/opt/homebrew/bin/codex",
       models: [{
@@ -413,16 +413,10 @@ describe("Codex model catalog", () => {
         model_name: "kimi-k2.7-code",
       }),
     });
-    const body = await stalePatch.json() as { data: Record<string, unknown> };
+    const body = await stalePatch.json() as { error?: string };
 
-    expect(stalePatch.status).toBe(200);
-    expect(body.data).toMatchObject({
-      harness: "codex_appserver",
-      llm_setting_id: null,
-      provider_name: null,
-      model_name: "gpt-5.6-terra",
-      reasoning_effort: "high",
-    });
+    expect(stalePatch.status).toBe(400);
+    expect(body.error).toContain("Active Manager LLM setting not found");
   });
 
   it("rejects service tiers not advertised by the selected model", async () => {

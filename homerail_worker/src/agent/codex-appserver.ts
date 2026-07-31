@@ -11,6 +11,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
+import {
+  CODEX_RESPONSES_PROTOCOL,
+  HOMERAIL_CODEX_MODEL_PROVIDER_ID,
+  codexResponsesAppServerArgs,
+  codexResponsesProviderEnvironment,
+} from "homerail-protocol";
 import type { AgentClient, AgentEvent, AgentRunContext, DagToolDefinition } from "./types.js";
 import { sanitizedAgentChildEnv } from "./child-env.js";
 import { WORKER_RUNTIME_VERSION } from "../runtime-version.js";
@@ -56,6 +62,80 @@ interface CodexAssistantMessageState {
   phase?: CodexAssistantMessagePhase;
   deltas: string[];
 }
+
+function projectedSkillName(value: string, fallback: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[^A-Za-z0-9_.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return normalized || fallback;
+}
+
+function projectedSkillInstructions(content: string): string {
+  const normalized = content.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n")) return normalized.trim();
+  const end = normalized.indexOf("\n---\n", 4);
+  return end < 0 ? normalized.trim() : normalized.slice(end + 5).trim();
+}
+
+function prepareCodexSkillProjection(context: AgentRunContext, tempDir: string): { roots: string[]; skillCount: number } {
+  const projection = context.skillProjection;
+  if (!projection) return { roots: [], skillCount: 0 };
+  const skillsRoot = path.join(tempDir, "projected-skills");
+  fs.mkdirSync(skillsRoot, { recursive: true });
+  const names = new Set<string>();
+
+  for (const directory of projection.directories ?? []) {
+    const root = path.resolve(directory);
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const source = path.join(root, entry.name);
+      try {
+        if (!fs.statSync(path.join(source, "SKILL.md")).isFile()) continue;
+      } catch {
+        continue;
+      }
+      const name = projectedSkillName(entry.name, `skill-${names.size + 1}`);
+      if (names.has(name)) continue;
+      const destination = path.join(skillsRoot, name);
+      try {
+        fs.symlinkSync(source, destination, process.platform === "win32" ? "junction" : "dir");
+      } catch {
+        fs.cpSync(source, destination, { recursive: true, force: false, errorOnExist: true });
+      }
+      names.add(name);
+    }
+  }
+
+  for (const definition of projection.definitions ?? []) {
+    const baseName = projectedSkillName(definition.name || definition.id, `skill-${names.size + 1}`);
+    let name = baseName;
+    let suffix = 2;
+    while (names.has(name)) name = `${baseName.slice(0, 61)}-${suffix++}`;
+    const skillDir = path.join(skillsRoot, name);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), [
+      "---",
+      `name: ${JSON.stringify(name)}`,
+      `description: ${JSON.stringify((definition.description || `HomeRail Skill ${definition.id}`).slice(0, 1024))}`,
+      "---",
+      "",
+      projectedSkillInstructions(definition.content),
+      "",
+    ].join("\n"), { encoding: "utf8", mode: 0o600 });
+    names.add(name);
+  }
+  return { roots: [skillsRoot], skillCount: names.size };
+}
+
+export const _prepareCodexSkillProjectionForTest = prepareCodexSkillProjection;
 
 /** Spawn a process with stdin/stdout/stderr piped. */
 function spawnProcess(bin: string, args: string[], env: Record<string, string | undefined>): ChildProcess {
@@ -129,7 +209,14 @@ export class CodexAppServerAdapter implements AgentClient {
     try {
       this.tempDir = this.createTempDir();
       const env = this.buildEnv(context);
-      this.process = spawnProcess(this.codexBin, ["app-server"], env);
+      const args = context.protocol === CODEX_RESPONSES_PROTOCOL
+        ? codexResponsesAppServerArgs({
+            providerName: context.provider,
+            baseUrl: context.baseUrl,
+            apiKey: context.apiKey,
+          })
+        : ["app-server"];
+      this.process = spawnProcess(this.codexBin, args, env);
       this.setupReadline();
     } catch (err) {
       yield { type: "error", message: `Failed to start codex app-server: ${err}` };
@@ -137,8 +224,16 @@ export class CodexAppServerAdapter implements AgentClient {
       return;
     }
 
+    let activeThreadId: string | undefined;
+    let activeTurnId: string | undefined;
     const abortHandler = context.abortSignal
-      ? () => this.sendNotification("cancel", {})
+      ? () => {
+          if (!activeThreadId || !activeTurnId) return;
+          void this.sendRequest("turn/interrupt", {
+            threadId: activeThreadId,
+            turnId: activeTurnId,
+          }).catch(() => {});
+        }
       : null;
     if (abortHandler && context.abortSignal) {
       context.abortSignal.addEventListener("abort", abortHandler, { once: true });
@@ -182,15 +277,34 @@ export class CodexAppServerAdapter implements AgentClient {
       });
       yield this.debugEvent("appserver_initialized", this.redactSecrets(initResult));
 
+      const cwd = context.workspace ?? process.cwd();
+      const skillProjection = prepareCodexSkillProjection(context, this.tempDir!);
+      if (skillProjection.roots.length > 0) {
+        await this.sendRequest("skills/extraRoots/set", { extraRoots: skillProjection.roots });
+        const skillList = await this.sendRequest("skills/list", { cwds: [cwd], forceReload: true });
+        const entries = Array.isArray(skillList.data) ? skillList.data as Array<Record<string, unknown>> : [];
+        const discoveredSkillCount = entries.reduce((total, entry) => (
+          total + (Array.isArray(entry.skills) ? entry.skills.length : 0)
+        ), 0);
+        yield this.debugEvent("native_skills_ready", {
+          projected_skill_count: skillProjection.skillCount,
+          discovered_skill_count: discoveredSkillCount,
+        });
+      }
+
       const dynamicTools = this.buildDynamicToolSpecs(tools);
       const threadResult = await this.sendRequest("thread/start", {
-        baseInstructions: context.systemPrompt ?? null,
-        developerInstructions: null,
-        cwd: context.workspace ?? process.cwd(),
+        // Preserve Codex's native harness instructions and supplement them
+        // with the HomeRail DAG contract.
+        baseInstructions: null,
+        developerInstructions: context.systemPrompt ?? null,
+        cwd,
         model: context.model,
-        modelProvider: context.provider || null,
+        modelProvider: context.protocol === CODEX_RESPONSES_PROTOCOL
+          ? HOMERAIL_CODEX_MODEL_PROVIDER_ID
+          : context.provider || null,
         approvalPolicy: "never",
-        sandbox: "danger-full-access",
+        sandbox: "workspace-write",
         ephemeral: true,
         dynamicTools,
       });
@@ -200,6 +314,7 @@ export class CodexAppServerAdapter implements AgentClient {
       if (!threadId) {
         throw new Error("thread/start response did not include a thread id");
       }
+      activeThreadId = threadId;
       yield this.debugEvent("thread_created", { thread_id: threadId });
 
       // Execute turns with iteration guard
@@ -220,6 +335,7 @@ export class CodexAppServerAdapter implements AgentClient {
           (turnResult.turn_id as string | undefined) ??
           ((turnResult.turn as Record<string, unknown> | undefined)?.id as string | undefined) ??
           "";
+        activeTurnId = turnId || undefined;
         yield this.debugEvent("turn_started", { turn_id: turnId, iteration });
 
         // Drain turn notifications
@@ -288,6 +404,7 @@ export class CodexAppServerAdapter implements AgentClient {
         }
 
         yield this.debugEvent("turn_completed", { turn_id: turnId, iteration });
+        activeTurnId = undefined;
       }
 
       if (iteration >= maxIterations) {
@@ -614,13 +731,12 @@ export class CodexAppServerAdapter implements AgentClient {
     const env = sanitizedAgentChildEnv();
     Object.assign(env, context.environmentVariables ?? {});
 
-    const apiKey = context.apiKey || process.env.OPENAI_API_KEY || process.env.LLM_API_KEY || "";
-    if (apiKey) {
-      env.OPENAI_API_KEY = apiKey;
-    }
-
-    if (context.baseUrl) {
-      env.OPENAI_BASE_URL = context.baseUrl;
+    if (context.protocol === CODEX_RESPONSES_PROTOCOL) {
+      Object.assign(env, codexResponsesProviderEnvironment({
+        providerName: context.provider,
+        baseUrl: context.baseUrl,
+        apiKey: context.apiKey,
+      }));
     }
 
     if (this.tempDir) {

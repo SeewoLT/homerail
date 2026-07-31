@@ -25,7 +25,11 @@ import {
 } from "../widgets/widget-file-protocol.js";
 import type { ManagerAgentRuntimeConfig } from "./manager-agent-runtime-config.js";
 import {
+  CODEX_RESPONSES_PROTOCOL,
+  HOMERAIL_CODEX_MODEL_PROVIDER_ID,
   buildManagerAgentSystemPrompt,
+  codexResponsesAppServerArgs,
+  codexResponsesProviderEnvironment,
   canonicalManagerAgentToolCallName,
   compactManagerAgentSkillSupervisedDagResult,
   compactManagerAgentSkillViewPresentResult,
@@ -168,6 +172,7 @@ interface AgentRunContext {
   model: string;
   apiKey: string;
   baseUrl: string;
+  protocol?: string;
   workspace?: string;
   sessionId?: string;
   persistSession?: boolean;
@@ -292,8 +297,14 @@ export function _setHostCodexAgentEventRunnerForTest(runner?: HostCodexAgentEven
   hostAgentEventRunnerOverride = runner;
 }
 
-export function _buildCodexAppServerArgsForTest(): string[] {
-  return ["app-server"];
+export function _buildCodexAppServerArgsForTest(context?: Pick<AgentRunContext, "provider" | "baseUrl" | "apiKey" | "protocol">): string[] {
+  return context?.protocol === CODEX_RESPONSES_PROTOCOL
+    ? codexResponsesAppServerArgs({
+        providerName: context.provider,
+        baseUrl: context.baseUrl,
+        apiKey: context.apiKey,
+      })
+    : ["app-server"];
 }
 
 export function buildCodexLiveAppServerArgs(): string[] {
@@ -2423,6 +2434,7 @@ async function* runHostCodexManagerAgentTurnEvents(
     model: config.model || "codex",
     apiKey: config.api_key || "",
     baseUrl: config.base_url || "",
+    protocol: config.protocol,
     workspace,
     sessionId: state.sessionId,
     persistSession: true,
@@ -2568,7 +2580,7 @@ class HostCodexAppServerAdapter {
     try {
       this.process = spawn(codexCommandForSpawn(
         this.codexBin,
-      ), _buildCodexAppServerArgsForTest(), {
+      ), _buildCodexAppServerArgsForTest(context), {
         stdio: ["pipe", "pipe", "pipe"],
         env: this.buildEnv(context),
         cwd: context.workspace ?? process.cwd(),
@@ -2631,6 +2643,9 @@ class HostCodexAppServerAdapter {
       yield this.debugEvent("appserver_initialized", this.redactSecrets(initResult));
       const dynamicTools = this.buildDynamicToolSpecs(tools);
       const cwd = context.workspace ?? process.cwd();
+      const modelProvider = context.protocol === CODEX_RESPONSES_PROTOCOL
+        ? HOMERAIL_CODEX_MODEL_PROVIDER_ID
+        : context.provider;
       const skillRoots = Array.from(new Set((context.skillRoots ?? [])
         .map((root) => path.resolve(root))
         .filter((root) => {
@@ -2688,7 +2703,7 @@ class HostCodexAppServerAdapter {
             systemPrompt: context.systemPrompt,
             cwd,
             model: context.model,
-            provider: context.provider,
+            provider: modelProvider,
             serviceTier: context.service_tier,
             sandbox,
             reasoningEffort: context.reasoning_effort,
@@ -2706,7 +2721,7 @@ class HostCodexAppServerAdapter {
           systemPrompt: context.systemPrompt,
           cwd,
           model: context.model,
-          provider: context.provider,
+          provider: modelProvider,
           serviceTier: context.service_tier,
           sandbox,
           dynamicTools,
@@ -2808,8 +2823,18 @@ class HostCodexAppServerAdapter {
   private buildEnv(context: AgentRunContext): Record<string, string | undefined> {
     const env = managerAgentChildEnv();
     Object.assign(env, context.environmentVariables ?? {});
-    if (context.apiKey) env.OPENAI_API_KEY = context.apiKey;
-    if (context.baseUrl) env.OPENAI_BASE_URL = context.baseUrl;
+    if (context.protocol === CODEX_RESPONSES_PROTOCOL) {
+      Object.assign(env, codexResponsesProviderEnvironment({
+        providerName: context.provider,
+        baseUrl: context.baseUrl,
+        apiKey: context.apiKey,
+      }));
+      const isolatedHome = path.join(getHomerailHome(), "runtime", "codex-provider-home");
+      const codexHome = path.join(isolatedHome, ".codex");
+      fs.mkdirSync(codexHome, { recursive: true });
+      env.HOME = isolatedHome;
+      env.CODEX_HOME = codexHome;
+    }
     return codexCommandEnvironment(this.codexBin, env);
   }
 

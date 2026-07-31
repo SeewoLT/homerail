@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  CODEX_RESPONSES_PROTOCOL,
   DEFAULT_MANAGER_AGENT_RUNTIME_AGENT_TYPE,
   normalizeManagerAgentRuntimeAgentType,
   validateDagActorSurfaceMediaV1,
@@ -122,6 +123,11 @@ function assertAgentRuntimeProtocol(agentBackend: string | undefined, protocol: 
   if (backend === "claude-sdk" && protocol !== "anthropic_compatible") {
     throw new Error(
       "Claude SDK requires an Anthropic-compatible endpoint; missing or non-Anthropic protocol is not allowed for harness execution.",
+    );
+  }
+  if (backend === "codex_appserver" && protocol !== CODEX_RESPONSES_PROTOCOL) {
+    throw new Error(
+      "Codex app-server requires a Responses-compatible endpoint; Chat Completions and Anthropic protocols are not valid Codex wire transports.",
     );
   }
 }

@@ -1,10 +1,12 @@
 import {
+  findActiveCodexCompatibleSetting,
   findActiveClaudeSdkCompatibleSetting,
   findActiveLlmRuntimeSetting,
   findActiveSetting,
   getProvider,
   getSetting,
   isVoiceServiceSetting,
+  resolveCodexResponsesBaseUrlForSetting,
   resolveClaudeSdkBaseUrlForSetting,
   resolveClaudeSdkAuthModeForSetting,
   type LLMSetting,
@@ -18,6 +20,7 @@ import {
   KIMI_PROVIDER_ID,
 } from "../persistence/provider-catalog.js";
 import {
+  CODEX_RESPONSES_PROTOCOL,
   DEFAULT_MANAGER_AGENT_RUNTIME_AGENT_TYPE,
   ManagerAgentRuntimePlacement,
   isDisabledDirectLlmAgentType,
@@ -55,7 +58,7 @@ export interface AgentRuntimeResolution {
 }
 
 function runtimePlacementForAgentType(agentType: string, surface: AgentRuntimeSurface): ManagerAgentRuntimePlacementValue {
-  if (agentType === managerAgentHarnessDefinition("codex_appserver").agent_type) {
+  if (agentType === managerAgentHarnessDefinition("codex_appserver").agent_type && surface === "manager_agent") {
     return managerAgentHarnessDefinition("codex_appserver").runtime_placement;
   }
   return surface === "manager_agent"
@@ -116,6 +119,8 @@ function settingForInput(input: AgentRuntimeResolutionInput): LLMSetting {
     ? directlyRequestedSetting ?? (isKimiProviderId(input.providerName) ? findActiveKimiSetting(input.modelName) : undefined)
     : requested === "kimi_code"
     ? findActiveKimiSetting(input.modelName)
+    : requested === "codex_appserver"
+    ? findActiveCodexCompatibleSetting()
     : input.surface === "manager_agent" || requested === "claude-sdk"
     ? findActiveClaudeSdkCompatibleSetting()
     : input.surface === "dag"
@@ -152,6 +157,7 @@ function agentTypeForSetting(setting: LLMSetting, input: AgentRuntimeResolutionI
 
 function baseUrlForSetting(setting: LLMSetting, agentType: string): string | undefined {
   if (agentType === "claude-sdk") return resolveClaudeSdkBaseUrlForSetting(setting);
+  if (agentType === "codex_appserver") return resolveCodexResponsesBaseUrlForSetting(setting);
   if (agentType === "kimi_code") return setting.base_url ?? setting.chat_completions_base_url;
   return setting.base_url ?? setting.chat_completions_base_url;
 }
@@ -161,11 +167,8 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
   if (isDisabledDirectLlmAgentType(input.agentType) || isDisabledDirectLlmAgentType(input.harness)) {
     throw new Error("direct-llm is disabled for HomeRail runtime execution. Configure a supported harness-backed agent_type.");
   }
-  if (requested === "codex_appserver" && input.surface === "manager_agent") {
+  if (requested === "codex_appserver" && input.surface === "manager_agent" && !input.settingId && !input.providerName) {
     const definition = managerAgentHarnessDefinition("codex_appserver");
-    if (input.settingId || input.providerName) {
-      throw new Error("Codex app-server cannot use a HomeRail LLM provider or setting; select a model from the account catalog");
-    }
     const model = input.modelName?.trim();
     if (!model) {
       throw new Error("Codex app-server model is not configured; load the account model catalog before starting the Manager Agent");
@@ -198,6 +201,9 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
     if (agentType === "claude-sdk") {
       throw new Error(`Claude SDK requires an Anthropic-compatible endpoint for ${setting.provider_id}/${setting.model_name}; Chat Completions endpoints are not supported for harness execution. Configure an Anthropic base URL or use the Kimi Code harness for Kimi.`);
     }
+    if (agentType === "codex_appserver") {
+      throw new Error(`Codex app-server requires a Responses endpoint for ${setting.provider_id}/${setting.model_name}`);
+    }
     throw new Error(`No compatible base URL for ${input.surface === "manager_agent" ? "Manager Agent" : "DAG"} setting ${setting.provider_id}/${setting.model_name}`);
   }
   return {
@@ -209,7 +215,11 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
       : catalogModel?.display_name ?? catalogModel?.name ?? model,
     api_key: setting.api_key,
     base_url: baseUrl,
-    protocol: agentType === "claude-sdk" ? "anthropic_compatible" : setting.protocol,
+    protocol: agentType === "claude-sdk"
+      ? "anthropic_compatible"
+      : agentType === "codex_appserver"
+      ? CODEX_RESPONSES_PROTOCOL
+      : setting.protocol,
     anthropic_auth_mode: agentType === "claude-sdk"
       ? resolveClaudeSdkAuthModeForSetting(setting)
       : undefined,

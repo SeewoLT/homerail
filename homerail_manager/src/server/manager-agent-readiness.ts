@@ -258,7 +258,7 @@ export function managerAgentReadiness(
         message: binaryDiagnostic?.message ?? "Codex CLI is not available",
       });
     }
-    if (!codex.logged_in) {
+    if (!runtimeConfig.llm_setting_id && !codex.logged_in) {
       blockers.push({ code: "codex_auth_missing", message: "Codex is not logged in" });
     }
   } else if (runtimeConfig.runtime_placement === "host_shell") {
