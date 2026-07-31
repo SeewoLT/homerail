@@ -309,7 +309,7 @@ export async function getDagNodeResult(
   dagRunId: string,
   nodeId: string
 ): Promise<DAGNodeResult | null> {
-  const res = await http.get<any>(`/api/dag-status/${dagRunId}/node/${encodeURIComponent(nodeId)}/result`)
+  const res = await http.get<any>(`/api/dag-status/${encodeURIComponent(dagRunId)}/node/${encodeURIComponent(nodeId)}/result`)
   if (res.success === false || !res.data) return null
   return res.data as DAGNodeResult
 }

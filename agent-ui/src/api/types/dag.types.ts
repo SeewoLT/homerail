@@ -166,6 +166,9 @@ export interface DAGNodeDetail {
 // result_kind 驱动前端默认渲染器，无需生成式 UI。
 // ============================================================================
 
+// 后端 _nodeResultKind 当前只产出 command/join/condition/loop/while/state/
+// fanout/worker（非 _gateway 结尾的一律归 worker）。approval/await_command/
+// agent/task 为前向兼容预留；未知 kind 一律由 FallbackResultCard 兜底。
 export type DAGNodeResultKind =
   | 'command' | 'join' | 'condition' | 'loop' | 'while'
   | 'state' | 'fanout' | 'approval' | 'await_command'

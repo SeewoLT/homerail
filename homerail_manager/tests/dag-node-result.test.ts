@@ -241,4 +241,14 @@ nodes:
     expect((await nodeResult(port, "no-such-run", "join")).status).toBe(404);
     expect((await nodeResult(port, runId, "no_such_node")).status).toBe(404);
   });
+
+  it("returns 404 instead of crashing on malformed percent-encoding", async () => {
+    const runId = "run-node-result-encoding";
+    createActiveRun(runId, parseDAGYaml(joinReviewYaml()));
+    const port = await listen(server);
+    // %ZZ 不是合法的 percent-encoding；decodeURIComponent 会抛 URIError，
+    // 路由必须兜成 404 而不是冒泡成未捕获异常
+    expect((await nodeResult(port, runId, "%ZZ")).status).toBe(404);
+    expect((await nodeResult(port, "%ZZ", "join")).status).toBe(404);
+  });
 });

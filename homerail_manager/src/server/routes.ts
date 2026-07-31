@@ -204,15 +204,16 @@ function _buildNodeResult(snapshot: PersistedRunSnapshot, nodeId: string) {
   const latest = handoffs[handoffs.length - 1] ?? null;
   // Command nodes may hand off only the parsed value (result_payload: "value").
   // The redacted full envelope is always available on the telemetry event.
+  // 从尾部线性扫描：不复制整个事件数组，长跑 run（上万事件）下每次请求零额外分配
   let telemetry: Record<string, unknown> | undefined;
   if (resultKind === "command") {
-    const event = [...snapshot.events].reverse().find(
-      (entry) => entry.type === "dag:deterministic_command"
-        && (entry.payload as Record<string, unknown>).nodeId === nodeId,
-    );
-    if (event) {
-      const { runId: _runId, nodeId: _nodeId, ...rest } = event.payload as Record<string, unknown>;
+    for (let i = snapshot.events.length - 1; i >= 0; i -= 1) {
+      const entry = snapshot.events[i];
+      if (entry.type !== "dag:deterministic_command") continue;
+      if ((entry.payload as Record<string, unknown>).nodeId !== nodeId) continue;
+      const { runId: _runId, nodeId: _nodeId, ...rest } = entry.payload as Record<string, unknown>;
       telemetry = rest;
+      break;
     }
   }
   return {
@@ -1325,8 +1326,17 @@ export function inspectionRoutesHandler(
   // GET /api/dag-status/:run_id/node/:node_id/result
   if (pathname.match(/^\/api\/dag-status\/[^/]+\/node\/[^/]+\/result$/) && req.method === "GET") {
     const parts = pathname.split("/");
-    const runId = parts[3];
-    const nodeId = decodeURIComponent(parts[5]);
+    let runId: string;
+    let nodeId: string;
+    try {
+      // 路径正则只按 / 分段，畸形 percent-encoding（如 %ZZ）会让 decodeURIComponent
+      // 抛 URIError；统一按 404 处理而不是冒泡成 500
+      runId = decodeURIComponent(parts[3]);
+      nodeId = decodeURIComponent(parts[5]);
+    } catch {
+      _notFound(res, "Invalid run or node ID");
+      return true;
+    }
     if (!runId || !nodeId) {
       _notFound(res, "Invalid run or node ID");
       return true;

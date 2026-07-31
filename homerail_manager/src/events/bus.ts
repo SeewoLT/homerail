@@ -267,7 +267,11 @@ export interface GatewayExecutedPayload {
   nodeId: string;
   gatewayType: "loop_gateway" | "condition_gateway" | string;
   port: string;
-  /** Structured gateway result (aggregation, command envelope, route input). */
+  /**
+   * Structured gateway result (aggregation, command envelope, route input).
+   * 前向能力：前端目前只用事件做节流刷新触发，随后走 REST 拿权威数据，
+   * 不直接消费该字段；保留它以便未来免一次 REST 直接渲染。
+   */
   result?: unknown;
 }
 
