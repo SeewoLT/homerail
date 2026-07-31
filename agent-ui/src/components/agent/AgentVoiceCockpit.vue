@@ -3867,12 +3867,15 @@ function handleCodexLiveVoiceEvent(event: CodexLiveVoiceEvent): void {
     // session. A reconnect creates a new client bound to a session id; events
     // arriving from a previous/stale client (or a transient empty
     // manager_run_id) must not overwrite the current canvas owner.
+    //
+    // `session_id` is a required field on every persisted/sent VoiceWorkspace,
+    // so when we have an active client we require an exact match; an event
+    // without a usable session id is dropped rather than applied. See issue
+    // #168 acceptance criterion #3.
     const eventSessionId = (eventWorkspace as { session_id?: unknown }).session_id
     if (
       codexLiveVoiceSessionId
-      && typeof eventSessionId === 'string'
-      && eventSessionId
-      && eventSessionId !== codexLiveVoiceSessionId
+      && (typeof eventSessionId !== 'string' || !eventSessionId || eventSessionId !== codexLiveVoiceSessionId)
     ) {
       return
     }

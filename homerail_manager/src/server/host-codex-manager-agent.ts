@@ -1928,7 +1928,12 @@ export function createManagerTools(
         } catch {
           throw new Error("Generated view Tool returned an invalid result");
         }
-        state.objectiveToolCalls.push({ name: "skill_view_present", success: true });
+        // Derive objective success from the plugin-tool result so a failed/
+        // denied/cancelled presentation (data.status failure surfaced as
+        // is_error by pluginToolResult) is not counted as a satisfied
+        // required tool call. Mirrors how the adapter and successfulToolCallNames
+        // classify results. See issue #168.
+        state.objectiveToolCalls.push({ name: "skill_view_present", success: result.is_error !== true });
         return { content: [{
           type: "text",
           text: JSON.stringify(compactManagerAgentSkillViewPresentResult(resultBody, responseText)),
