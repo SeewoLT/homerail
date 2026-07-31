@@ -1,6 +1,6 @@
 # Codex harness / DeepSeek Responses
 
-Status: ready for review; investigated and live-tested on 2026-07-31.
+Status: Ready for review; investigated and live-tested on 2026-07-31.
 
 ## Supported runtime shapes
 
