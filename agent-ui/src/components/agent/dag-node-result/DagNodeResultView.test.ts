@@ -155,6 +155,33 @@ describe('DagNodeResultView', () => {
     expect(el.textContent).toContain('"value": 2')
   })
 
+  it('labels an admitted budget_admit state result as updated, not unchanged', () => {
+    // budget_admit 载荷（含 operation + updated，由后端 state 网关构造）：
+    // 之前缺这两个字段时被误标为 Unchanged
+    const el = mount(makeResult({
+      node_type: 'state_gateway',
+      result_kind: 'state',
+      latest: {
+        port: 'admitted',
+        content: {
+          operation: 'budget_admit',
+          updated: true,
+          admitted: true,
+          spent: 2,
+          requested: 3,
+          remaining: 5,
+          limit: 10,
+          record: { value: 5, version: 2 },
+          input: 3,
+        },
+        timestamp: '2026-01-01T00:00:00Z',
+      },
+    }))
+    expect(el.textContent).toContain('Updated')
+    expect(el.textContent).not.toContain('Unchanged')
+    expect(el.textContent).toContain('budget_admit')
+  })
+
   it('renders a while result with iteration progress', () => {
     const el = mount(makeResult({
       node_type: 'while_gateway',

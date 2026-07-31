@@ -41,7 +41,7 @@ const focusNodeId = computed(() => {
 })
 
 const metricsRunId = computed(() => runId.value ?? null)
-const { execution, loading } = useDagExplorerSnapshot(runId)
+const { execution, loading, error } = useDagExplorerSnapshot(runId)
 const { metrics } = useDagRuntime(metricsRunId)
 
 const orderedNodes = computed<DAGTaskNode[]>(() => {
@@ -142,7 +142,9 @@ function openRuntimeOverlay(): void {
   <div class="dag-explorer" data-testid="dag-explorer">
     <div v-if="!runId" class="dag-explorer__empty">{{ t('dag.explorer.noRun') }}</div>
     <div v-else-if="loading && !execution" class="dag-explorer__empty">{{ t('dag.explorer.loading') }}</div>
-    <div v-else-if="!execution" class="dag-explorer__empty">{{ t('dag.explorer.runNotFound') }}</div>
+    <div v-else-if="!execution" class="dag-explorer__empty" data-testid="dag-explorer-error">
+      {{ error || t('dag.explorer.runNotFound') }}
+    </div>
 
     <div v-else class="dag-explorer__body">
       <aside class="dag-explorer__list">

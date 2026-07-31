@@ -278,6 +278,24 @@ describe('DagExplorerWidget', () => {
     expect(api.getDagStatus).not.toHaveBeenCalled()
   })
 
+  it('surfaces the fetch error instead of a bare not-found message', async () => {
+    api.getDagStatus.mockRejectedValue(new Error('manager unreachable'))
+    const Harness = defineComponent({
+      setup() {
+        return () => h(DagExplorerWidget, { widget: makeWidget() })
+      },
+    })
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(Harness)
+    app.use(i18n)
+    app.mount(root)
+    await vi.waitFor(() => {
+      expect(root!.querySelector('[data-testid="dag-explorer-error"]')?.textContent)
+        .toContain('manager unreachable')
+    })
+  })
+
   it('opens the runtime overlay from the expand button', async () => {
     const el = await mount(makeWidget())
     el.querySelector<HTMLElement>('[data-testid="dag-explorer-expand"]')!.click()
