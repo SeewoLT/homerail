@@ -32,7 +32,11 @@ export class VoiceCurrentSessionWriter {
       if (generation !== undefined && !this.guard.isCurrent(generation)) return
       await this.write(sessionId)
     }
-    this.pending = this.pending.then(run, run)
+    // `.then(run, run)` resumes the chain on rejection (so one failed write
+    // never blocks later writes). The terminal `.catch` swallows any rejection
+    // from the LAST queued write so it does not surface as an unhandled promise
+    // rejection — the caller treats current-session writes as best-effort.
+    this.pending = this.pending.then(run, run).catch(() => undefined)
   }
 
   /** Resolved only when every enqueued write has settled. Test-only helper. */

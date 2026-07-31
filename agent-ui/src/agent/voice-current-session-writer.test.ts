@@ -40,7 +40,7 @@ function makeWriter() {
 }
 
 describe('VoiceCurrentSessionWriter (issue #168 session-write race)', () => {
-  it('drops a stale A write when B supersedes it before A settles', async () => {
+  it('serializes B after A and ends on B even when B supersedes A before A settles', async () => {
     const { guard, writer, dispatched, settle } = makeWriter()
     const genA = guard.begin() // user selects A
     writer.submit('A', genA)
@@ -103,5 +103,32 @@ describe('VoiceCurrentSessionWriter (issue #168 session-write race)', () => {
     settle('second')
     await writer.idle()
     expect(dispatched).toEqual(['first', 'second'])
+  })
+
+  it('a failed write does not block later writes or surface unhandled rejection', async () => {
+    // Custom writer whose first write rejects; the terminal .catch must swallow
+    // the rejection so the chain keeps going and settles cleanly.
+    const guard = new VoiceSessionTransitionGuard()
+    const dispatched: Array<string | null> = []
+    let call = 0
+    const writer = new VoiceCurrentSessionWriter(guard, async (sessionId) => {
+      call += 1
+      if (call === 1) throw new Error('network down')
+      dispatched.push(sessionId)
+    })
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      writer.submit('fails', undefined)
+      writer.submit('after', undefined)
+      await writer.idle()
+      // The failed write was swallowed; the later write still dispatched.
+      expect(dispatched).toEqual(['after'])
+      // No unhandled rejection escaped the chain.
+      expect(unhandled).toHaveLength(0)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 })
