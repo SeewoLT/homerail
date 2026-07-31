@@ -22,11 +22,15 @@ export function useDagExplorerSnapshot(dagRunId: ComputedRef<string | undefined>
   let refreshPending = false
   let lastRefreshStartedAt = Number.NEGATIVE_INFINITY
   let requestGeneration = 0
+  let foregroundGeneration = 0
   let disposed = false
 
   async function fetchSnapshot(runId: string, background = false): Promise<void> {
     const generation = ++requestGeneration
-    if (!background) loading.value = true
+    if (!background) {
+      foregroundGeneration = generation
+      loading.value = true
+    }
     error.value = null
     try {
       const data = await dagApi.getDagStatus(runId)
@@ -37,7 +41,9 @@ export function useDagExplorerSnapshot(dagRunId: ComputedRef<string | undefined>
       error.value = e?.message || 'Failed to load DAG run'
       if (!background) execution.value = null
     } finally {
-      if (generation === requestGeneration && !background) loading.value = false
+      // 事件驱动的后台刷新会顶掉 requestGeneration；loading 只跟随
+      // 最近一次前台请求，避免被后台请求覆盖后一直停在 true
+      if (!background && generation === foregroundGeneration) loading.value = false
     }
   }
 
@@ -74,6 +80,10 @@ export function useDagExplorerSnapshot(dagRunId: ComputedRef<string | undefined>
       refreshTimer = undefined
     }
     if (!runId) {
+      // 作废在途请求，防止其完成后把过期数据写回已清空的快照
+      requestGeneration += 1
+      foregroundGeneration = requestGeneration
+      loading.value = false
       execution.value = null
       return
     }

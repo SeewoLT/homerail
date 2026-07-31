@@ -67,17 +67,23 @@ function pickDefaultNodeId(): string | null {
   ).id
 }
 
-// 节点集合或焦点变化时校正选中项；用户手动选择后不随意覆盖
+// 快照刷新（事件驱动，运行中约每 300ms 一次）只在选中项失效
+// （节点从图中消失）时补选默认；用户手动浏览期间不被覆盖
 watch(
-  [orderedNodes, focusNodeId],
+  orderedNodes,
   () => {
-    if (selectedNodeId.value && orderedNodes.value.some(node => node.id === selectedNodeId.value)) {
-      if (!focusNodeId.value || focusNodeId.value === selectedNodeId.value) return
-    }
+    if (selectedNodeId.value && orderedNodes.value.some(node => node.id === selectedNodeId.value)) return
     selectedNodeId.value = pickDefaultNodeId()
   },
   { immediate: true },
 )
+
+// 只有 focus_node_id 本身变化（manager agent 更新 widget 聚焦出错节点）才重新聚焦
+watch(focusNodeId, (focus) => {
+  if (focus && orderedNodes.value.some(node => node.id === focus)) {
+    selectedNodeId.value = focus
+  }
+})
 
 const selectedNode = computed(() =>
   orderedNodes.value.find(node => node.id === selectedNodeId.value) ?? null,

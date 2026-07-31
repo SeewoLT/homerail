@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
 import type { DAGExecution, DAGNodeResult, DAGRunMetrics } from '@/api/types/dag.types'
 import type { VoiceWidget } from '@/api/services/voice-agent-api'
 
@@ -16,6 +16,7 @@ vi.mock('@/i18n/locales', async (importOriginal) => {
 })
 
 import { i18n } from '@/plugins/i18n'
+import { eventBus } from '@/utils/eventBus'
 import DagExplorerWidget from './DagExplorerWidget.vue'
 
 const api = vi.hoisted(() => ({
@@ -211,6 +212,54 @@ describe('DagExplorerWidget', () => {
     await vi.waitFor(() => {
       expect(api.getDagNodeResult).toHaveBeenCalledWith('run-1', 'collect')
     })
+  })
+
+  it('keeps the manual selection across event-driven refreshes when focus_node_id is set', async () => {
+    const el = await mount(makeWidget({ run_id: 'run-1', focus_node_id: 'collect' }))
+    expect(el.querySelector('[data-testid="dag-explorer-node-collect"]')?.className)
+      .toContain('dag-explorer__node--active')
+
+    el.querySelector<HTMLElement>('[data-testid="dag-explorer-node-prepare"]')!.click()
+    await nextTick()
+    expect(el.querySelector('[data-testid="dag-explorer-node-prepare"]')?.className)
+      .toContain('dag-explorer__node--active')
+
+    // 同一 run 的事件触发一次节流快照刷新；手动选择必须存活
+    api.getDagStatus.mockClear()
+    eventBus.emit('dag:node_state_changed', { runId: 'run-1', nodeId: 'review', status: 'failed' })
+    await vi.waitFor(() => expect(api.getDagStatus).toHaveBeenCalled(), { timeout: 3000 })
+    await vi.waitFor(() => {
+      expect(el.querySelector('[data-testid="dag-explorer-node-prepare"]')?.className)
+        .toContain('dag-explorer__node--active')
+    })
+    expect(el.querySelector('[data-testid="dag-explorer-node-collect"]')?.className)
+      .not.toContain('dag-explorer__node--active')
+  })
+
+  it('re-focuses when focus_node_id itself changes', async () => {
+    const widgetRef = ref(makeWidget({ run_id: 'run-1', focus_node_id: 'collect' }))
+    const Harness = defineComponent({
+      setup() {
+        return () => h(DagExplorerWidget, { widget: widgetRef.value })
+      },
+    })
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(Harness)
+    app.use(i18n)
+    app.mount(root)
+    await vi.waitFor(() => {
+      expect(root!.querySelector('[data-testid="dag-explorer-node-collect"]')?.className)
+        .toContain('dag-explorer__node--active')
+    })
+
+    // 用户浏览到其他节点后，manager agent 更新 widget 聚焦另一个出错节点
+    root.querySelector<HTMLElement>('[data-testid="dag-explorer-node-prepare"]')!.click()
+    await nextTick()
+    widgetRef.value = makeWidget({ run_id: 'run-1', focus_node_id: 'normalize' })
+    await nextTick()
+    expect(root.querySelector('[data-testid="dag-explorer-node-normalize"]')?.className)
+      .toContain('dag-explorer__node--active')
   })
 
   it('shows an empty hint when run_id is missing', async () => {
