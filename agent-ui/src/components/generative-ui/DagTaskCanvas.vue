@@ -330,13 +330,19 @@ onMounted(() => {
     // canvas. Only refresh when the event actually belongs to this canvas's
     // run, so a reconnect burst of events from other runs does not churn this
     // surface or race the owner pointer. See issue #168 acceptance criterion #3.
+    //
+    // All run-relevant `dag:` events carry a `runId` (audited in
+    // homerail_manager/src/runtime + src/node + src/worker). If a future event
+    // type omits it, fall back to the previous behavior (refresh) rather than
+    // silently dropping it — we never want to be stricter than the old "refresh
+    // on any DAG_* / dag: prefix" behavior for events we cannot attribute.
     const payload = (message.payload ?? message.data ?? {}) as { runId?: unknown; run_id?: unknown }
     const eventRunId = typeof payload.runId === 'string'
       ? payload.runId
       : typeof payload.run_id === 'string'
         ? payload.run_id
         : ''
-    if (!eventRunId || eventRunId !== props.runId) return
+    if (eventRunId && eventRunId !== props.runId) return
     scheduleRefresh()
   })
   unsubscribeState = voiceWs.onStateChange(state => {

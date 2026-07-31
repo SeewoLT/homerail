@@ -77,13 +77,22 @@ type ToolHandlerResult = {
 /**
  * Statuses that mark a plugin/Manager tool mutation as unsuccessful from the
  * model's point of view. Only `committed` represents a successful UI mutation;
- * `failed`, `denied`, and `cancelled` (and any unknown non-committed status)
- * must be surfaced to the model as tool errors so it does not claim a panel was
- * updated when no document revision actually changed.
+ * `failed`, `denied`, and `cancelled` must be surfaced to the model as tool
+ * errors so it does not claim a panel was updated when no document revision
+ * actually changed.
  *
  * See issue #168 (false canvas-update success).
  */
 const PLUGIN_TOOL_FAILURE_STATUSES = new Set(["failed", "denied", "cancelled"]);
+
+/**
+ * Statuses that represent an in-flight or successful outcome, where an
+ * `error_code` (if any) should NOT be treated as a failure. Per the plugin-tool
+ * protocol, `error_code` only accompanies terminal failure records, but we scope
+ * defensively so an informational `error_code` on a `committed`/`running`
+ * outcome is never misclassified as a tool error.
+ */
+const PLUGIN_TOOL_NON_FAILURE_STATUSES = new Set(["committed", "running"]);
 
 /**
  * Inspect a raw plugin-tool response body (the value returned by
@@ -93,7 +102,8 @@ const PLUGIN_TOOL_FAILURE_STATUSES = new Set(["failed", "denied", "cancelled"]);
  * The Manager wraps runtime tool outcomes as `{ success, data: { status,
  * error_code } }`. The host adapter only looks at `result.is_error`, so this
  * helper translates a nested `data.status` failure (or an explicit top-level
- * `success: false`, or a present `error_code`) into `is_error: true`.
+ * `success: false`, or a present `error_code` on a non-success status) into
+ * `is_error: true`.
  *
  * Note: a local projection envelope `{ status: "projected", committed: false }`
  * is intentionally NOT treated as an error. It is a legitimate non-terminal
@@ -115,12 +125,23 @@ export function isPluginToolEnvelopeFailure(body: unknown): boolean {
     const status = typeof inner.status === "string" ? inner.status : "";
     if (PLUGIN_TOOL_FAILURE_STATUSES.has(status)) return true;
     if (inner.success === false) return true;
-    if (typeof inner.error_code === "string" && inner.error_code) return true;
+    // Only treat error_code as a failure when the status is not an explicit
+    // success/in-flight state, so an informational error_code on a committed
+    // outcome is never misclassified.
+    if (
+      !PLUGIN_TOOL_NON_FAILURE_STATUSES.has(status)
+      && typeof inner.error_code === "string"
+      && inner.error_code
+    ) return true;
   }
 
   const status = typeof record.status === "string" ? record.status : "";
   if (PLUGIN_TOOL_FAILURE_STATUSES.has(status)) return true;
-  if (typeof record.error_code === "string" && record.error_code) return true;
+  if (
+    !PLUGIN_TOOL_NON_FAILURE_STATUSES.has(status)
+    && typeof record.error_code === "string"
+    && record.error_code
+  ) return true;
 
   return false;
 }

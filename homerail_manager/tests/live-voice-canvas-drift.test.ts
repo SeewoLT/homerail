@@ -36,10 +36,25 @@ describe("isPluginToolEnvelopeFailure (issue #168 false-success)", () => {
     expect(isPluginToolEnvelopeFailure({ success: false, data: { status: "running" } })).toBe(true);
   });
 
-  it("flags a nested error_code even without an explicit failure status", () => {
+  it("flags a nested error_code when the status is neither committed nor running", () => {
+    // An error_code with an absent/unknown (non-success) status is a failure.
     expect(
-      isPluginToolEnvelopeFailure({ success: true, data: { status: "running", error_code: "tool_failed" } }),
+      isPluginToolEnvelopeFailure({ success: true, data: { error_code: "tool_failed" } }),
     ).toBe(true);
+    expect(
+      isPluginToolEnvelopeFailure({ success: true, data: { status: "awaiting_confirmation", error_code: "x" } }),
+    ).toBe(true);
+  });
+
+  it("does NOT flag a nested error_code on an explicit committed/running status", () => {
+    // Scope guard: an informational error_code accompanying a successful or
+    // in-flight outcome must never be misclassified as a failure.
+    expect(
+      isPluginToolEnvelopeFailure({ success: true, data: { status: "committed", error_code: "info" } }),
+    ).toBe(false);
+    expect(
+      isPluginToolEnvelopeFailure({ success: true, data: { status: "running", error_code: "info" } }),
+    ).toBe(false);
   });
 
   it("does NOT flag a local projection envelope (non-terminal, parity with worker)", () => {

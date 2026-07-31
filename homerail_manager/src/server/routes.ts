@@ -881,11 +881,11 @@ export function inspectionRoutesHandler(
       json(res, 400, { success: false, message: "Invalid encoded run ID", error: "Invalid encoded run ID" });
       return true;
     }
-    if (!runId || !loadRunMetadata(runId)) {
+    const metadata = runId ? loadRunMetadata(runId) : null;
+    if (!runId || !metadata) {
       _notFound(res, runId ? `Run not found: ${runId}` : "Invalid run ID");
       return true;
     }
-    const metadata = loadRunMetadata(runId)!;
     const runStatus = typeof metadata.status === "string" ? metadata.status : "";
     // Once a run reaches a terminal state other than `completed`, its live
     // surface is no longer the active canvas owner. Return an empty surface so
