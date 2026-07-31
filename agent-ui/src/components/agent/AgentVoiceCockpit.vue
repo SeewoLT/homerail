@@ -2226,6 +2226,8 @@ function voiceGridItemStyle(
     return { gridRow: '1 / span 3', gridColumn: '1 / span 3' }
   if (isXiaohongshuWidget(widget) && !isPhonePortrait.value && !isCompactPhoneLandscape.value)
     return { gridRow: '1 / span 2', gridColumn: 'auto / span 1' }
+  if (isDagExplorerWidget(widget) && !isPhonePortrait.value && !isCompactPhoneLandscape.value)
+    return { gridRow: '1 / span 2', gridColumn: 'auto / span 2' }
   if (widget.type === 'topic_outline' && !isPhonePortrait.value && !isCompactPhoneLandscape.value)
     return { gridRow: '1 / span 2', gridColumn: 'auto / span 2' }
   if (
@@ -2541,6 +2543,9 @@ function isAgentDagSignalWidget(widget: VoiceWidget): boolean {
     widget.id === 'manager-progress'
   )
     return false
+  // dag_explorer 是自带节点结果渲染的 2x2 面板，必须作为完整 widget 渲染，
+  // 不能被压缩进执行卡的 signal 列表
+  if (isDagExplorerWidget(widget)) return false
   const data = widget.data ?? {}
   const visual = String(data.visual || '').toLowerCase()
   const surface = String(data.surface || '').toLowerCase()
@@ -2567,6 +2572,10 @@ function isXiaohongshuWidget(widget: VoiceWidget): boolean {
     widget.type === 'xiaohongshu_note' ||
     String(widget.data?.visual || '').toLowerCase() === 'xiaohongshu_note'
   )
+}
+
+function isDagExplorerWidget(widget: VoiceWidget): boolean {
+  return widget.type === 'dag_explorer'
 }
 
 function resetSubmittedTranscriptClear(): void {

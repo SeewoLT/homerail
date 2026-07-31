@@ -4150,6 +4150,7 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
       nodeId: node.node_id,
       gatewayType: node.node_type,
       port,
+      result: payload,
     });
     return true;
   }
@@ -4188,6 +4189,7 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
       nodeId: node.node_id,
       gatewayType: node.node_type,
       port,
+      result: payload,
     });
     return true;
   }
@@ -4201,6 +4203,7 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
       nodeId: node.node_id,
       gatewayType: node.node_type,
       port: result.port,
+      result: result.payload,
     });
     return true;
   }
@@ -4215,6 +4218,7 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
       nodeId: node.node_id,
       gatewayType: node.node_type,
       port: result.port,
+      result: result.payload,
     });
     return true;
   }

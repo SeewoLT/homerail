@@ -19,6 +19,7 @@ export type VoiceWidgetType =
   | 'metric_strip'
   | 'timeline'
   | 'dag_flow'
+  | 'dag_explorer'
   | 'chart'
   | 'memory_refs'
   | 'confirmation'

@@ -178,6 +178,55 @@ function _buildNodeDetail(metadata: PersistedRunMetadata, nodeId: string) {
   };
 }
 
+/**
+ * Result kinds mirror the runtime node_type so the UI can pick a default
+ * human-readable renderer per kind instead of inspecting free-form payloads.
+ */
+function _nodeResultKind(nodeType: string): string {
+  if (nodeType.endsWith("_gateway")) return nodeType.slice(0, -"_gateway".length);
+  return "worker";
+}
+
+function _buildNodeResult(snapshot: PersistedRunSnapshot, nodeId: string) {
+  const metadata = snapshot.metadata;
+  const node = metadata.graph?.nodes.find((n) => n.node_id === nodeId);
+  if (!node && !(nodeId in metadata.nodeStates)) return undefined;
+  const nodeType = node?.node_type || "agent";
+  const resultKind = _nodeResultKind(nodeType);
+  const handoffs = snapshot.handoffs
+    .filter((record) => record.fromNode === nodeId)
+    .map((record) => ({
+      port: record.port,
+      content: record.content ?? null,
+      timestamp: new Date(record.timestamp).toISOString(),
+      ...(record.roundId === undefined ? {} : { round_id: record.roundId }),
+    }));
+  const latest = handoffs[handoffs.length - 1] ?? null;
+  // Command nodes may hand off only the parsed value (result_payload: "value").
+  // The redacted full envelope is always available on the telemetry event.
+  let telemetry: Record<string, unknown> | undefined;
+  if (resultKind === "command") {
+    const event = [...snapshot.events].reverse().find(
+      (entry) => entry.type === "dag:deterministic_command"
+        && (entry.payload as Record<string, unknown>).nodeId === nodeId,
+    );
+    if (event) {
+      const { runId: _runId, nodeId: _nodeId, ...rest } = event.payload as Record<string, unknown>;
+      telemetry = rest;
+    }
+  }
+  return {
+    node_id: nodeId,
+    node_name: node?.name || nodeId,
+    node_type: nodeType,
+    result_kind: resultKind,
+    status: _nodeStatus(metadata, nodeId),
+    latest,
+    handoffs,
+    ...(telemetry === undefined ? {} : { telemetry }),
+  };
+}
+
 function _normalizeEvent(event: PersistedEvent) {
   const payload = event.payload as unknown as Record<string, unknown>;
   const rawType = event.type;
@@ -1270,6 +1319,29 @@ export function inspectionRoutesHandler(
       messages,
       total: messages.length,
     });
+    return true;
+  }
+
+  // GET /api/dag-status/:run_id/node/:node_id/result
+  if (pathname.match(/^\/api\/dag-status\/[^/]+\/node\/[^/]+\/result$/) && req.method === "GET") {
+    const parts = pathname.split("/");
+    const runId = parts[3];
+    const nodeId = decodeURIComponent(parts[5]);
+    if (!runId || !nodeId) {
+      _notFound(res, "Invalid run or node ID");
+      return true;
+    }
+    const snapshot = loadRunSnapshot(runId);
+    if (!snapshot) {
+      _notFound(res, `Run not found: ${runId}`);
+      return true;
+    }
+    const result = _buildNodeResult(snapshot, nodeId);
+    if (!result) {
+      _notFound(res, `Node not found: ${nodeId}`);
+      return true;
+    }
+    _ok(res, `Node result retrieved (${result.handoffs.length} handoffs)`, result);
     return true;
   }
 

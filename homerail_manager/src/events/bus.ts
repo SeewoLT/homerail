@@ -267,6 +267,8 @@ export interface GatewayExecutedPayload {
   nodeId: string;
   gatewayType: "loop_gateway" | "condition_gateway" | string;
   port: string;
+  /** Structured gateway result (aggregation, command envelope, route input). */
+  result?: unknown;
 }
 
 export interface ManagerCommandReceivedPayload {
