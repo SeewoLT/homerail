@@ -1,0 +1,63 @@
+import { describe, expect, it } from "vitest";
+import { isPluginToolEnvelopeFailure } from "../src/server/host-codex-manager-agent.js";
+
+/**
+ * Regression coverage for issue #168 (false canvas-update success).
+ *
+ * The Manager wraps plugin-tool outcomes as `{ success, data: { status,
+ * error_code } }`. The host adapter only honors `result.is_error`, so a nested
+ * `data.status = "failed"` must be translated into `is_error: true` — otherwise
+ * the model falsely claims a generated UI update succeeded (the exact envelope
+ * reported in the issue is asserted first).
+ *
+ * `invokePluginTool` routes every plugin/Generative-UI tool result through the
+ * `pluginToolResult` helper, which derives `is_error` from
+ * `isPluginToolEnvelopeFailure`. Locking the classification here is what
+ * prevents the false-success regression.
+ */
+describe("isPluginToolEnvelopeFailure (issue #168 false-success)", () => {
+  it("flags the exact envelope reported in the issue", () => {
+    expect(
+      isPluginToolEnvelopeFailure({
+        success: true,
+        data: { status: "failed", error_code: "invalid_output" },
+      }),
+    ).toBe(true);
+  });
+
+  it("flags every non-committed terminal status", () => {
+    for (const status of ["failed", "denied", "cancelled"]) {
+      expect(isPluginToolEnvelopeFailure({ success: true, data: { status } })).toBe(true);
+    }
+  });
+
+  it("flags top-level success:false", () => {
+    expect(isPluginToolEnvelopeFailure({ success: false })).toBe(true);
+    expect(isPluginToolEnvelopeFailure({ success: false, data: { status: "running" } })).toBe(true);
+  });
+
+  it("flags a nested error_code even without an explicit failure status", () => {
+    expect(
+      isPluginToolEnvelopeFailure({ success: true, data: { status: "running", error_code: "tool_failed" } }),
+    ).toBe(true);
+  });
+
+  it("flags local projection envelopes that never commit", () => {
+    expect(isPluginToolEnvelopeFailure({ status: "projected", committed: false })).toBe(true);
+  });
+
+  it("does not flag a committed outcome", () => {
+    expect(isPluginToolEnvelopeFailure({ success: true, data: { status: "committed" } })).toBe(false);
+  });
+
+  it("does not flag a still-running outcome", () => {
+    expect(isPluginToolEnvelopeFailure({ success: true, data: { status: "running" } })).toBe(false);
+  });
+
+  it("tolerates non-object bodies", () => {
+    expect(isPluginToolEnvelopeFailure(null)).toBe(false);
+    expect(isPluginToolEnvelopeFailure("ok")).toBe(false);
+    expect(isPluginToolEnvelopeFailure([1, 2, 3])).toBe(false);
+    expect(isPluginToolEnvelopeFailure(undefined)).toBe(false);
+  });
+});

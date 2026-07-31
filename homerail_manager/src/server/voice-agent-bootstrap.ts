@@ -1930,7 +1930,10 @@ export async function createCodexLiveVoiceBinding(input: {
     workspace: cwd,
     projectId: workspace.project_id ?? agentConfig.project_id,
     sessionId: workspace.session_id,
-    createdRunIds: [],
+    // Hydrate from the persisted workspace so a reconnect does not start from
+    // an empty list. Without this, the first `flush_tool_state` after reconnect
+    // would write `manager_run_id = null` and yank the canvas owner pointer.
+    createdRunIds: workspaceRunIds(workspace),
     finalNotes: [],
     objectiveToolCalls: [],
     voiceSurface: emptyVoiceSurface(),
@@ -2122,7 +2125,13 @@ export async function createCodexLiveVoiceBinding(input: {
     },
     flush_tool_state: () => {
       const next = currentWorkspace();
-      syncWorkspaceRunIds(next, state.createdRunIds);
+      // Guard the sync like the non-Live-Voice turn path does: never overwrite a
+      // persisted canvas-owner pointer with an empty list. This keeps a
+      // reconnect (or any flush before a Manager tool has run) from clearing
+      // `manager_run_id` and forcing the UI back onto the canonical view.
+      if (state.createdRunIds.length) {
+        syncWorkspaceRunIds(next, state.createdRunIds);
+      }
       applyVoiceSurfaceFromResult(next, {
         voice_surface: {
           progress: state.voiceSurface.progress,

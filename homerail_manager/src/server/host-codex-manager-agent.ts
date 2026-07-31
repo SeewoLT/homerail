@@ -74,6 +74,64 @@ type ToolHandlerResult = {
   is_error?: boolean;
 };
 
+/**
+ * Statuses that mark a plugin/Manager tool mutation as unsuccessful from the
+ * model's point of view. Only `committed` represents a successful UI mutation;
+ * `failed`, `denied`, and `cancelled` (and any unknown non-committed status)
+ * must be surfaced to the model as tool errors so it does not claim a panel was
+ * updated when no document revision actually changed.
+ *
+ * See issue #168 (false canvas-update success).
+ */
+const PLUGIN_TOOL_FAILURE_STATUSES = new Set(["failed", "denied", "cancelled"]);
+
+/**
+ * Inspect a raw plugin-tool response body (the value returned by
+ * `/plugins/tools/invoke` or a local projection envelope) and decide whether it
+ * must be reported to the model as a tool error.
+ *
+ * The Manager wraps tool outcomes as `{ success, data: { status, error_code } }`.
+ * The host adapter only looks at `result.is_error`, so this helper translates a
+ * nested `data.status` failure (or an explicit top-level `success: false`, or a
+ * projection envelope that never committed) into `is_error: true`.
+ */
+export function isPluginToolEnvelopeFailure(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const record = body as Record<string, unknown>;
+
+  // Local projection envelopes (`{ status: "projected", committed: false }`)
+  // are always non-terminal and must not be reported as success either.
+  if (record.committed === false) return true;
+
+  if (record.success === false) return true;
+
+  const data = record.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const inner = data as Record<string, unknown>;
+    const status = typeof inner.status === "string" ? inner.status : "";
+    if (PLUGIN_TOOL_FAILURE_STATUSES.has(status)) return true;
+    if (inner.success === false) return true;
+    if (typeof inner.error_code === "string" && inner.error_code) return true;
+  }
+
+  const status = typeof record.status === "string" ? record.status : "";
+  if (PLUGIN_TOOL_FAILURE_STATUSES.has(status)) return true;
+  if (typeof record.error_code === "string" && record.error_code) return true;
+
+  return false;
+}
+
+/**
+ * Wrap a plugin-tool response body into a {@link ToolHandlerResult}, honoring
+ * nested failure statuses so the adapter reports `is_error: true`.
+ */
+function pluginToolResult(body: unknown): ToolHandlerResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(body) }],
+    is_error: isPluginToolEnvelopeFailure(body),
+  };
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -1756,7 +1814,9 @@ export function createManagerTools(
     if (!currentPluginToolTurnToken) {
       const envelope = executeHomerailPluginTool(descriptor, args);
       state.voiceSurface.pluginProjections.push(envelope);
-      return { content: [{ type: "text", text: JSON.stringify(envelope) }] };
+      // Local projections are never committed; surface that as an error so the
+      // model does not claim a successful UI mutation.
+      return pluginToolResult(envelope);
     }
     const identity = stablePluginModelCallIdentifiers({
       turn_token: currentPluginToolTurnToken,
@@ -1775,7 +1835,7 @@ export function createManagerTools(
         arguments: args,
       }),
     });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return pluginToolResult(result);
   };
   const generatedViewDescriptor = responseMode === "voice"
     ? pluginContext?.tools.find((tool) => tool.qualified_id === "com.homerail.core:upsert_generated_view")

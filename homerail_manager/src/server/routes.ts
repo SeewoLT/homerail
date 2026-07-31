@@ -885,6 +885,23 @@ export function inspectionRoutesHandler(
       _notFound(res, runId ? `Run not found: ${runId}` : "Invalid run ID");
       return true;
     }
+    const metadata = loadRunMetadata(runId)!;
+    const runStatus = typeof metadata.status === "string" ? metadata.status : "";
+    // Once a run reaches a terminal state other than `completed`, its live
+    // surface is no longer the active canvas owner. Return an empty surface so
+    // the frontend's `available` flag flips false and the canonical view can
+    // mount after a committed block. `completed` keeps the surface so the last
+    // DAG result stays visible.
+    if (isTerminalDagRunStatus(runStatus) && runStatus !== "completed") {
+      _ok(res, `Live surfaces released (run ${runStatus})`, {
+        run_id: runId,
+        run_status: runStatus,
+        projections: [],
+        surface_states: [],
+        document: null,
+      });
+      return true;
+    }
     const projections = listDagLiveSurfaceProjections(runId);
     const projectionBySurface = new Map(projections.map((projection) => [projection.surface_id, projection]));
     const document = getDagLiveSurfaceDocument(runId);
@@ -909,6 +926,7 @@ export function inspectionRoutesHandler(
     });
     _ok(res, `Live surfaces retrieved (${projections.length} actors)`, {
       run_id: runId,
+      run_status: runStatus || null,
       projections,
       surface_states: surfaceStates,
       document: document
