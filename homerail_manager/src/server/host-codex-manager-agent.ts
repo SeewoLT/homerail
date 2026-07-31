@@ -90,18 +90,22 @@ const PLUGIN_TOOL_FAILURE_STATUSES = new Set(["failed", "denied", "cancelled"]);
  * `/plugins/tools/invoke` or a local projection envelope) and decide whether it
  * must be reported to the model as a tool error.
  *
- * The Manager wraps tool outcomes as `{ success, data: { status, error_code } }`.
- * The host adapter only looks at `result.is_error`, so this helper translates a
- * nested `data.status` failure (or an explicit top-level `success: false`, or a
- * projection envelope that never committed) into `is_error: true`.
+ * The Manager wraps runtime tool outcomes as `{ success, data: { status,
+ * error_code } }`. The host adapter only looks at `result.is_error`, so this
+ * helper translates a nested `data.status` failure (or an explicit top-level
+ * `success: false`, or a present `error_code`) into `is_error: true`.
+ *
+ * Note: a local projection envelope `{ status: "projected", committed: false }`
+ * is intentionally NOT treated as an error. It is a legitimate non-terminal
+ * "projected but not yet committed" state that both the voice host and the
+ * non-voice worker produce identically (see manager-agent-tool-parity); flagging
+ * it would break result-envelope parity. The false-success bug in #168 is about
+ * the runtime invoke path returning `data.status = "failed"`, which IS caught
+ * below.
  */
 export function isPluginToolEnvelopeFailure(body: unknown): boolean {
   if (!body || typeof body !== "object" || Array.isArray(body)) return false;
   const record = body as Record<string, unknown>;
-
-  // Local projection envelopes (`{ status: "projected", committed: false }`)
-  // are always non-terminal and must not be reported as success either.
-  if (record.committed === false) return true;
 
   if (record.success === false) return true;
 
@@ -1814,9 +1818,7 @@ export function createManagerTools(
     if (!currentPluginToolTurnToken) {
       const envelope = executeHomerailPluginTool(descriptor, args);
       state.voiceSurface.pluginProjections.push(envelope);
-      // Local projections are never committed; surface that as an error so the
-      // model does not claim a successful UI mutation.
-      return pluginToolResult(envelope);
+      return { content: [{ type: "text", text: JSON.stringify(envelope) }] };
     }
     const identity = stablePluginModelCallIdentifiers({
       turn_token: currentPluginToolTurnToken,

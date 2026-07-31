@@ -42,8 +42,14 @@ describe("isPluginToolEnvelopeFailure (issue #168 false-success)", () => {
     ).toBe(true);
   });
 
-  it("flags local projection envelopes that never commit", () => {
-    expect(isPluginToolEnvelopeFailure({ status: "projected", committed: false })).toBe(true);
+  it("does NOT flag a local projection envelope (non-terminal, parity with worker)", () => {
+    // A local projection `{ status: "projected", committed: false }` is a
+    // legitimate "projected but not yet committed" state produced identically by
+    // the voice host and the non-voice worker. Treating it as an error would
+    // break result-envelope parity (manager-agent-tool-parity). The #168
+    // false-success bug is about the runtime invoke path returning
+    // `data.status = "failed"`, which IS caught above.
+    expect(isPluginToolEnvelopeFailure({ status: "projected", committed: false })).toBe(false);
   });
 
   it("does not flag a committed outcome", () => {
