@@ -3806,7 +3806,16 @@ function _stateGatewayResult(run: ActiveRun, node: DAGGraphNode): { port: string
     }
     return {
       port: reservation.admitted ? config?.success_port || "admitted" : config?.conflict_port || "blocked",
-      payload: { ...reservation, limit, record: reservation.record ?? null, input: stateInput },
+      // 与其他 state 操作保持同一载荷契约（operation/updated/record/previous），
+      // 前端 StateResultCard 依赖这两个字段区分"已写入"与"未变更"
+      payload: {
+        operation,
+        updated: reservation.admitted,
+        ...reservation,
+        limit,
+        record: reservation.record ?? null,
+        input: stateInput,
+      },
     };
   }
   const expectedVersion = operation === "compare_and_set" ? config?.expected_version : undefined;
@@ -4150,6 +4159,7 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
       nodeId: node.node_id,
       gatewayType: node.node_type,
       port,
+      result: payload,
     });
     return true;
   }
@@ -4188,6 +4198,7 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
       nodeId: node.node_id,
       gatewayType: node.node_type,
       port,
+      result: payload,
     });
     return true;
   }
@@ -4201,6 +4212,7 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
       nodeId: node.node_id,
       gatewayType: node.node_type,
       port: result.port,
+      result: result.payload,
     });
     return true;
   }
@@ -4215,6 +4227,7 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
       nodeId: node.node_id,
       gatewayType: node.node_type,
       port: result.port,
+      result: result.payload,
     });
     return true;
   }

@@ -14,6 +14,7 @@ import type {
   DAGTaskNode,
   DAGEdge,
   DAGNodeDetail,
+  DAGNodeResult,
   DAGChatMessage,
   DAGEventEntry,
   DAGExperienceIngestStatus,
@@ -304,9 +305,19 @@ export async function retryDagExperienceIngest(
   return res.data
 }
 
+export async function getDagNodeResult(
+  dagRunId: string,
+  nodeId: string
+): Promise<DAGNodeResult | null> {
+  const res = await http.get<any>(`/api/dag-status/${encodeURIComponent(dagRunId)}/node/${encodeURIComponent(nodeId)}/result`)
+  if (res.success === false || !res.data) return null
+  return res.data as DAGNodeResult
+}
+
 export const dagApi = {
   getDagStatus,
   getDagNodeDetail,
+  getDagNodeResult,
   getDagNodeChat,
   getDagManagerChat,
   getDagEvents,
