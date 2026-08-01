@@ -43,13 +43,21 @@ export interface CreateWorkerOptions {
   provider: ExecutionProvider;
   workspaceId: string;
   workspaceReadOnly?: boolean;
+  workspaceInputsReadOnly?: boolean;
   mountPolicy?: MountPolicyOptions;
 }
 
 const DEFAULT_WORKER_IMAGE = "homerail-worker:latest";
 
 export async function createWorkerContainer(opts: CreateWorkerOptions): Promise<ContainerInfo> {
-  const { config, provider, workspaceId, workspaceReadOnly = false, mountPolicy } = opts;
+  const {
+    config,
+    provider,
+    workspaceId,
+    workspaceReadOnly = false,
+    workspaceInputsReadOnly = false,
+    mountPolicy,
+  } = opts;
 
   const image = config.image || DEFAULT_WORKER_IMAGE;
 
@@ -59,7 +67,7 @@ export async function createWorkerContainer(opts: CreateWorkerOptions): Promise<
 
   const mounts: NonNullable<ContainerConfig["mounts"]> = [];
 
-  const defaultMounts = workerAllowedMounts(workspaceId, workspaceReadOnly);
+  const defaultMounts = workerAllowedMounts(workspaceId, workspaceReadOnly, workspaceInputsReadOnly);
   for (const dm of defaultMounts) {
     if (!mounts.some((m) => m.container === dm.container)) {
       mounts.push({ host: dm.host, container: dm.container, mode: dm.mode });

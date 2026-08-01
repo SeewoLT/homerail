@@ -7,23 +7,50 @@ import {
   recordCredentialUseFailure,
   type CredentialRecord,
 } from "../persistence/credentials.js";
-import { getActiveRun } from "./active-runs.js";
+import {
+  getActiveRun,
+  recordActiveRunBrokerActionSuccess,
+} from "./active-runs.js";
+import {
+  githubChecksSnapshot,
+  githubCommitFiles,
+  githubPullRequestSnapshot,
+  githubRequiredChecks,
+} from "./github-pr-broker.js";
 
 export interface CredentialBrokerContext {
   credential: CredentialRecord;
   secret: Readonly<Record<string, string>>;
   input: Readonly<Record<string, unknown>>;
+  transport?: Readonly<{
+    run_id: string;
+    node_id: string;
+    session_id: string;
+    round_id?: string;
+    actor_id?: string;
+    generation?: number;
+  }>;
 }
 
 export type CredentialBrokerHandler = (
   context: CredentialBrokerContext,
 ) => Promise<unknown>;
 
+export interface CredentialBrokerRegistrationOptions {
+  maxInputBytes?: number;
+}
+
+interface RegisteredCredentialBrokerHandler {
+  handler: CredentialBrokerHandler;
+  maxInputBytes: number;
+}
+
 const BROKER_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ACTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_INPUT_BYTES = 64 * 1024;
+const MAX_CONFIGURED_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_RESULT_BYTES = 256 * 1024;
-const handlers = new Map<string, Map<string, CredentialBrokerHandler>>();
+const handlers = new Map<string, Map<string, RegisteredCredentialBrokerHandler>>();
 
 function safeJsonSize(value: unknown): number {
   const encoded = JSON.stringify(value);
@@ -57,11 +84,16 @@ export function registerCredentialBroker(
   broker: string,
   action: string,
   handler: CredentialBrokerHandler,
+  options: CredentialBrokerRegistrationOptions = {},
 ): void {
   if (!BROKER_NAME.test(broker)) throw new Error("Invalid credential broker name");
   if (!ACTION_NAME.test(action)) throw new Error("Invalid credential broker action");
-  const actions = handlers.get(broker) ?? new Map<string, CredentialBrokerHandler>();
-  actions.set(action, handler);
+  const maxInputBytes = options.maxInputBytes ?? MAX_INPUT_BYTES;
+  if (!Number.isSafeInteger(maxInputBytes) || maxInputBytes < 1 || maxInputBytes > MAX_CONFIGURED_INPUT_BYTES) {
+    throw new Error(`Credential broker input limit must be 1-${MAX_CONFIGURED_INPUT_BYTES} bytes`);
+  }
+  const actions = handlers.get(broker) ?? new Map<string, RegisteredCredentialBrokerHandler>();
+  actions.set(action, { handler, maxInputBytes });
   handlers.set(broker, actions);
 }
 
@@ -70,12 +102,12 @@ export async function invokeCredentialBroker(
   action: string,
   context: CredentialBrokerContext,
 ): Promise<unknown> {
-  const handler = handlers.get(broker)?.get(action);
-  if (!handler) throw new Error(`Unsupported credential broker action: ${broker}/${action}`);
-  if (safeJsonSize(context.input) > MAX_INPUT_BYTES) {
-    throw new Error("Credential broker input exceeds 64 KiB");
+  const registered = handlers.get(broker)?.get(action);
+  if (!registered) throw new Error(`Unsupported credential broker action: ${broker}/${action}`);
+  if (safeJsonSize(context.input) > registered.maxInputBytes) {
+    throw new Error(`Credential broker input exceeds ${registered.maxInputBytes} bytes`);
   }
-  const result = await handler(context);
+  const result = await registered.handler(context);
   assertResultDoesNotRevealSecrets(result, context.secret);
   if (safeJsonSize(result) > MAX_RESULT_BYTES) {
     throw new Error("Credential broker result exceeds 256 KiB");
@@ -156,6 +188,22 @@ export async function executeCredentialBrokerCall(
       credential: materialized.record,
       secret: materialized.secret,
       input: request.input,
+      transport: {
+        run_id: request.run_id,
+        node_id: request.node_id,
+        session_id: request.session_id,
+        ...(request.round_id ? { round_id: request.round_id } : {}),
+        ...(request.actor_id ? { actor_id: request.actor_id } : {}),
+        ...(request.generation === undefined ? {} : { generation: request.generation }),
+      },
+    });
+    recordActiveRunBrokerActionSuccess({
+      run_id: request.run_id,
+      node_id: request.node_id,
+      session_id: request.session_id,
+      credential_ref: request.credential_ref,
+      broker: request.broker,
+      action: request.action,
     });
     return { request_id: request.request_id, ok: true, result };
   } catch (error) {
@@ -218,4 +266,13 @@ registerCredentialBroker("lark_bot", "bot_info", async ({ credential, secret }) 
     open_id: infoBody.bot.open_id ?? "",
     activate_status: infoBody.bot.activate_status ?? 0,
   };
+});
+
+registerCredentialBroker("github_pr", "pull_request_snapshot", githubPullRequestSnapshot);
+registerCredentialBroker("github_pr", "checks_snapshot", githubChecksSnapshot);
+registerCredentialBroker("github_pr", "required_checks", githubRequiredChecks);
+registerCredentialBroker("github_pr", "commit_files", githubCommitFiles, {
+  // A 1 MiB decoded commit expands to roughly 1.4 MiB as base64 plus bounded
+  // JSON/path overhead. Other broker actions retain the 64 KiB default.
+  maxInputBytes: MAX_CONFIGURED_INPUT_BYTES,
 });

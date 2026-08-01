@@ -1,6 +1,7 @@
 import type { ExecutionProvider, ContainerConfig } from "../providers/types.js";
 import { createContainer, createWorkerContainer } from "../lifecycle/create.js";
 import { prepareWorkerWorkspace } from "../storage/workspace-prepare.js";
+import { materializeWorkspaceInputs } from "../storage/workspace-inputs.js";
 import type { MountPolicyOptions } from "../storage/mount-policy.js";
 import type {
   WorkspaceArtifactUploadResult,
@@ -140,11 +141,13 @@ async function dispatchOperation(
           name: (spec.name as string) || undefined,
         };
         await prepareWorkerWorkspace(workspaceId, spec.workspace);
+        const inputCount = materializeWorkspaceInputs(workspaceId, spec.workspace_inputs);
         const info = await createWorkerContainer({
           config,
           provider,
           workspaceId,
           workspaceReadOnly: spec.workspace_read_only === true,
+          workspaceInputsReadOnly: inputCount > 0,
         });
         return info as unknown as Record<string, unknown>;
       }

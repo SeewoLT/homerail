@@ -40,6 +40,12 @@ export interface CanonicalPort {
   name: string;
   contract?: string;
   description?: string;
+  required_broker_actions?: Array<{
+    credential_ref: string;
+    broker: string;
+    action: string;
+    when?: { field: string; equals: unknown };
+  }>;
 }
 
 export interface CanonicalNode {
@@ -249,13 +255,29 @@ function splitPortReference(reference: string): { node: string; port: string } {
   return { node: reference.slice(0, index), port: reference.slice(index + 1) };
 }
 
-function portEntries(ports: Record<string, { contract?: string; description?: string }> | undefined): CanonicalPort[] {
+function portEntries(ports: Record<string, {
+  contract?: string;
+  description?: string;
+  required_broker_actions?: Array<{
+    credential_ref: string;
+    broker: string;
+    action: string;
+    when?: { field: string; equals: unknown };
+  }>;
+}> | undefined): CanonicalPort[] {
   return Object.entries(ports ?? {})
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, port]) => ({
       name,
       ...(port.contract ? { contract: port.contract } : {}),
       ...(port.description ? { description: port.description } : {}),
+      ...(port.required_broker_actions ? {
+        required_broker_actions: [...port.required_broker_actions]
+          .sort((left, right) => (
+            `${left.credential_ref}\0${left.broker}\0${left.action}\0${JSON.stringify(left.when ?? null)}`
+              .localeCompare(`${right.credential_ref}\0${right.broker}\0${right.action}\0${JSON.stringify(right.when ?? null)}`)
+          )),
+      } : {}),
     }));
 }
 
@@ -372,6 +394,34 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
 
   for (const [nodeId, node] of Object.entries(nodes)) {
     const nodePath = `/spec/nodes/${nodeId}`;
+    for (const [portName, port] of Object.entries(node.kind === "terminal" || node.kind === "await_command" ? {} : node.outputs ?? {})) {
+      const requirements = port.required_broker_actions ?? [];
+      if (requirements.length === 0) continue;
+      if (node.kind !== "agent") {
+        add(
+          `${nodePath}/outputs/${portName}/required_broker_actions`,
+          "DAG_SEMANTIC_BROKER_REQUIREMENT_AGENT_ONLY",
+          "required broker actions are supported only on agent output ports",
+        );
+        continue;
+      }
+      for (let index = 0; index < requirements.length; index++) {
+        const requirement = requirements[index];
+        const declared = (node.credentials ?? []).some((binding) => (
+          binding.credential_ref === requirement.credential_ref
+          && binding.inject.mode === "manager_broker"
+          && binding.inject.broker === requirement.broker
+          && binding.inject.allowed_actions.includes(requirement.action)
+        ));
+        if (!declared) {
+          add(
+            `${nodePath}/outputs/${portName}/required_broker_actions/${index}`,
+            "DAG_SEMANTIC_UNDECLARED_BROKER_REQUIREMENT",
+            "required broker action must match a manager_broker credential and allowed action declared on the same node",
+          );
+        }
+      }
+    }
     if (node.kind === "agent" && !agents[node.agent]) {
       add(`${nodePath}/agent`, "DAG_SEMANTIC_UNKNOWN_AGENT", `unknown agent '${node.agent}'`);
     }
@@ -523,6 +573,41 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       }
       if (node.config.max_parallelism > node.config.max_items) {
         add(`${nodePath}/config/max_parallelism`, "DAG_SEMANTIC_INVALID_PARALLELISM", "max_parallelism cannot exceed max_items");
+      }
+      const workerPolicy = node.config.worker_policy;
+      if (workerPolicy?.allowed_dag_tools !== undefined && !workerPolicy.allowed_dag_tools.includes("handoff")) {
+        add(
+          `${nodePath}/config/worker_policy/allowed_dag_tools`,
+          "DAG_SEMANTIC_HANDOFF_TOOL_REQUIRED",
+          "fanout worker_policy must allow the handoff DAG tool",
+        );
+      }
+      if (
+        (workerPolicy?.credentials ?? []).some((binding) => binding.inject.mode === "manager_broker")
+        && !workerPolicy?.allowed_dag_tools?.includes("credential_broker_call")
+      ) {
+        add(
+          `${nodePath}/config/worker_policy/allowed_dag_tools`,
+          "DAG_SEMANTIC_CREDENTIAL_BROKER_TOOL_REQUIRED",
+          "fanout workers with manager_broker credentials must allow credential_broker_call",
+        );
+      }
+      const writablePaths = workerPolicy?.workspace_access?.writable_paths ?? [];
+      const declaresIsolatedWorkspace = writablePaths.length === 1
+        && writablePaths[0] === "{{fanout_workspace}}";
+      if (node.config.workspace_strategy === "isolated_git_worktree" && !declaresIsolatedWorkspace) {
+        add(
+          `${nodePath}/config/worker_policy/workspace_access/writable_paths`,
+          "DAG_SEMANTIC_FANOUT_WORKSPACE_REQUIRED",
+          "isolated_git_worktree fanout must declare exactly ['{{fanout_workspace}}'] as its writable path",
+        );
+      }
+      if (node.config.workspace_strategy !== "isolated_git_worktree" && writablePaths.includes("{{fanout_workspace}}")) {
+        add(
+          `${nodePath}/config/worker_policy/workspace_access/writable_paths`,
+          "DAG_SEMANTIC_FANOUT_WORKSPACE_UNAVAILABLE",
+          "{{fanout_workspace}} is only available with isolated_git_worktree fanout",
+        );
       }
     }
     if (node.kind === "await_command") {
@@ -758,6 +843,7 @@ function canonicalNode(id: string, node: WorkflowSpecV1Node): CanonicalNode {
         ? { allowed_dag_tools: [...node.allowed_dag_tools].sort() }
         : {}),
       ...(node.credentials !== undefined ? { credentials: node.credentials } : {}),
+      ...(node.session_scope !== undefined ? { session_scope: node.session_scope } : {}),
     };
     return {
       ...base,
@@ -1338,6 +1424,9 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
   const graphNodes: DAGGraphNode[] = executableNodes.map((node) => {
     const inputContracts = Object.fromEntries(node.inputs.filter((port) => port.contract).map((port) => [port.name, port.contract!]));
     const outputContracts = Object.fromEntries(node.outputs.filter((port) => port.contract).map((port) => [port.name, port.contract!]));
+    const outputBrokerRequirements = Object.fromEntries(node.outputs
+      .filter((port) => port.required_broker_actions?.length)
+      .map((port) => [port.name, port.required_broker_actions!]));
     return {
       node_id: node.id,
       name: node.id,
@@ -1351,6 +1440,7 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
         workflow_spec_v1: {
           input_contracts: inputContracts,
           output_contracts: outputContracts,
+          output_broker_requirements: outputBrokerRequirements,
         },
         ...(node.kind === "agent" && node.config ? { agent_runtime: node.config } : {}),
       },
@@ -1398,11 +1488,21 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
   };
 }
 
-function authoringPorts(ports: CanonicalPort[]): Record<string, { contract?: string; description?: string }> | undefined {
+function authoringPorts(ports: CanonicalPort[]): Record<string, {
+  contract?: string;
+  description?: string;
+  required_broker_actions?: Array<{
+    credential_ref: string;
+    broker: string;
+    action: string;
+    when?: { field: string; equals: unknown };
+  }>;
+}> | undefined {
   if (ports.length === 0) return undefined;
   return Object.fromEntries(ports.map((port) => [port.name, {
     ...(port.contract ? { contract: port.contract } : {}),
     ...(port.description ? { description: port.description } : {}),
+    ...(port.required_broker_actions ? { required_broker_actions: port.required_broker_actions } : {}),
   }]));
 }
 
@@ -1438,6 +1538,12 @@ function authoringNode(node: CanonicalNode, canonical: CanonicalWorkflowIR): Rec
         : {}),
       ...(Array.isArray(node.config?.allowed_dag_tools)
         ? { allowed_dag_tools: node.config.allowed_dag_tools }
+        : {}),
+      ...(typeof node.config?.session_scope === "string"
+        ? { session_scope: node.config.session_scope }
+        : {}),
+      ...(Array.isArray(node.config?.credentials)
+        ? { credentials: node.config.credentials }
         : {}),
     };
   }

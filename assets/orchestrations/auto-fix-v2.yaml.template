@@ -1,0 +1,487 @@
+api_version: homerail.ai/v1
+kind: Workflow
+
+metadata:
+  id: auto-fix-v2
+  name: HomeRail Auto Fix v2
+  labels:
+    scenario: document-first-draft-pr-autofix
+    safety: manager-broker-only
+
+spec:
+  description: |
+    A document-first Auto Fix workflow. A K3 analyzer creates a bounded task
+    plan, dynamic DeepSeek V4 Flash workers implement isolated sub-tasks, one
+    DeepSeek aggregator publishes a candidate through the GitHub broker, and a
+    fresh-context GLM-5.2 reviewer drives at most five total review rounds.
+    Revisions are performed by newly generated DeepSeek workers. The immutable
+    task document and PR binding are mounted below /workspace/input.
+
+  workspace: { mode: shared }
+
+  pattern:
+    id: auto-fix-v2
+    version: 2.0.0
+    source: HomeRail document-first dynamic worker review loop
+    parameters:
+      max_plan_items: 3
+      max_parallel_implementers: 3
+      max_review_rounds: 5
+      github_mutation: manager_broker
+
+  contracts:
+    Start:
+      type: object
+
+    RepositoryReady:
+      type: object
+      additionalProperties: false
+      required: [repository_path, head]
+      properties:
+        repository_path: { type: string, const: repo }
+        head: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
+
+    TaskItem:
+      type: object
+      additionalProperties: false
+      required: [id, title, description, acceptance]
+      properties:
+        id: { type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$' }
+        title: { type: string, minLength: 1, maxLength: 300 }
+        description: { type: string, minLength: 1, maxLength: 6000 }
+        files:
+          type: array
+          maxItems: 50
+          items: { type: string, minLength: 1, maxLength: 1000 }
+        acceptance:
+          type: array
+          minItems: 1
+          maxItems: 30
+          items: { type: string, minLength: 1, maxLength: 2000 }
+        dependencies:
+          type: array
+          maxItems: 3
+          items: { type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$' }
+
+    TaskPlan:
+      type: object
+      additionalProperties: false
+      required: [tasks, shared]
+      properties:
+        tasks:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, title, description, acceptance]
+            properties:
+              id: { type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$' }
+              title: { type: string, minLength: 1, maxLength: 300 }
+              description: { type: string, minLength: 1, maxLength: 6000 }
+              files:
+                type: array
+                maxItems: 50
+                items: { type: string, minLength: 1, maxLength: 1000 }
+              acceptance:
+                type: array
+                minItems: 1
+                maxItems: 30
+                items: { type: string, minLength: 1, maxLength: 2000 }
+              dependencies:
+                type: array
+                maxItems: 3
+                items: { type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$' }
+        shared:
+          type: object
+          additionalProperties: false
+          required: [repository_path, task_document, pr_context]
+          properties:
+            repository_path: { type: string, const: repo }
+            task_document: { type: string, const: input/task.md }
+            pr_context: { type: string, const: input/pr-context.json }
+
+    WorkerResult:
+      type: object
+      additionalProperties: false
+      required: [status, task_id, commit_sha, workspace_path, summary, tests]
+      properties:
+        status: { type: string, enum: [implemented, cannot_implement] }
+        task_id: { type: string, minLength: 1, maxLength: 64 }
+        commit_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
+        workspace_path: { type: string, minLength: 1, maxLength: 1000 }
+        summary: { type: string, minLength: 1, maxLength: 8000 }
+        tests:
+          type: array
+          maxItems: 30
+          items: { type: string, minLength: 1, maxLength: 2000 }
+
+    Candidate:
+      type: object
+      additionalProperties: false
+      required: [head_sha, review_round, summary, tests]
+      properties:
+        head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
+        review_round: { type: integer, const: 1 }
+        summary: { type: string, minLength: 1, maxLength: 12000 }
+        tests:
+          type: array
+          maxItems: 50
+          items: { type: string, minLength: 1, maxLength: 2000 }
+
+    ReviewDecision:
+      type: object
+      additionalProperties: false
+      required: [verdict, head_sha, review_round, summary, feedback, fix_tasks]
+      properties:
+        verdict: { type: string, enum: [approve, changes_requested] }
+        head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
+        review_round: { type: integer, minimum: 1, maximum: 5 }
+        summary: { type: string, minLength: 1, maxLength: 12000 }
+        feedback:
+          type: array
+          maxItems: 30
+          items: { type: string, minLength: 1, maxLength: 4000 }
+        fix_tasks:
+          type: array
+          maxItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, feedback]
+            properties:
+              id: { type: string, minLength: 1, maxLength: 64 }
+              feedback:
+                type: array
+                minItems: 1
+                maxItems: 30
+                items: { type: string, minLength: 1, maxLength: 4000 }
+
+    FixResult:
+      type: object
+      additionalProperties: false
+      required: [status, previous_head_sha, head_sha, summary, tests]
+      properties:
+        status: { type: string, enum: [fixed, cannot_fix] }
+        previous_head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
+        head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
+        summary: { type: string, minLength: 1, maxLength: 8000 }
+        tests:
+          type: array
+          maxItems: 30
+          items: { type: string, minLength: 1, maxLength: 2000 }
+
+  artifacts:
+    - name: task-plan.json
+      source: { type: handoff, node: analyze, port: planned }
+      media_type: application/json
+      contract: TaskPlan
+      required: true
+      publish: always
+    - name: initial-candidate.json
+      source: { type: handoff, node: aggregate, port: candidate }
+      media_type: application/json
+      contract: Candidate
+      required: false
+      publish: always
+    - name: final-review.json
+      source:
+        type: handoff
+        node: review_gate
+        port: approved
+        json_pointer: /input
+      media_type: application/json
+      contract: ReviewDecision
+      required: false
+      publish: success
+
+  agents:
+    analyzer:
+      description: K3 task analyst
+      system: |
+        Read /workspace/input/task.md as the immutable authoritative task and
+        /workspace/input/pr-context.json as immutable PR identity. Inspect the
+        read-only repository at /workspace/repo. Produce a minimal independent
+        task list. Do not edit files and do not access GitHub. Finish only with
+        handoff(planned) matching TaskPlan. Set shared paths exactly to repo,
+        input/task.md, and input/pr-context.json.
+
+    implementer:
+      description: DeepSeek V4 Flash isolated implementation worker
+      system: |
+        Implement only input.item inside input.workspace_path. Read the mounted
+        task document for authoritative acceptance criteria. Never access the
+        PR or credentials. Run focused tests, commit the changes in the detached
+        Git worktree, and hand off result with the exact commit SHA and workspace
+        path. Do not modify another worker's directory.
+
+    aggregator:
+      description: DeepSeek V4 Flash candidate integrator
+      system: |
+        Treat the dynamic worker results as proposals. Inspect every commit,
+        integrate compatible changes in /workspace/repo, resolve overlap, and
+        run focused tests. Use github_pr/pull_request_snapshot to obtain the
+        exact current Draft PR head. Publish changed file bytes only through
+        github_pr/commit_files with expected_head_sha; never use git push or a
+        raw token. Then hand off candidate with review_round 1 and the broker's
+        returned head SHA. Refuse unrelated or workflow-file changes.
+
+    reviewer:
+      description: GLM-5.2 fresh-context reviewer
+      system: |
+        Review only the immutable task document and the current Draft PR state
+        obtained through github_pr/pull_request_snapshot and checks_snapshot.
+        Every dispatch is a fresh provider session: do not rely on prior chat.
+        For the initial candidate set review_round to 1. For a revision, derive
+        review_round as input.fixes.context.review_round + 1. Approve only when
+        all acceptance criteria are met and checks/evidence are sufficient.
+        Before handing off a verdict of approve, call github_pr/required_checks;
+        Manager will reject the reviewed handoff unless every immutable required
+        check passed for this dispatch. On approval return empty feedback and
+        fix_tasks. Otherwise return clear feedback and exactly one fix_tasks item
+        containing the whole feedback.
+
+    fixer:
+      description: DeepSeek V4 Flash dynamically generated PR fixer
+      system: |
+        You are a newly generated fixer for one review round. Work only in
+        input.workspace_path. Use github_pr/pull_request_snapshot to bind the
+        latest Draft PR head, apply all feedback in input.item, run focused
+        tests, and publish file bytes only through github_pr/commit_files with
+        the snapshot head as expected_head_sha. Never git push and never modify
+        any path below .github. Hand off fixed with both previous and new head
+        SHAs.
+
+  nodes:
+    prepare_repository:
+      kind: command
+      inputs: { start: { contract: Start } }
+      outputs: { ready: { contract: RepositoryReady }, failed: {} }
+      config:
+        command:
+          - node
+          - -e
+          - >-
+            const fs=require('fs'),cp=require('child_process'),crypto=require('crypto');
+            const ctx=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+            const fail=m=>{throw new Error(m)};
+            if(ctx.version!==1||ctx.clone_url!==`https://github.com/${ctx.owner}/${ctx.repo}.git`)fail('clone_url does not match repository');
+            if(!ctx.base_ref||!ctx.head_ref)fail('missing branch binding');
+            const task=fs.readFileSync(process.argv[2]);
+            if(crypto.createHash('sha256').update(task).digest('hex')!==ctx.task_document_sha256)fail('task document digest mismatch');
+            if(!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(ctx.initial_head_sha||''))fail('invalid head');
+            const run=a=>{const r=cp.spawnSync('git',a,{encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});if(r.status!==0)fail(String(r.stderr||r.error));return String(r.stdout).trim()};
+            if(!fs.existsSync('repo/.git'))run(['clone','--no-checkout','--',ctx.clone_url,'repo']);
+            run(['-C','repo','fetch','--no-tags','origin',ctx.initial_head_sha]);
+            run(['-C','repo','checkout','--detach',ctx.initial_head_sha]);
+            const head=run(['-C','repo','rev-parse','HEAD']).toLowerCase();
+            if(head!==ctx.initial_head_sha.toLowerCase())fail('checkout head mismatch');
+            process.stdout.write(JSON.stringify({repository_path:'repo',head}));
+          - $run_input/pr_context
+          - $run_input/task_document
+        cwd: $run_workspace
+        timeout_ms: 180000
+        parse_stdout: json
+        result_payload: value
+        success_port: ready
+        failure_port: failed
+
+    analyze:
+      kind: agent
+      agent: analyzer
+      session_scope: dispatch
+      workspace_access: { writable_paths: [], readonly_paths: [input, repo] }
+      allowed_builtin_tools: [Glob, Grep, LS, Read]
+      allowed_dag_tools: [handoff]
+      inputs: { repository: { contract: RepositoryReady } }
+      outputs: { planned: { contract: TaskPlan }, failed: {} }
+
+    implement:
+      kind: fanout
+      inputs: { plan: { contract: TaskPlan } }
+      outputs: { implemented: {}, failed: {} }
+      config:
+        input: plan
+        item_field: tasks
+        context_field: shared
+        worker_agent: implementer
+        worker_policy:
+          session_scope: dispatch
+          allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
+          allowed_dag_tools: [handoff]
+          max_builtin_tool_calls: 80
+          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
+        workspace_strategy: isolated_git_worktree
+        workspace_root: workers
+        repository_path: repo
+        max_items: 3
+        max_parallelism: 3
+        completion: all
+        result_contract: WorkerResult
+        success_field: status
+        success_values: [implemented]
+        result_port: implemented
+        failed_port: failed
+
+    aggregate:
+      kind: agent
+      agent: aggregator
+      session_scope: dispatch
+      workspace_access: { writable_paths: [repo], readonly_paths: [input, workers] }
+      allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
+      allowed_dag_tools: [handoff, credential_broker_call]
+      max_builtin_tool_calls: 120
+      credentials:
+        - credential_ref: github-autofix
+          purpose: integrate the candidate into the bound Draft PR
+          inject:
+            mode: manager_broker
+            broker: github_pr
+            allowed_actions: [pull_request_snapshot, commit_files]
+      inputs: { workers: {} }
+      outputs: { candidate: { contract: Candidate }, failed: {} }
+
+    review_initial:
+      kind: agent
+      agent: reviewer
+      session_scope: dispatch
+      workspace_access: { writable_paths: [], readonly_paths: [input, repo, workers] }
+      allowed_builtin_tools: [Glob, Grep, LS, Read]
+      allowed_dag_tools: [handoff, credential_broker_call]
+      max_builtin_tool_calls: 60
+      credentials:
+        - credential_ref: github-autofix
+          purpose: review the bound Draft PR without mutation
+          inject:
+            mode: manager_broker
+            broker: github_pr
+            allowed_actions: [pull_request_snapshot, checks_snapshot, required_checks]
+      inputs: { candidate: { contract: Candidate } }
+      outputs:
+        reviewed:
+          contract: ReviewDecision
+          required_broker_actions:
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: required_checks
+              when: { field: verdict, equals: approve }
+        failed: {}
+
+    review_gate:
+      kind: while
+      inputs: { state: { contract: ReviewDecision } }
+      outputs: { fix: {}, approved: {}, exhausted: {} }
+      config:
+        field: verdict
+        operator: eq
+        value: approve
+        continue_port: fix
+        done_port: approved
+        exhausted_port: exhausted
+        max_iterations: 4
+
+    fix:
+      kind: fanout
+      inputs: { review: {} }
+      outputs: { fixed: {}, failed: {} }
+      config:
+        input: review
+        item_field: input.fix_tasks
+        context_field: input
+        worker_agent: fixer
+        worker_policy:
+          session_scope: dispatch
+          allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
+          allowed_dag_tools: [handoff, credential_broker_call]
+          max_builtin_tool_calls: 100
+          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
+          credentials:
+            - credential_ref: github-autofix
+              purpose: apply one bounded review revision to the Draft PR
+              inject:
+                mode: manager_broker
+                broker: github_pr
+                allowed_actions: [pull_request_snapshot, commit_files]
+        workspace_strategy: isolated_git_worktree
+        workspace_root: fixers
+        repository_path: repo
+        revision_field: head_sha
+        max_items: 1
+        max_parallelism: 1
+        completion: all
+        result_contract: FixResult
+        success_field: status
+        success_values: [fixed]
+        result_port: fixed
+        failed_port: failed
+
+    review_revision:
+      kind: agent
+      agent: reviewer
+      depends_on: [review_gate]
+      session_scope: dispatch
+      workspace_access: { writable_paths: [], readonly_paths: [input, repo, fixers] }
+      allowed_builtin_tools: [Glob, Grep, LS, Read]
+      allowed_dag_tools: [handoff, credential_broker_call]
+      max_builtin_tool_calls: 60
+      credentials:
+        - credential_ref: github-autofix
+          purpose: re-review the bound Draft PR without mutation
+          inject:
+            mode: manager_broker
+            broker: github_pr
+            allowed_actions: [pull_request_snapshot, checks_snapshot, required_checks]
+      inputs: { fixes: {} }
+      outputs:
+        reviewed:
+          contract: ReviewDecision
+          required_broker_actions:
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: required_checks
+              when: { field: verdict, equals: approve }
+        failed: {}
+
+    done: { kind: terminal, outcome: success, inputs: { result: {} } }
+    preparation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    analysis_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    implementation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    aggregation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    initial_review_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    revision_review_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    fix_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    needs_human: { kind: terminal, outcome: cancelled, inputs: { result: {} } }
+
+  edges:
+    - { from: $run.input, to: prepare_repository.start }
+    - { from: prepare_repository.ready, to: analyze.repository }
+    - { from: prepare_repository.failed, to: preparation_failed.result, condition: on_failure }
+    - { from: analyze.planned, to: implement.plan }
+    - { from: analyze.failed, to: analysis_failed.result, condition: on_failure }
+    - { from: implement.implemented, to: aggregate.workers }
+    - { from: implement.failed, to: implementation_failed.result, condition: on_failure }
+    - { from: aggregate.candidate, to: review_initial.candidate }
+    - { from: aggregate.failed, to: aggregation_failed.result, condition: on_failure }
+    - { from: review_initial.reviewed, to: review_gate.state }
+    - { from: review_initial.failed, to: initial_review_failed.result, condition: on_failure }
+    - { from: review_gate.fix, to: fix.review }
+    - { from: review_gate.approved, to: done.result }
+    - { from: review_gate.exhausted, to: needs_human.result }
+    - { from: fix.fixed, to: review_revision.fixes }
+    - { from: fix.failed, to: fix_failed.result, condition: on_failure }
+    - kind: feedback
+      from: review_revision.reviewed
+      to: review_gate.state
+      max_traversals: 4
+    - { from: review_revision.failed, to: revision_review_failed.result, condition: on_failure }
+
+  policies:
+    max_nodes: 40
+    max_edges: 32
+    max_parallelism: 4
+    max_dispatches: 32
+    max_handoffs: 48
+    max_corrections_per_node: 2
+    max_edge_traversals: 4
+    max_tool_calls_per_node: 120

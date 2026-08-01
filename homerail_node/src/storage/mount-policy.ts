@@ -74,12 +74,24 @@ export function allowedMounts(volumeId: string): MountEntry[] {
   ];
 }
 
-export function workerAllowedMounts(workspaceId: string, readOnly = false): MountEntry[] {
-  return [
+export function workerAllowedMounts(
+  workspaceId: string,
+  readOnly = false,
+  readOnlyInputs = false,
+): MountEntry[] {
+  const mounts: MountEntry[] = [
     {
       host: homerailWorkerWorkspacePath(workspaceId),
       container: "/workspace",
       mode: readOnly ? "ro" : "rw",
     },
   ];
+  if (readOnlyInputs) {
+    mounts.push({
+      host: `${homerailWorkerWorkspacePath(workspaceId)}/input`,
+      container: "/workspace/input",
+      mode: "ro",
+    });
+  }
+  return mounts;
 }

@@ -174,6 +174,50 @@ describe("WorkflowSpec v1", () => {
     }));
   });
 
+  it("canonicalizes conditional Manager-broker handoff requirements and rejects undeclared actions", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.execute.allowed_dag_tools = ["handoff", "credential_broker_call"];
+    workflow.spec.nodes.execute.credentials = [{
+      credential_ref: "github-autofix",
+      purpose: "verify the bound pull request",
+      inject: {
+        mode: "manager_broker",
+        broker: "github_pr",
+        allowed_actions: ["required_checks"],
+      },
+    }];
+    workflow.spec.nodes.execute.outputs.result.required_broker_actions = [{
+      credential_ref: "github-autofix",
+      broker: "github_pr",
+      action: "required_checks",
+      when: { field: "status", equals: "success" },
+    }];
+
+    const result = compileWorkflowSource(YAML.stringify(workflow));
+    expect(result.valid, result.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+    const requirement = [{
+      credential_ref: "github-autofix",
+      broker: "github_pr",
+      action: "required_checks",
+      when: { field: "status", equals: "success" },
+    }];
+    expect(result.canonical?.nodes.find((node) => node.id === "execute")?.outputs)
+      .toContainEqual(expect.objectContaining({ name: "result", required_broker_actions: requirement }));
+    expect(projectCanonicalWorkflowToParsedDAG(result.canonical!).graph.nodes
+      .find((node) => node.node_id === "execute")?.extra?.workflow_spec_v1)
+      .toMatchObject({ output_broker_requirements: { result: requirement } });
+    expect((canonicalWorkflowToV1Document(result.canonical!) as any).spec.nodes.execute.outputs.result)
+      .toMatchObject({ required_broker_actions: requirement });
+
+    workflow.spec.nodes.execute.outputs.result.required_broker_actions[0].action = "commit_files";
+    const invalid = compileWorkflowSource(YAML.stringify(workflow));
+    expect(invalid.valid).toBe(false);
+    expect(invalid.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_UNDECLARED_BROKER_REQUIREMENT",
+      path: "/spec/nodes/execute/outputs/result/required_broker_actions/0",
+    }));
+  });
+
   it("accepts bounded conditional contract invariants", () => {
     const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
     workflow.spec.contracts.Result = {
@@ -467,6 +511,53 @@ spec:
         path: "/spec/nodes/fan/config/result_contract",
       }),
     ]));
+  });
+
+  it("requires isolated fanout workers to declare their injected writable worktree", () => {
+    const source = `
+api_version: homerail.ai/v1
+kind: Workflow
+metadata: { id: isolated-fanout, name: Isolated Fanout }
+spec:
+  contracts: { Items: { type: array } }
+  agents: { worker: { system: Work. } }
+  nodes:
+    fan:
+      kind: fanout
+      inputs: { items: { contract: Items } }
+      outputs: { passed: {}, failed: {} }
+      config:
+        input: items
+        worker_agent: worker
+        worker_policy:
+          allowed_dag_tools: [handoff]
+          workspace_access: { writable_paths: [], readonly_paths: [input] }
+        workspace_strategy: isolated_git_worktree
+        repository_path: repo
+        max_items: 2
+        max_parallelism: 1
+        completion: all
+        result_port: passed
+        failed_port: failed
+    done: { kind: terminal, outcome: success, inputs: { result: {} } }
+    failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+  edges:
+    - { from: $run.input, to: fan.items }
+    - { from: fan.passed, to: done.result }
+    - { from: fan.failed, to: failed.result, condition: on_failure }
+`;
+    const missing = compileWorkflowSource(source);
+    expect(missing.valid).toBe(false);
+    expect(missing.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_FANOUT_WORKSPACE_REQUIRED",
+      path: "/spec/nodes/fan/config/worker_policy/workspace_access/writable_paths",
+    }));
+
+    const declared = compileWorkflowSource(source.replace(
+      "writable_paths: []",
+      "writable_paths: ['{{fanout_workspace}}']",
+    ));
+    expect(declared.valid, declared.diagnostics.map((item) => item.message).join("\n")).toBe(true);
   });
 
   it("rejects an approval workflow that authorizes its proposer", () => {

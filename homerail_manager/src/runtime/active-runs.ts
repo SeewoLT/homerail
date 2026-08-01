@@ -47,6 +47,7 @@ import {
   type DagAgentToolName,
   type DagWorkspaceAccess,
   type DagCredentialProjection,
+  type DagRunInputBinding,
 } from "homerail-protocol";
 import { resolveAgentRuntimeConfig } from "./agent-runtime-resolver.js";
 import {
@@ -88,6 +89,12 @@ import { getDagActivitySequenceCursor } from "../persistence/dag-activity-journa
 import { getDagActorSurfaceView } from "../persistence/dag-actor-surface-patches.js";
 import { getDb } from "../persistence/db.js";
 import { getCredential, materializeCredential } from "../persistence/credentials.js";
+import {
+  bindDagRunInputs,
+  dagRunInputPath,
+  materializeDagRunInputs,
+  verifyDagRunInputs,
+} from "../persistence/run-input-artifacts.js";
 import {
   createInitialDagRunRound,
   getCurrentDagRunRound,
@@ -231,6 +238,8 @@ export interface ActiveRun {
   contracts?: Record<string, unknown>;
   artifacts?: DAGArtifactDeclaration[];
   runInputTargets?: Array<{ node: string; port: string; contract?: string }>;
+  inputArtifacts?: DagRunInputBinding[];
+  brokerState: Record<string, unknown>;
   initialPrompt?: string;
   nodeCount?: number;
   agents?: Record<string, DAGAgentConfig>;
@@ -342,6 +351,7 @@ export interface DAGRunCounters {
   dispatch_retries: Record<string, number>;
   gateway_iterations: Record<string, number>;
   gateway_results: Record<string, unknown[]>;
+  fanout_invocations: Record<string, number>;
   abort_reason?: string;
 }
 
@@ -360,6 +370,7 @@ export interface AppendRunNodeResult {
 
 export interface CreateActiveRunOptions {
   initialPrompt?: string;
+  inputArtifacts?: DagRunInputBinding[];
 }
 
 const store = new Map<string, ActiveRun>();
@@ -416,6 +427,7 @@ function _initialCounters(): DAGRunCounters {
     dispatch_retries: {},
     gateway_iterations: {},
     gateway_results: {},
+    fanout_invocations: {},
   };
 }
 
@@ -433,6 +445,7 @@ function _restoreCounters(counters: DAGRunCounters | undefined): DAGRunCounters 
     dispatch_retries: { ...(counters.dispatch_retries ?? {}) },
     gateway_iterations: { ...(counters.gateway_iterations ?? {}) },
     gateway_results: { ...(counters.gateway_results ?? {}) },
+    fanout_invocations: { ...(counters.fanout_invocations ?? {}) },
   };
 }
 
@@ -642,6 +655,29 @@ function _ensureNodeSession(run: ActiveRun, nodeId: string): NodeSessionState {
   return _persistNodeSession(run, nodeId, state);
 }
 
+function _nodeSessionScope(node: DAGGraphNode | undefined): "node" | "dispatch" {
+  return _agentRuntimeConfig(node ?? {} as DAGGraphNode).session_scope === "dispatch" ? "dispatch" : "node";
+}
+
+function _prepareNodeSessionForDispatch(run: ActiveRun, node: DAGGraphNode): NodeSessionState {
+  const current = _ensureNodeSession(run, node.node_id);
+  if (_nodeSessionScope(node) !== "dispatch") return current;
+  if (!new Set(["completed", "failed", "cancelled"]).has(current.status)) return current;
+  const fresh = _persistNodeSession(run, node.node_id, {
+    sessionId: _newSessionId(run.runId, node.node_id),
+    attempt: current.attempt + 1,
+    status: "active",
+  });
+  emit("dag:node_session_reset", {
+    runId: run.runId,
+    nodeId: node.node_id,
+    previousSessionId: current.sessionId,
+    sessionId: fresh.sessionId,
+    attempt: fresh.attempt,
+  });
+  return fresh;
+}
+
 function _markNodeSessionStatus(run: ActiveRun, nodeId: string, status: string): void {
   const current = run.nodeSessions.get(nodeId);
   if (!current) return;
@@ -764,6 +800,14 @@ export function createActiveRun(
   });
   const dagRun = createDAGRun(parsedDAG, runId);
   const createdAt = Date.now();
+  const inputArtifacts = options.inputArtifacts?.map((binding) => ({
+    ...structuredClone(binding),
+    run_id: runId,
+    bound_at: createdAt,
+  }));
+  if (inputArtifacts && inputArtifacts.length > 0) {
+    materializeDagRunInputs(runId, inputArtifacts);
+  }
   seedInitialPrompt(
     dagRun,
     options.initialPrompt,
@@ -785,6 +829,8 @@ export function createActiveRun(
     runInputTargets: parsedDAG.meta.run_input_targets
       ? parsedDAG.meta.run_input_targets.map((target) => ({ ...target }))
       : undefined,
+    inputArtifacts,
+    brokerState: {},
     initialPrompt: options.initialPrompt,
     nodeCount: parsedDAG.graph.nodes.length,
     agents: parsedDAG.meta.agents
@@ -811,6 +857,7 @@ export function createActiveRun(
   _assertLogicalActorIdentities(run.dagRun.graph.nodes);
   dbTransaction(() => {
     writeRunMetadata(runId, serializeRunMetadata(run));
+    if (inputArtifacts && inputArtifacts.length > 0) bindDagRunInputs(runId, inputArtifacts);
     pinDagRunSkillContexts({
       run_id: runId,
       contexts: skillContexts,
@@ -1084,6 +1131,16 @@ export function restoreActiveRun(
     return { status: "skipped", reason: "run already active in this process" };
   }
 
+  const verifiedInputArtifacts = verifyDagRunInputs(metadata.runId);
+  if ((metadata.inputArtifacts?.length ?? 0) !== verifiedInputArtifacts.length) {
+    throw new Error(`persisted run input provenance does not match bound inputs for ${metadata.runId}`);
+  }
+  if (metadata.inputArtifacts && !isDeepStrictEqual(
+    metadata.inputArtifacts.map((entry) => ({ ...entry })).sort((left, right) => left.logical_name.localeCompare(right.logical_name)),
+    verifiedInputArtifacts.map((entry) => ({ ...entry })).sort((left, right) => left.logical_name.localeCompare(right.logical_name)),
+  )) {
+    throw new Error(`persisted run input provenance changed for ${metadata.runId}`);
+  }
   const { dagRun, nodes } = _rebuildDagRunFromPersisted(metadata, metadata.graph);
   if (!metadata.dagRuntimeState) {
     seedInitialPrompt(dagRun, metadata.initialPrompt, metadata.runInputTargets, metadata.contracts);
@@ -1130,6 +1187,8 @@ export function restoreActiveRun(
     runInputTargets: metadata.runInputTargets
       ? metadata.runInputTargets.map((target) => ({ ...target }))
       : undefined,
+    inputArtifacts: verifiedInputArtifacts.length > 0 ? verifiedInputArtifacts : undefined,
+    brokerState: metadata.brokerState ? structuredClone(metadata.brokerState) : {},
     initialPrompt: metadata.initialPrompt,
     nodeCount: metadata.nodeCount,
     agents: metadata.agents
@@ -1250,6 +1309,153 @@ export function dispatchRecoveredRuns(dispatcher: DAGDispatcher): number {
 
 export function getActiveRun(runId: string): ActiveRun | undefined {
   return store.get(runId);
+}
+
+interface BrokerActionRequirement {
+  credential_ref: string;
+  broker: string;
+  action: string;
+  when?: {
+    field: string;
+    equals: unknown;
+  };
+}
+
+interface BrokerActionReceipt extends BrokerActionRequirement {
+  node_id: string;
+  session_id: string;
+  recorded_at: number;
+}
+
+const BROKER_ACTION_RECEIPTS_KEY = "broker_action_receipts";
+const BROKER_ACTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function _outputBrokerActionRequirements(
+  run: ActiveRun,
+  nodeId: string,
+  port?: string,
+  content?: unknown,
+  evaluateConditions = false,
+): BrokerActionRequirement[] {
+  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  const workflowSpec = node?.extra?.workflow_spec_v1;
+  if (!workflowSpec || typeof workflowSpec !== "object" || Array.isArray(workflowSpec)) return [];
+  const rawByPort = (workflowSpec as Record<string, unknown>).output_broker_requirements;
+  if (!rawByPort || typeof rawByPort !== "object" || Array.isArray(rawByPort)) return [];
+  const selected = port === undefined
+    ? Object.values(rawByPort as Record<string, unknown>).flatMap((value) => Array.isArray(value) ? value : [])
+    : (rawByPort as Record<string, unknown>)[port];
+  if (!Array.isArray(selected)) return [];
+  return selected.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const entry = value as Record<string, unknown>;
+    if (![entry.credential_ref, entry.broker, entry.action].every((field) => (
+      typeof field === "string" && BROKER_ACTION_NAME.test(field)
+    ))) return [];
+    let when: BrokerActionRequirement["when"];
+    if (entry.when !== undefined) {
+      if (!entry.when || typeof entry.when !== "object" || Array.isArray(entry.when)) return [];
+      const rawWhen = entry.when as Record<string, unknown>;
+      if (typeof rawWhen.field !== "string"
+        || !/^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/.test(rawWhen.field)
+        || !("equals" in rawWhen)) return [];
+      when = { field: rawWhen.field, equals: rawWhen.equals };
+    }
+    if (evaluateConditions && when) {
+      let actual = content;
+      for (const segment of when.field.split(".")) {
+        if (!actual || typeof actual !== "object" || Array.isArray(actual)) {
+          actual = undefined;
+          break;
+        }
+        actual = (actual as Record<string, unknown>)[segment];
+      }
+      if (!isDeepStrictEqual(actual, when.equals)) return [];
+    }
+    return [{
+      credential_ref: String(entry.credential_ref),
+      broker: String(entry.broker),
+      action: String(entry.action),
+      ...(when ? { when } : {}),
+    }];
+  });
+}
+
+function _brokerActionReceipts(run: ActiveRun): BrokerActionReceipt[] {
+  const raw = run.brokerState[BROKER_ACTION_RECEIPTS_KEY];
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const entry = value as Record<string, unknown>;
+    if (![entry.credential_ref, entry.broker, entry.action, entry.node_id, entry.session_id].every((field) => (
+      typeof field === "string" && BROKER_ACTION_NAME.test(field)
+    )) || typeof entry.recorded_at !== "number" || !Number.isFinite(entry.recorded_at)) return [];
+    return [{
+      credential_ref: String(entry.credential_ref),
+      broker: String(entry.broker),
+      action: String(entry.action),
+      node_id: String(entry.node_id),
+      session_id: String(entry.session_id),
+      recorded_at: entry.recorded_at,
+    }];
+  });
+}
+
+export function recordActiveRunBrokerActionSuccess(input: {
+  run_id: string;
+  node_id: string;
+  session_id: string;
+  credential_ref: string;
+  broker: string;
+  action: string;
+}): void {
+  const run = store.get(input.run_id);
+  if (!run || run.status !== "active") throw new Error("Broker action receipt run is not active");
+  const required = _outputBrokerActionRequirements(run, input.node_id).some((requirement) => (
+    requirement.credential_ref === input.credential_ref
+    && requirement.broker === input.broker
+    && requirement.action === input.action
+  ));
+  if (!required) return;
+  const session = run.nodeSessions.get(input.node_id);
+  if (!session || session.sessionId !== input.session_id) {
+    throw new Error("Broker action receipt session is stale");
+  }
+  const receipt: BrokerActionReceipt = {
+    credential_ref: input.credential_ref,
+    broker: input.broker,
+    action: input.action,
+    node_id: input.node_id,
+    session_id: input.session_id,
+    recorded_at: Date.now(),
+  };
+  const receipts = _brokerActionReceipts(run).filter((entry) => !(
+    entry.node_id === receipt.node_id
+    && entry.session_id === receipt.session_id
+    && entry.credential_ref === receipt.credential_ref
+    && entry.broker === receipt.broker
+    && entry.action === receipt.action
+  ));
+  run.brokerState[BROKER_ACTION_RECEIPTS_KEY] = [...receipts, receipt].slice(-64);
+  writeRunMetadata(input.run_id, serializeRunMetadata(run));
+}
+
+export function getActiveRunBrokerState(runId: string, key: string): unknown {
+  const run = store.get(runId);
+  if (!run || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key)) return undefined;
+  return run.brokerState[key] === undefined ? undefined : structuredClone(run.brokerState[key]);
+}
+
+export function setActiveRunBrokerState(runId: string, key: string, value: unknown): void {
+  const run = store.get(runId);
+  if (!run || run.status !== "active") throw new Error("Broker state run is not active");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key)) throw new Error("Broker state key is invalid");
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined || Buffer.byteLength(encoded, "utf8") > 64 * 1024) {
+    throw new Error("Broker state exceeds 64 KiB");
+  }
+  run.brokerState[key] = structuredClone(value);
+  writeRunMetadata(runId, serializeRunMetadata(run));
 }
 
 export function getCurrentNodeSession(runId: string, nodeId: string): NodeSessionState | undefined {
@@ -1822,6 +2028,7 @@ function _correctionPrompt(
   successPorts: string[],
   failurePorts: string[],
   outputContracts: Record<string, { contract: string; schema: unknown }>,
+  brokerRequirements: BrokerActionRequirement[],
 ): string {
   const declaredPorts = outputPorts.length > 0 ? outputPorts.join(", ") : "done";
   const contractGuidance = Object.keys(outputContracts).length > 0
@@ -1830,6 +2037,13 @@ function _correctionPrompt(
         `Exact output contracts by port (JSON Schema): ${JSON.stringify(outputContracts)}`,
       ]
     : [];
+  const brokerGuidance = brokerRequirements.length > 0
+    ? [
+        "Correction mode permits only declared credential_broker_call verification actions and the final handoff tool call. Do not use any built-in tools or other DAG tools.",
+        `Broker verification actions available when required by the corrected output: ${brokerRequirements.map((requirement) => `${requirement.credential_ref}/${requirement.broker}/${requirement.action}`).join(", ")}.`,
+        "If the corrected output triggers one of those requirements and no valid receipt exists, call that declared broker action before the handoff. Otherwise call handoff directly.",
+      ]
+    : ["Correction mode permits only the handoff tool. Do not repeat investigation, file changes, or other side effects."];
   return [
     `Correction attempt ${attempt}/${maxAttempts} for DAG node ${nodeId}.`,
     `Previous attempt ended without a valid DAG handoff: ${reason}`,
@@ -1841,7 +2055,7 @@ function _correctionPrompt(
     "Use a failure port only when the original task itself cannot complete; never use it merely to report this correction error.",
     "Treat that error as authoritative. Preserve required field names and JSON array/object/number types exactly.",
     "Reuse completed evidence when it is available in the original inputs or current workspace.",
-    "Correction mode permits only the handoff tool. Do not repeat investigation, file changes, or other side effects.",
+    ...brokerGuidance,
     "Never print a pseudo-tool call as prose, XML, or JSON. Invoke the SDK tool itself.",
     "Finish by calling the handoff tool exactly once with one declared output port and contract-valid content. Do not end with prose.",
   ].join("\n");
@@ -1893,12 +2107,18 @@ export function requestNodeCorrection(
       successPorts,
       failurePorts,
       outputContracts,
+      _outputBrokerActionRequirements(run, nodeId),
     ));
     mailbox.set("correction", values);
   }
   resetSkippedSuccessDescendants(run.dagRun, nodeId);
   run.dagRun.nodeStates.set(nodeId, "READY");
   run.dagRun.handoffedNodes.delete(nodeId);
+  // A correction retries the same logical dispatch after a rejected handoff; it
+  // is not a new review round. Keep the provider session (and any broker action
+  // receipts fenced to it) active. A successful handoff still marks the session
+  // completed, so the next real re-entry of a dispatch-scoped node gets a fresh
+  // context through _prepareNodeSessionForDispatch.
   writeRunMetadata(runId, serializeRunMetadata(run));
   _emitNodeStateChanges(run, before);
   emit("dag:node_correction_requested", { runId, nodeId, reason, attempt, maxAttempts });
@@ -2278,6 +2498,8 @@ function _assertHandoffPreconditions(
   if (surfaceViolation) throw new Error(surfaceViolation);
   const contractViolation = _handoffContractViolation(run, fromNode, port, content);
   if (contractViolation) throw new Error(contractViolation);
+  const brokerRequirementViolation = _handoffBrokerRequirementViolation(run, fromNode, port, content);
+  if (brokerRequirementViolation) throw new Error(brokerRequirementViolation);
   if (run.counters.handoffs >= run.limits.max_handoffs) {
     if (abortOnLimit) abortActiveRun(run.runId, `max_handoffs (${run.limits.max_handoffs}) exceeded`, fromNode);
     throw new Error(`max_handoffs (${run.limits.max_handoffs}) exceeded`);
@@ -2293,6 +2515,28 @@ function _assertHandoffPreconditions(
       throw new Error(`edge retry limit (${edgeLimit}) exceeded for ${key}`);
     }
   }
+}
+
+function _handoffBrokerRequirementViolation(
+  run: ActiveRun,
+  fromNode: string,
+  port: string,
+  content: unknown,
+): string | undefined {
+  const requirements = _outputBrokerActionRequirements(run, fromNode, port, content, true);
+  if (requirements.length === 0) return undefined;
+  const sessionId = run.nodeSessions.get(fromNode)?.sessionId;
+  if (!sessionId) return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: node has no active session`;
+  const receipts = _brokerActionReceipts(run);
+  const missing = requirements.find((requirement) => !receipts.some((receipt) => (
+    receipt.node_id === fromNode
+    && receipt.session_id === sessionId
+    && receipt.credential_ref === requirement.credential_ref
+    && receipt.broker === requirement.broker
+    && receipt.action === requirement.action
+  )));
+  if (!missing) return undefined;
+  return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: ${missing.credential_ref}/${missing.broker}/${missing.action}`;
 }
 
 function _requiredSurfaceFinalViolation(
@@ -3587,6 +3831,7 @@ function _commandAllowlist(): Set<string> {
 }
 
 const RUN_WORKSPACE_CWD = "$run_workspace";
+const RUN_INPUT_ARGUMENT_PREFIX = "$run_input/";
 
 function _pathIsWithin(root: string, target: string): boolean {
   const relative = path.relative(root, target);
@@ -3650,6 +3895,28 @@ function _commandGatewayResult(run: ActiveRun, node: DAGGraphNode): { port: stri
   if (!Array.isArray(command) || command.length === 0 || command.some((part) => typeof part !== "string")) {
     return { port: config?.failure_port || "failed", payload: { ok: false, error: "invalid command configuration" } };
   }
+  if (command[0].startsWith(RUN_INPUT_ARGUMENT_PREFIX)) {
+    return {
+      port: config?.failure_port || "failed",
+      payload: { ok: false, error: "$run_input cannot be used as a command executable" },
+    };
+  }
+  let resolvedCommand: string[];
+  try {
+    resolvedCommand = command.map((part, index) => {
+      if (index === 0 || !part.startsWith(RUN_INPUT_ARGUMENT_PREFIX)) return part;
+      const logicalName = part.slice(RUN_INPUT_ARGUMENT_PREFIX.length);
+      if (!logicalName || logicalName.includes("/") || logicalName.includes("\\")) {
+        throw new Error("$run_input arguments must reference one logical input name");
+      }
+      return dagRunInputPath(run.runId, logicalName);
+    });
+  } catch (error) {
+    return {
+      port: config?.failure_port || "failed",
+      payload: { ok: false, error: error instanceof Error ? error.message : String(error) },
+    };
+  }
   if (config?.command_field && process.env.HOMERAIL_DAG_ALLOW_DYNAMIC_COMMANDS !== "true") {
     return {
       port: config?.failure_port || "failed",
@@ -3679,7 +3946,7 @@ function _commandGatewayResult(run: ActiveRun, node: DAGGraphNode): { port: stri
       : undefined;
   const captureLimit = Math.max(1, Math.floor(config?.capture_limit ?? 64_000));
   const startedAt = Date.now();
-  const result = spawnSync(command[0], command.slice(1), {
+  const result = spawnSync(resolvedCommand[0], resolvedCommand.slice(1), {
     cwd,
     encoding: "utf8",
     timeout: Math.max(100, Math.floor(config?.timeout_ms ?? 30_000)),
@@ -3966,6 +4233,7 @@ function _startAwaitCommand(run: ActiveRun, node: DAGGraphNode): boolean {
 }
 
 interface FanoutRuntimeState {
+  invocation: number;
   items: unknown[];
   context?: unknown;
   next_index: number;
@@ -3979,12 +4247,141 @@ function _fanoutState(node: DAGGraphNode): FanoutRuntimeState | undefined {
   return raw as unknown as FanoutRuntimeState;
 }
 
+function _fanoutSafeRelativePath(raw: unknown, fallback: string): string {
+  const value = typeof raw === "string" && raw.trim() ? raw.trim().replace(/\\/g, "/") : fallback;
+  const segments = value.split("/");
+  if (path.isAbsolute(value) || segments.some((segment) => !segment || segment === "." || segment === ".." || !/^[A-Za-z0-9._-]+$/.test(segment))) {
+    throw new Error(`fanout workspace path '${value}' is unsafe`);
+  }
+  return segments.join("/");
+}
+
+function _fanoutChildWorkspacePath(node: DAGGraphNode, state: FanoutRuntimeState, index: number): string {
+  const root = _fanoutSafeRelativePath(node.gateway_config?.workspace_root, "workers");
+  return `${root}/${node.node_id}/inv_${String(state.invocation).padStart(4, "0")}/item_${String(index + 1).padStart(4, "0")}`;
+}
+
+function _fanoutWorkerRuntime(
+  node: DAGGraphNode,
+  state: FanoutRuntimeState,
+  index: number,
+  childId: string,
+  workspacePath?: string,
+): Record<string, unknown> {
+  const configured = node.gateway_config?.worker_policy;
+  const policy = configured && typeof configured === "object" && !Array.isArray(configured)
+    ? structuredClone(configured as Record<string, unknown>)
+    : {};
+  const replacements: Record<string, string> = {
+    "{{fanout_parent}}": node.node_id,
+    "{{fanout_invocation}}": String(state.invocation),
+    "{{fanout_index}}": String(index + 1),
+    "{{fanout_child}}": childId,
+    ...(workspacePath ? { "{{fanout_workspace}}": workspacePath } : {}),
+  };
+  const replacePath = (value: unknown): unknown => {
+    if (typeof value !== "string") return value;
+    return Object.entries(replacements).reduce((result, [token, replacement]) => result.split(token).join(replacement), value);
+  };
+  const rawAccess = policy.workspace_access;
+  const access = rawAccess && typeof rawAccess === "object" && !Array.isArray(rawAccess)
+    ? structuredClone(rawAccess as Record<string, unknown>)
+    : {};
+  if (workspacePath) {
+    const declaredWritablePaths = Array.isArray(access.writable_paths)
+      ? access.writable_paths.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    if (declaredWritablePaths.length !== 1 || declaredWritablePaths[0] !== "{{fanout_workspace}}") {
+      throw new Error("isolated git worktree fanout must explicitly declare {{fanout_workspace}} as its writable path");
+    }
+    access.writable_paths = [workspacePath];
+  } else {
+    access.writable_paths = Array.isArray(access.writable_paths) ? access.writable_paths.map(replacePath) : [];
+  }
+  access.readonly_paths = Array.from(new Set([
+    "input",
+    ...(Array.isArray(access.readonly_paths) ? access.readonly_paths.map(replacePath).filter((entry): entry is string => typeof entry === "string") : []),
+  ])).sort();
+  policy.workspace_access = access;
+  policy.allowed_builtin_tools = Array.isArray(policy.allowed_builtin_tools) ? policy.allowed_builtin_tools : [];
+  policy.allowed_dag_tools = Array.isArray(policy.allowed_dag_tools) ? policy.allowed_dag_tools : ["handoff"];
+  policy.credentials = Array.isArray(policy.credentials) ? policy.credentials : [];
+  return policy;
+}
+
+function _prepareFanoutGitWorktree(
+  run: ActiveRun,
+  node: DAGGraphNode,
+  state: FanoutRuntimeState,
+  index: number,
+): string | undefined {
+  if (node.gateway_config?.workspace_strategy !== "isolated_git_worktree") return undefined;
+  const workspacePath = _fanoutChildWorkspacePath(node, state, index);
+  const resolved = _commandGatewayCwd(run, RUN_WORKSPACE_CWD);
+  if ("error" in resolved) throw new Error(resolved.error);
+  const runWorkspace = resolved.cwd;
+  const repositoryPath = node.gateway_config?.repository_path === "."
+    ? "."
+    : _fanoutSafeRelativePath(node.gateway_config?.repository_path, "repo");
+  const repository = path.resolve(runWorkspace, repositoryPath);
+  const target = path.resolve(runWorkspace, workspacePath);
+  if (!_pathIsWithin(runWorkspace, repository) || !_pathIsWithin(runWorkspace, target)) {
+    throw new Error("fanout git worktree path escaped the run workspace");
+  }
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const existing = spawnSync("git", ["-C", target, "rev-parse", "--is-inside-work-tree"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    shell: false,
+  });
+  if (existing.status === 0 && String(existing.stdout).trim() === "true") return workspacePath;
+  const selectedRevision = node.gateway_config?.revision_field
+    ? _fieldValue(state.context, node.gateway_config.revision_field)
+    : undefined;
+  const revision = typeof selectedRevision === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(selectedRevision)
+    ? selectedRevision.toLowerCase()
+    : "HEAD";
+  if (revision !== "HEAD") {
+    const local = spawnSync("git", ["-C", repository, "cat-file", "-e", `${revision}^{commit}`], {
+      encoding: "utf8",
+      timeout: 10_000,
+      shell: false,
+    });
+    if (local.status !== 0) {
+      const fetched = spawnSync("git", ["-C", repository, "fetch", "--no-tags", "origin", revision], {
+        encoding: "utf8",
+        timeout: 60_000,
+        maxBuffer: 256_000,
+        shell: false,
+      });
+      if (fetched.status !== 0 || fetched.error) {
+        const detail = String(fetched.stderr || fetched.error?.message || "unknown error").trim().slice(0, 1_000);
+        throw new Error(`fanout git revision fetch failed: ${detail}`);
+      }
+    }
+  }
+  const created = spawnSync("git", ["-C", repository, "worktree", "add", "--detach", target, revision], {
+    encoding: "utf8",
+    timeout: 60_000,
+    maxBuffer: 256_000,
+    shell: false,
+  });
+  if (created.status !== 0 || created.error) {
+    const detail = String(created.stderr || created.error?.message || "unknown error").trim().slice(0, 1_000);
+    throw new Error(`fanout git worktree creation failed: ${detail}`);
+  }
+  return workspacePath;
+}
+
 function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutRuntimeState): void {
   const config = node.gateway_config;
   const maxParallelism = Math.max(1, Math.floor(config?.max_parallelism ?? 1));
   while (state.active.length < maxParallelism && state.next_index < state.items.length) {
     const index = state.next_index++;
-    const childId = `${node.node_id}__item_${String(index + 1).padStart(4, "0")}`;
+    const childId = state.invocation === 1
+      ? `${node.node_id}__item_${String(index + 1).padStart(4, "0")}`
+      : `${node.node_id}__inv_${String(state.invocation).padStart(4, "0")}__item_${String(index + 1).padStart(4, "0")}`;
+    const workspacePath = _prepareFanoutGitWorktree(run, node, state, index);
     const child: DAGGraphNode = {
       node_id: childId,
       name: `${node.name} item ${index + 1}`,
@@ -3997,7 +4394,8 @@ function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutR
         failed: { to: "", condition: "on_failure" },
       },
       extra: {
-        dynamic_fanout: { parent_node: node.node_id, index },
+        dynamic_fanout: { parent_node: node.node_id, index, invocation: state.invocation },
+        agent_runtime: _fanoutWorkerRuntime(node, state, index, childId, workspacePath),
         ...(config?.result_contract ? {
           workflow_spec_v1: {
             input_contracts: {},
@@ -4013,6 +4411,7 @@ function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutR
       index,
       total: state.items.length,
       ...(state.context === undefined ? {} : { context: state.context }),
+      ...(workspacePath === undefined ? {} : { workspace_path: workspacePath }),
     }]);
     state.active.push(childId);
   }
@@ -4041,10 +4440,17 @@ function _startFanout(run: ActiveRun, node: DAGGraphNode): boolean {
       ...(context === undefined ? {} : { context }),
     }));
   }
-  const state: FanoutRuntimeState = { items, context, next_index: 0, active: [], results: [] };
+  const invocation = (run.counters.fanout_invocations[node.node_id] ?? 0) + 1;
+  run.counters.fanout_invocations[node.node_id] = invocation;
+  const state: FanoutRuntimeState = { invocation, items, context, next_index: 0, active: [], results: [] };
   node.extra = { ...(node.extra ?? {}), fanout_runtime: state as unknown as Record<string, unknown> };
   run.dagRun.nodeStates.set(node.node_id, "RUNNING");
-  _spawnFanoutChildren(run, node, state);
+  try {
+    _spawnFanoutChildren(run, node, state);
+  } catch (error) {
+    abortActiveRun(run.runId, error instanceof Error ? error.message : String(error), node.node_id);
+    return false;
+  }
   emit("dag:fanout_started", { runId: run.runId, nodeId: node.node_id, total: items.length, maxParallelism: config?.max_parallelism ?? 1 });
   return true;
 }
@@ -4070,9 +4476,10 @@ function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, c
   const info = dynamic as Record<string, unknown>;
   const parentId = typeof info.parent_node === "string" ? info.parent_node : "";
   const index = typeof info.index === "number" ? info.index : -1;
+  const invocation = typeof info.invocation === "number" ? info.invocation : 1;
   const parent = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === parentId);
   const state = parent ? _fanoutState(parent) : undefined;
-  if (!parent || !state || index < 0 || state.results.some((result) => result.node_id === child.node_id)) return;
+  if (!parent || !state || invocation !== state.invocation || index < 0 || state.results.some((result) => result.node_id === child.node_id)) return;
   state.active = state.active.filter((id) => id !== child.node_id);
   const config = parent.gateway_config;
   const selected = _fieldValue(content, config?.success_field);
@@ -4089,7 +4496,11 @@ function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, c
   const impossible = successes + (total - completed) < threshold;
   const finished = completion === "all" ? completed === total : passed || impossible || completed === total;
   if (!finished) {
-    _spawnFanoutChildren(run, parent, state);
+    try {
+      _spawnFanoutChildren(run, parent, state);
+    } catch (error) {
+      abortActiveRun(run.runId, error instanceof Error ? error.message : String(error), parent.node_id);
+    }
     return;
   }
   if (config?.cancel_remaining) {
@@ -4568,15 +4979,31 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
   const surfaceId = actor.surface_id;
   const actorSurfaceView = getDagActorSurfaceView(run.runId, actorId);
   const correctionOnly = Array.isArray(inputs.correction) && inputs.correction.length > 0;
+  const effectiveCredentialProjections = correctionOnly
+    ? credentialProjections.flatMap((projection) => {
+        if (projection.mode !== "manager_broker") return [];
+        const requiredActions = new Set(_outputBrokerActionRequirements(run, nodeId)
+          .filter((requirement) => (
+            requirement.credential_ref === projection.credential_ref
+            && requirement.broker === projection.broker
+          ))
+          .map((requirement) => requirement.action));
+        const allowedActions = projection.allowed_actions.filter((action) => requiredActions.has(action));
+        return allowedActions.length > 0 ? [{ ...projection, allowed_actions: allowedActions }] : [];
+      })
+    : credentialProjections;
   const requestedCheckpointVersion = actor.checkpoint_ref?.match(/^portable:(\d+)$/)?.[1];
-  const actorCheckpointRecord = requestedCheckpointVersion
+  const freshDispatchContext = _nodeSessionScope(node) === "dispatch";
+  const actorCheckpointRecord = freshDispatchContext
+    ? undefined
+    : requestedCheckpointVersion
     ? getDagActorCheckpoint({
         run_id: run.runId,
         actor_id: actorId,
         checkpoint_version: Number(requestedCheckpointVersion),
       })
     : getLatestDagActorCheckpoint({ run_id: run.runId, actor_id: actorId });
-  if (requestedCheckpointVersion && !actorCheckpointRecord) {
+  if (!freshDispatchContext && requestedCheckpointVersion && !actorCheckpointRecord) {
     return { ok: false, reason: `portable checkpoint ${requestedCheckpointVersion} is unavailable for actor ${actorId}` };
   }
   const actorCheckpoint = actorCheckpointRecord?.checkpoint;
@@ -4627,7 +5054,9 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
       allowedBuiltinTools: _allowedBuiltinTools(node),
       maxBuiltinToolCalls: _maxBuiltinToolCalls(run, node),
       allowedDagTools: _allowedDagTools(node),
-      ...(credentialProjections.length > 0 ? { credentialProjections } : {}),
+      ...(effectiveCredentialProjections.length > 0
+        ? { credentialProjections: effectiveCredentialProjections }
+        : {}),
       activity: {
         roundId: run.currentRound.round_id,
         actorId,
@@ -4692,6 +5121,8 @@ export function dispatchReadyNodes(
       if (run.status !== "active") break;
       continue;
     }
+
+    _prepareNodeSessionForDispatch(run, node);
 
     const built = _buildDispatchEnvelope(run, nodeId);
     if (!built.ok) {
@@ -4763,6 +5194,7 @@ export function markNodeDispatched(
   if (!node) return false;
 
   const before = _snapshotNodeStates(run);
+  _prepareNodeSessionForDispatch(run, node);
   startNode(run.dagRun, nodeId);
   const nodeSession = _ensureNodeSession(run, nodeId);
   _markNodeSessionStatus(run, nodeId, "running");

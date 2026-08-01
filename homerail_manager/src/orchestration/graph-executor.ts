@@ -1,6 +1,7 @@
 import type { DAGDispatcher } from "./dag-dispatcher.js";
 import type { ParsedDAG } from "./graph.js";
 import type { ActiveRun } from "../runtime/active-runs.js";
+import type { DagRunInputBinding } from "homerail-protocol";
 import {
   createActiveRun,
   dispatchReadyNodes,
@@ -11,8 +12,13 @@ import { isRunTerminal } from "./dag-engine.js";
 export class GraphExecutor {
   constructor(private dispatcher: DAGDispatcher) {}
 
-  createRun(runId: string, parsedDAG: ParsedDAG, initialPrompt?: string): ActiveRun {
-    return createActiveRun(runId, parsedDAG, { initialPrompt });
+  createRun(
+    runId: string,
+    parsedDAG: ParsedDAG,
+    initialPrompt?: string,
+    inputArtifacts?: DagRunInputBinding[],
+  ): ActiveRun {
+    return createActiveRun(runId, parsedDAG, { initialPrompt, inputArtifacts });
   }
 
   tick(runId: string): number {

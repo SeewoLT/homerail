@@ -34,6 +34,8 @@ const CLEARABLE_TABLES = new Set([
   "dag_chats",
   "dag_handoffs",
   "dag_artifacts",
+  "dag_run_inputs",
+  "dag_input_artifacts",
   "dag_actor_surface_snapshots",
   "dag_actor_surface_views",
   "dag_actor_surface_patch_queue",
@@ -1941,6 +1943,42 @@ function validateDagRunHotPathIndexesV33(db: SqliteDatabase): void {
       || actualColumns.some((column, position) => column !== expectedColumns[position])
     ) {
       throw new Error(`Schema migration 33 is incomplete: index ${name} has invalid columns`);
+    }
+  }
+}
+
+function validateDagRunInputSchemaV34(db: SqliteDatabase): void {
+  for (const table of ["dag_input_artifacts", "dag_run_inputs"]) {
+    if (!hasTable(db, table)) {
+      throw new Error(`Schema migration 34 is incomplete: missing table ${table}`);
+    }
+  }
+  const artifactColumns = new Set(
+    (db.prepare("PRAGMA table_info(dag_input_artifacts)").all() as Array<{ name: string }>)
+      .map((entry) => entry.name),
+  );
+  for (const column of [
+    "artifact_id", "scope_id", "name", "media_type", "sha256", "size_bytes", "created_at",
+  ]) {
+    if (!artifactColumns.has(column)) {
+      throw new Error(`Schema migration 34 is incomplete: dag_input_artifacts is missing ${column}`);
+    }
+  }
+  const bindingColumns = new Set(
+    (db.prepare("PRAGMA table_info(dag_run_inputs)").all() as Array<{ name: string }>)
+      .map((entry) => entry.name),
+  );
+  for (const column of [
+    "run_id", "logical_name", "artifact_id", "mount_path", "sha256", "size_bytes",
+    "media_type", "name", "created_at",
+  ]) {
+    if (!bindingColumns.has(column)) {
+      throw new Error(`Schema migration 34 is incomplete: dag_run_inputs is missing ${column}`);
+    }
+  }
+  for (const trigger of ["trg_dag_input_artifacts_no_update", "trg_dag_run_inputs_no_update"]) {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(trigger)) {
+      throw new Error(`Schema migration 34 is incomplete: missing trigger ${trigger}`);
     }
   }
 }
@@ -4119,6 +4157,64 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
     validate: validateDagRunHotPathIndexesV33,
+  },
+  {
+    version: 34,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dag_input_artifacts (
+          artifact_id TEXT PRIMARY KEY,
+          scope_id TEXT NOT NULL CHECK(length(scope_id) BETWEEN 1 AND 128),
+          name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+          media_type TEXT NOT NULL CHECK(media_type IN (
+            'text/markdown', 'text/plain', 'application/json'
+          )),
+          sha256 TEXT NOT NULL CHECK(
+            length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          size_bytes INTEGER NOT NULL CHECK(size_bytes BETWEEN 1 AND 1048576),
+          created_at INTEGER NOT NULL CHECK(created_at >= 0),
+          UNIQUE(scope_id, name, media_type, sha256)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dag_input_artifacts_scope_created
+          ON dag_input_artifacts(scope_id, created_at, artifact_id);
+        CREATE TRIGGER IF NOT EXISTS trg_dag_input_artifacts_no_update
+        BEFORE UPDATE ON dag_input_artifacts
+        BEGIN
+          SELECT RAISE(ABORT, 'DAG input artifacts are immutable');
+        END;
+
+        CREATE TABLE IF NOT EXISTS dag_run_inputs (
+          run_id TEXT NOT NULL,
+          logical_name TEXT NOT NULL CHECK(length(logical_name) BETWEEN 1 AND 128),
+          artifact_id TEXT NOT NULL,
+          mount_path TEXT NOT NULL CHECK(length(mount_path) BETWEEN 7 AND 512),
+          sha256 TEXT NOT NULL CHECK(
+            length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          size_bytes INTEGER NOT NULL CHECK(size_bytes BETWEEN 1 AND 1048576),
+          media_type TEXT NOT NULL CHECK(media_type IN (
+            'text/markdown', 'text/plain', 'application/json'
+          )),
+          name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+          created_at INTEGER NOT NULL CHECK(created_at >= 0),
+          PRIMARY KEY(run_id, logical_name),
+          UNIQUE(run_id, mount_path),
+          FOREIGN KEY(run_id) REFERENCES dag_runs(run_id)
+            ON UPDATE RESTRICT ON DELETE CASCADE,
+          FOREIGN KEY(artifact_id) REFERENCES dag_input_artifacts(artifact_id)
+            ON UPDATE RESTRICT ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_dag_run_inputs_artifact
+          ON dag_run_inputs(artifact_id, run_id);
+        CREATE TRIGGER IF NOT EXISTS trg_dag_run_inputs_no_update
+        BEFORE UPDATE ON dag_run_inputs
+        BEGIN
+          SELECT RAISE(ABORT, 'DAG run input bindings are immutable');
+        END;
+      `);
+    },
+    validate: validateDagRunInputSchemaV34,
   },
 ];
 
