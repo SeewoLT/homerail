@@ -255,8 +255,10 @@ test("candidate uses protected release environment without Deployment records", 
   assert.doesNotMatch(candidateWorkflow, /runs-on:.*self-hosted/);
 });
 
-test("candidate signs macOS, explicitly leaves Windows Alpha unsigned, and creates metadata", () => {
+test("candidate signs Beta on Windows and macOS while preserving the unsigned Alpha policy", () => {
   for (const secret of [
+    "WIN_CSC_LINK",
+    "WIN_CSC_KEY_PASSWORD",
     "MAC_CSC_LINK",
     "MAC_CSC_KEY_PASSWORD",
     "APPLE_API_KEY_P8",
@@ -266,23 +268,24 @@ test("candidate signs macOS, explicitly leaves Windows Alpha unsigned, and creat
   ]) {
     assert.match(candidateWorkflow, new RegExp(`secrets\\.${secret}`));
   }
-  assert.doesNotMatch(candidateWorkflow, /WIN_CSC_LINK|WIN_CSC_KEY_PASSWORD/);
-  assert.doesNotMatch(candidateWorkflow, /Build signed candidate/);
 
-  const prepareGuard = candidateStep("Require Alpha while Windows signing is unavailable");
-  assert.match(prepareGuard, /\[\[ "\$RELEASE_CHANNEL" != "alpha" \]\]/);
-  assert.match(prepareGuard, /Beta and Stable require trusted Windows Authenticode signing/);
+  const prepareGuard = candidateStep("Allow Alpha and Beta release channels");
+  assert.match(prepareGuard, /\[\[ "\$RELEASE_CHANNEL" == "latest" \]\]/);
+  assert.match(prepareGuard, /supports Alpha and Beta/);
 
-  const windowsGuard = candidateStep("Require Alpha for unsigned Windows installer");
-  assert.match(windowsGuard, /if: runner\.os == 'Windows'/);
-  assert.match(windowsGuard, /if \(\$env:RELEASE_CHANNEL -ne 'alpha'\)/);
-  assert.match(windowsGuard, /Beta and Stable require trusted Authenticode signing/);
+  const windowsAlphaBuild = candidateStep("Build unsigned Windows Alpha installer");
+  assert.match(windowsAlphaBuild, /needs\.prepare\.outputs\.channel == 'alpha'/);
+  assert.match(windowsAlphaBuild, /--config\.win\.signExecutable=false/);
+  assert.match(windowsAlphaBuild, /--config\.win\.verifyUpdateCodeSignature=false/);
+  assert.match(windowsAlphaBuild, /--config\.publish\.channel=/);
+  assert.doesNotMatch(windowsAlphaBuild, /forceCodeSigning|WIN_CSC/);
 
-  const windowsBuild = candidateStep("Build unsigned Windows Alpha installer");
-  assert.match(windowsBuild, /--config\.win\.signExecutable=false/);
-  assert.match(windowsBuild, /--config\.win\.verifyUpdateCodeSignature=false/);
-  assert.match(windowsBuild, /--config\.publish\.channel=/);
-  assert.doesNotMatch(windowsBuild, /forceCodeSigning|WIN_CSC/);
+  const windowsBetaBuild = candidateStep("Build signed Windows Beta installer");
+  assert.match(windowsBetaBuild, /needs\.prepare\.outputs\.channel == 'beta'/);
+  assert.match(windowsBetaBuild, /secrets\.WIN_CSC_LINK/);
+  assert.match(windowsBetaBuild, /secrets\.WIN_CSC_KEY_PASSWORD/);
+  assert.match(windowsBetaBuild, /--config\.forceCodeSigning=true/);
+  assert.match(windowsBetaBuild, /--config\.publish\.channel=/);
   assert.equal(
     (candidateWorkflow.match(/--config\.win\.signExecutable=false/g) ?? []).length,
     1,
@@ -300,8 +303,8 @@ test("candidate signs macOS, explicitly leaves Windows Alpha unsigned, and creat
   assert.match(macBuild, /--config\.mac\.notarize=true/);
   assert.match(macBuild, /--config\.mac\.entitlements=/);
   assert.match(macBuild, /--config\.mac\.entitlementsInherit=/);
-  assert.equal((candidateWorkflow.match(/--config\.forceCodeSigning=true/g) ?? []).length, 1);
-  assert.equal((candidateWorkflow.match(/--config\.publish\.channel=/g) ?? []).length, 2);
+  assert.equal((candidateWorkflow.match(/--config\.forceCodeSigning=true/g) ?? []).length, 2);
+  assert.equal((candidateWorkflow.match(/--config\.publish\.channel=/g) ?? []).length, 3);
   assert.match(candidateWorkflow, /verify:update-metadata/);
   assert.match(candidateWorkflow, /metadata_release_channel=stable/);
   assert.match(candidateWorkflow, /'latest\.yml', 'alpha\.yml', 'beta\.yml'/);
@@ -331,7 +334,7 @@ test("macOS release entitlements enable microphone input for the app and helpers
   );
 });
 
-test("Windows candidate runs Node 24 CI before building and smoke-testing unsigned Alpha", () => {
+test("Windows candidate runs Node 24 CI before channel-specific signing and installation smoke", () => {
   assert.match(candidateWorkflow, /RELEASE_NODE_VERSION: 24\.18\.0/);
   assert.match(candidateWorkflow, /name: Run public Windows Node 24 CI/);
   assert.match(candidateWorkflow, /npm --prefix homerail-source run ci/);
@@ -343,16 +346,17 @@ test("Windows candidate runs Node 24 CI before building and smoke-testing unsign
   assert.match(candidateWorkflow, /VITEST_TEST_TIMEOUT: "15000"/);
   assert.match(candidateWorkflow, /VITEST_HOOK_TIMEOUT: "30000"/);
 
-  const packageVerificationStep = candidateStep("Verify unsigned Windows Alpha package");
+  const packageVerificationStep = candidateStep("Verify Windows package and signing policy");
   assert.match(packageVerificationStep, /npm --prefix desktop run verify:package/);
   assert.match(packageVerificationStep, /if \(\$LASTEXITCODE -ne 0\)/);
   assert.match(packageVerificationStep, /\$installers\.Count -ne 1/);
   assert.match(
     packageVerificationStep,
-    /Get-AuthenticodeSignature -LiteralPath \$installer\.FullName/,
+    /Get-AuthenticodeSignature -LiteralPath \$signedFile/,
   );
   assert.match(packageVerificationStep, /\$signature\.StatusMessage/);
   assert.match(packageVerificationStep, /if \(\$signature\.Status -ne 'NotSigned'\)/);
+  assert.match(packageVerificationStep, /if \(\$signature\.Status -ne 'Valid'\)/);
   assert.match(
     packageVerificationStep,
     /if \(\$null -ne \$signature\.SignerCertificate\)/,
@@ -367,18 +371,19 @@ test("Windows candidate runs Node 24 CI before building and smoke-testing unsign
   );
   assert.ok(
     packageVerificationStep.includes(
-      "if ($appUpdateYaml -match '(?m)^\\s*publisherName\\s*:')",
+      "$hasPublisherName = $appUpdateYaml -match '(?m)^\\s*publisherName\\s*:'",
     ),
   );
   assert.match(packageVerificationStep, /must not contain publisherName/);
+  assert.match(packageVerificationStep, /must contain publisherName/);
   for (const expectedUpdateTarget of [
     "provider: github",
     "owner: xiaotianfotos",
     "repo: homerail",
-    "channel: alpha",
   ]) {
     assert.match(packageVerificationStep, new RegExp(expectedUpdateTarget));
   }
+  assert.match(packageVerificationStep, /"channel: \$env:RELEASE_CHANNEL"/);
   assert.match(packageVerificationStep, /\[regex\]::Escape\(\$expectedLine\)/);
   assert.match(packageVerificationStep, /\$appUpdateYaml -notmatch \$pattern/);
 
@@ -409,10 +414,10 @@ test("Windows candidate runs Node 24 CI before building and smoke-testing unsign
   const publicCi = candidateWorkflow.indexOf("Run public Windows Node 24 CI");
   const publicCliVersion = candidateWorkflow.indexOf("Verify public Windows CLI release version");
   const desktopCi = candidateWorkflow.indexOf("Run Desktop Windows CI");
-  const guard = candidateWorkflow.indexOf("Require Alpha for unsigned Windows installer");
-  const build = candidateWorkflow.indexOf("Build unsigned Windows Alpha installer");
+  const alphaBuild = candidateWorkflow.indexOf("Build unsigned Windows Alpha installer");
+  const betaBuild = candidateWorkflow.indexOf("Build signed Windows Beta installer");
   const metadata = candidateWorkflow.indexOf("Prepare and verify Windows update metadata");
-  const packageVerification = candidateWorkflow.indexOf("Verify unsigned Windows Alpha package");
+  const packageVerification = candidateWorkflow.indexOf("Verify Windows package and signing policy");
   const checksums = candidateWorkflow.indexOf("Write Windows checksums");
   const installSmoke = candidateWorkflow.indexOf("Smoke-test silent Windows installation");
   const upload = candidateWorkflow.indexOf("Upload Windows candidate assets");
@@ -421,8 +426,8 @@ test("Windows candidate runs Node 24 CI before building and smoke-testing unsign
     publicCi,
     publicCliVersion,
     desktopCi,
-    guard,
-    build,
+    alphaBuild,
+    betaBuild,
     metadata,
     packageVerification,
     checksums,
@@ -435,9 +440,9 @@ test("Windows candidate runs Node 24 CI before building and smoke-testing unsign
     install < publicCi
       && publicCi < publicCliVersion
       && publicCliVersion < desktopCi
-      && desktopCi < guard
-      && guard < build
-      && build < metadata
+      && desktopCi < alphaBuild
+      && alphaBuild < betaBuild
+      && betaBuild < metadata
       && metadata < packageVerification
       && packageVerification < checksums
       && checksums < installSmoke
@@ -471,8 +476,8 @@ test("publish consumes a successful candidate without rebuilding it", () => {
   const manifestRead = candidateVerification.indexOf(
     'JSON.parse(fs.readFileSync("candidate/release-manifest.json", "utf8"))',
   );
-  const alphaGuard = candidateVerification.indexOf(
-    'if (manifest.channel !== "alpha")',
+  const prereleaseGuard = candidateVerification.indexOf(
+    'if (!["alpha", "beta"].includes(manifest.channel))',
   );
   const tagCheck = publishWorkflow.indexOf(
     "Refuse to replace an existing tag or release",
@@ -483,11 +488,11 @@ test("publish consumes a successful candidate without rebuilding it", () => {
   );
   assert.match(
     candidateVerification,
-    /only Alpha candidates may be published while Windows installers are unsigned/,
+    /only Alpha and Beta candidates may be published/,
   );
   for (const index of [
     manifestRead,
-    alphaGuard,
+    prereleaseGuard,
     tagCheck,
     tagCreation,
     releaseCreation,
@@ -495,7 +500,7 @@ test("publish consumes a successful candidate without rebuilding it", () => {
     assert.notEqual(index, -1);
   }
   assert.ok(
-    manifestRead < alphaGuard
+    manifestRead < prereleaseGuard
       && publishWorkflow.indexOf("Verify candidate identity, assets, and checksums")
         < tagCheck
       && tagCheck < tagCreation
@@ -520,7 +525,9 @@ test("release docs preserve candidate, publish, update-test, and fix-forward bou
   assert.match(releaseDocs, /GitHub Release[\s\S]*SHA-512/);
   assert.match(releaseDocs, /weaker than trusted Authenticode/i);
   assert.match(releaseDocs, /only permitted for Alpha/i);
-  assert.match(releaseDocs, /Beta and Stable[\s\S]*trusted Windows signing/i);
+  assert.match(releaseDocs, /Beta is the active test channel/i);
+  assert.match(releaseDocs, /Windows Beta uses `WIN_CSC_LINK`/i);
+  assert.match(releaseDocs, /Authenticode reports\s+`Valid`/i);
   assert.match(releaseDocs, /SignPath Foundation/);
   assert.match(releaseDocs, /not been applied for or\s+approved/i);
   assert.match(
@@ -535,7 +542,7 @@ test("release docs preserve candidate, publish, update-test, and fix-forward bou
     releaseDocs,
     /only on the Windows Alpha\s+electron-builder command/i,
   );
-  assert.doesNotMatch(releaseDocs, /WIN_CSC_LINK|WIN_CSC_KEY_PASSWORD/);
+  assert.match(releaseDocs, /WIN_CSC_LINK|WIN_CSC_KEY_PASSWORD/);
 });
 
 test("candidate pins a merged Desktop commit before installing or signing", () => {

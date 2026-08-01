@@ -3,7 +3,7 @@
  *
  * Single source of truth for all runtime communication between
  * homerail_worker, homerail_node, and homerail_manager.
- * @version 0.1.0-alpha.3
+ * @version 0.1.0-beta.1
  */
 
 /**
