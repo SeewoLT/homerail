@@ -283,8 +283,10 @@ function writeCandidate(args) {
   const phase = manifest.prerelease ? `${args.channel} prerelease` : "stable release";
   const windowsPolicyNote =
     args.channel === "alpha"
-      ? "- Windows: explicitly unsigned Alpha installer, verified as unsigned under the Alpha release policy."
-      : `- Windows: trusted Authenticode signing is required for this ${phase}.`;
+      ? "- Windows: explicitly unsigned Alpha installer, verified as unsigned under the current release policy."
+      : args.channel === "beta"
+        ? "- Windows: explicitly unsigned Beta prerelease installer, verified as unsigned under the current release policy."
+        : `- Windows: trusted Authenticode signing is required for this ${phase}.`;
   const prereleaseWarning =
     args.channel === "alpha"
       ? [
