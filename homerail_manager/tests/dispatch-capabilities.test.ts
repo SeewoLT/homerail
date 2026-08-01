@@ -518,7 +518,7 @@ nodes:
     });
   });
 
-  it("provisions a run-scoped worker instead of reusing generic workers for isolated workspaces", async () => {
+  it("provisions an isolated run-scoped worker without sending empty workspace inputs", async () => {
     const genericSocket = makeSocket();
     const nodeSocket = makeSocket();
     const created: Array<{
@@ -527,6 +527,7 @@ nodes:
       image?: string;
       workspace?: Record<string, unknown>;
       workspaceReadOnly?: boolean;
+      workspaceInputs?: unknown[];
     }> = [];
     registerWorker({
       worker_id: "generic-worker",
@@ -558,6 +559,7 @@ nodes:
             image: opts.image,
             workspace: opts.workspace,
             workspaceReadOnly: opts.workspaceReadOnly,
+            workspaceInputs: opts.workspaceInputs,
           });
           return { status: "success", resource_data: { id: "container-1" } };
         },
@@ -587,6 +589,7 @@ nodes:
           image: "custom-worker:v2",
           workspace: { mode: "isolated" },
           workspaceReadOnly: true,
+          workspaceInputs: undefined,
         },
       ]);
     });

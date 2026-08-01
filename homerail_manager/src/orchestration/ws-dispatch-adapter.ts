@@ -602,13 +602,14 @@ export class WsDispatchAdapter implements DAGDispatcher {
       `provisioned-${envelope.runId}-${envelope.nodeId}-${randomUUID()}`,
     );
     const agentBackend = normalizeAgentBackend(envelope.agentConfig.agent_type);
+    const workspaceInputs = dagWorkspaceInputProjections(envelope.runId);
     const provisionerOpts: ProvisionerOptions = {
       ...this.provisionerOpts,
       image: envelope.image ?? this.provisionerOpts?.image,
       workspace: this.provisionerOpts?.workspace ?? envelope.workspace,
       workspaceReadOnly: Array.isArray(envelope.workspaceAccess?.writable_paths) &&
         envelope.workspaceAccess.writable_paths.length === 0,
-      workspaceInputs: dagWorkspaceInputProjections(envelope.runId),
+      ...(workspaceInputs.length > 0 ? { workspaceInputs } : {}),
       env: {
         ...(this.provisionerOpts?.env ?? {}),
         ...(agentBackend ? { AGENT_BACKEND: agentBackend } : {}),
