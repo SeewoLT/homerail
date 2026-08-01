@@ -86,8 +86,8 @@ jobs:
           node - <<'NODE'
           const fs = require("node:fs");
           const manifest = JSON.parse(fs.readFileSync("candidate/release-manifest.json", "utf8"));
-          if (!["alpha", "beta"].includes(manifest.channel)) {
-            throw new Error(`only Alpha and Beta candidates may be published; got ${manifest.channel}`);
+          if (manifest.channel !== "beta") {
+            throw new Error(`only Beta candidates may be published; Alpha is retired and Stable remains gated; got ${manifest.channel}`);
           }
           if (manifest.source_commit !== process.env.EXPECTED_SOURCE_SHA) {
             throw new Error(`candidate source ${manifest.source_commit} does not match workflow ${process.env.EXPECTED_SOURCE_SHA}`);

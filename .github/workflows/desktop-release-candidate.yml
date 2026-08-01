@@ -316,6 +316,8 @@ jobs:
         run: |
           $metadataNames = if ($env:RELEASE_CHANNEL -eq 'latest') {
             @('latest.yml', 'alpha.yml', 'beta.yml')
+          } elseif ($env:RELEASE_CHANNEL -eq 'beta') {
+            @('beta.yml', 'alpha.yml')
           } else {
             @("$env:RELEASE_CHANNEL.yml")
           }
@@ -540,6 +542,8 @@ jobs:
           metadata_names=("${RELEASE_CHANNEL}-mac.yml")
           if [[ "$RELEASE_CHANNEL" == "latest" ]]; then
             metadata_names=("latest-mac.yml" "alpha-mac.yml" "beta-mac.yml")
+          elif [[ "$RELEASE_CHANNEL" == "beta" ]]; then
+            metadata_names=("beta-mac.yml" "alpha-mac.yml")
           fi
           asset_list="$RUNNER_TEMP/homerail-macos-release-assets.txt"
           find . -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.blockmap' \) -print > "$asset_list"

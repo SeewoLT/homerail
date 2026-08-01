@@ -11,7 +11,8 @@ version across the public runtime packages and the private Desktop shell:
 0.1.0
 ```
 
-Alpha remains the legacy early-access channel, Beta is the active test channel,
+Alpha is a retired legacy feed retained only as an upgrade bridge for installed
+Alpha clients. Alpha publishing is retired, Beta is the active test channel,
 and Stable remains reserved for later quality gates. Git tags use the updater-compatible form
 `v0.1.0-alpha.1`; component prefixes such as `desktop-v` are not allowed.
 When npm publication is enabled, the matching dist-tags are `alpha`, `beta`,
@@ -140,12 +141,15 @@ The workflow:
 6. creates platform checksums and a combined release manifest;
 7. uploads one `desktop-release-candidate` Actions artifact for 30 days.
 
-Alpha emits `alpha.yml` / `alpha-mac.yml`; Beta emits `beta.yml` /
-`beta-mac.yml`. Stable emits canonical `latest.yml` / `latest-mac.yml` plus
-byte-identical Alpha and Beta compatibility metadata from the same build. Those
-aliases let a persisted Early Access installation traverse Alpha → Beta → Stable
-without relying on updater fallback behavior. Every emitted metadata file is
-covered by both the platform checksum list and the combined candidate manifest.
+Historical Alpha candidates emit `alpha.yml` / `alpha-mac.yml`. Beta emits
+canonical `beta.yml` / `beta-mac.yml` plus a byte-identical Alpha compatibility
+alias from the same build. That one-way bridge lets already-installed Alpha
+clients discover Beta without publishing another Alpha version. New Desktop
+clients always map Early Access to the Beta feed. Stable emits canonical
+`latest.yml` / `latest-mac.yml` plus byte-identical Alpha and Beta compatibility
+metadata from the same build, after the separate Stable gate is enabled. Every
+emitted metadata file is covered by both the platform checksum list and the
+combined candidate manifest.
 
 ### Windows channel signing policy
 
@@ -227,12 +231,14 @@ job:
 4. refuses to replace an existing tag or release;
 5. creates an annotated `v<version>` tag at the candidate's public source
    commit;
-6. creates a GitHub prerelease for the exact Alpha or Beta candidate without
+6. creates a GitHub prerelease for the exact Beta candidate without
    rebuilding.
 
-The Publish workflow accepts only Alpha or Beta manifests before tag and release
-lookup or creation. Stable publishing remains blocked until its policy is
-deliberately enabled.
+The Publish workflow accepts only Beta manifests before tag and release lookup
+or creation. Alpha publishing is retired; the Alpha-named files attached to a
+Beta Release are compatibility metadata pointing to the same immutable Beta
+assets, not a new Alpha release. Stable publishing remains blocked until its
+policy is deliberately enabled.
 
 This is the point at which the tag is created. Do not create the version tag
 when merging code or starting a candidate build.
