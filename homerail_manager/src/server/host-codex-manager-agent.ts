@@ -74,6 +74,92 @@ type ToolHandlerResult = {
   is_error?: boolean;
 };
 
+/**
+ * Statuses that mark a plugin/Manager tool mutation as unsuccessful from the
+ * model's point of view. Only `committed` represents a successful UI mutation;
+ * `failed`, `denied`, and `cancelled` must be surfaced to the model as tool
+ * errors so it does not claim a panel was updated when no document revision
+ * actually changed.
+ *
+ * See issue #168 (false canvas-update success).
+ */
+const PLUGIN_TOOL_FAILURE_STATUSES = new Set(["failed", "denied", "cancelled"]);
+
+/**
+ * Statuses that represent an in-flight or successful outcome, where an
+ * `error_code` (if any) should NOT be treated as a failure. Per the plugin-tool
+ * protocol, `error_code` only accompanies terminal failure records, but we scope
+ * defensively so an informational `error_code` on a `committed`/`running`
+ * outcome is never misclassified as a tool error. `projected` is included so the
+ * local-projection envelope invariant (projected is non-terminal and non-error,
+ * for host/worker parity) is enforced structurally even if a future change
+ * attaches an `error_code` to it.
+ */
+const PLUGIN_TOOL_NON_FAILURE_STATUSES = new Set(["committed", "running", "projected"]);
+
+/**
+ * Inspect a raw plugin-tool response body (the value returned by
+ * `/plugins/tools/invoke` or a local projection envelope) and decide whether it
+ * must be reported to the model as a tool error.
+ *
+ * The Manager wraps runtime tool outcomes as `{ success, data: { status,
+ * error_code } }`. The host adapter only looks at `result.is_error`, so this
+ * helper translates a nested `data.status` failure (or an explicit top-level
+ * `success: false`, or a present `error_code` on a non-success status) into
+ * `is_error: true`.
+ *
+ * Note: a local projection envelope `{ status: "projected", committed: false }`
+ * is intentionally NOT treated as an error. It is a legitimate non-terminal
+ * "projected but not yet committed" state that both the voice host and the
+ * non-voice worker produce identically (see manager-agent-tool-parity); flagging
+ * it would break result-envelope parity. The false-success bug in #168 is about
+ * the runtime invoke path returning `data.status = "failed"`, which IS caught
+ * below.
+ */
+export function isPluginToolEnvelopeFailure(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const record = body as Record<string, unknown>;
+
+  if (record.success === false) return true;
+
+  const data = record.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const inner = data as Record<string, unknown>;
+    const status = typeof inner.status === "string" ? inner.status : "";
+    if (PLUGIN_TOOL_FAILURE_STATUSES.has(status)) return true;
+    if (inner.success === false) return true;
+    // Only treat error_code as a failure when the status is not an explicit
+    // success/in-flight state, so an informational error_code on a committed
+    // outcome is never misclassified.
+    if (
+      !PLUGIN_TOOL_NON_FAILURE_STATUSES.has(status)
+      && typeof inner.error_code === "string"
+      && inner.error_code
+    ) return true;
+  }
+
+  const status = typeof record.status === "string" ? record.status : "";
+  if (PLUGIN_TOOL_FAILURE_STATUSES.has(status)) return true;
+  if (
+    !PLUGIN_TOOL_NON_FAILURE_STATUSES.has(status)
+    && typeof record.error_code === "string"
+    && record.error_code
+  ) return true;
+
+  return false;
+}
+
+/**
+ * Wrap a plugin-tool response body into a {@link ToolHandlerResult}, honoring
+ * nested failure statuses so the adapter reports `is_error: true`.
+ */
+function pluginToolResult(body: unknown): ToolHandlerResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(body) }],
+    is_error: isPluginToolEnvelopeFailure(body),
+  };
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -1775,7 +1861,7 @@ export function createManagerTools(
         arguments: args,
       }),
     });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return pluginToolResult(result);
   };
   const generatedViewDescriptor = responseMode === "voice"
     ? pluginContext?.tools.find((tool) => tool.qualified_id === "com.homerail.core:upsert_generated_view")
@@ -1845,11 +1931,24 @@ export function createManagerTools(
         } catch {
           throw new Error("Generated view Tool returned an invalid result");
         }
-        state.objectiveToolCalls.push({ name: "skill_view_present", success: true });
-        return { content: [{
-          type: "text",
-          text: JSON.stringify(compactManagerAgentSkillViewPresentResult(resultBody, responseText)),
-        }] };
+        // Derive objective success from the plugin-tool result so a failed/
+        // denied/cancelled presentation (data.status failure surfaced as
+        // is_error by pluginToolResult) is not counted as a satisfied
+        // required tool call. Mirrors how the adapter and successfulToolCallNames
+        // classify results. See issue #168.
+        const presentIsError = result.is_error === true;
+        state.objectiveToolCalls.push({ name: "skill_view_present", success: !presentIsError });
+        // Propagate is_error onto the model-visible tool result too — otherwise a
+        // non-throwing failure envelope (data.status=failed) would still reach the
+        // model as success even though the objective is marked failed, recreating
+        // the #168 false-success on this path.
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(compactManagerAgentSkillViewPresentResult(resultBody, responseText)),
+          }],
+          is_error: presentIsError || undefined,
+        };
       },
     });
     tools.push({

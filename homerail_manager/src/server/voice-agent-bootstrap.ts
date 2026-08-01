@@ -765,6 +765,40 @@ function syncWorkspaceRunIds(workspace: VoiceWorkspace, runIds: string[]): void 
   workspace.manager_run_id = unique.length ? unique[unique.length - 1] : null;
 }
 
+/**
+ * Decide whether the current Live Voice run-id list should be written back to
+ * the persisted workspace. An empty list (e.g. right after reconnect, before any
+ * Manager tool has run) must NEVER clear an existing `manager_run_id` pointer —
+ * doing so yanks the canvas owner and forces the UI back onto the canonical
+ * view. This mirrors the guard the non-Live-Voice turn path already applies.
+ *
+ * Extracted as a pure helper so the policy is unit-testable. See issue #168.
+ */
+export function shouldSyncLiveVoiceRunIds(runIds: readonly string[]): boolean {
+  return runIds.length > 0;
+}
+
+/**
+ * Compute the merged run-id list a Live Voice flush should write: the latest
+ * persisted workspace history (`workspaceRunIds(workspace)`) followed by the
+ * runs created by this binding (`newRunIds`), de-duplicated, order-preserving.
+ *
+ * This is a MERGE, not an overwrite. The persisted history may have advanced to
+ * a newer canvas owner (run B) after this binding was established; merging
+ * keeps B in history and only advances the active pointer when this binding
+ * genuinely created a newer run (because `syncWorkspaceRunIds` sets
+ * `manager_run_id = merged.at(-1)`). Pure helper for unit testing. See #168.
+ */
+export function appendWorkspaceRunIds(
+  workspace: VoiceWorkspace,
+  newRunIds: readonly string[],
+): string[] {
+  const merged = [...workspaceRunIds(workspace), ...newRunIds]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(merged));
+}
+
 function syncVoiceWorkspaceTables(workspace: VoiceWorkspace): void {
   const db = getDb();
   const sessionStatus = workspace.progress_brief.status === "error" ? "failed" : workspace.progress_brief.status;
@@ -1930,6 +1964,13 @@ export async function createCodexLiveVoiceBinding(input: {
     workspace: cwd,
     projectId: workspace.project_id ?? agentConfig.project_id,
     sessionId: workspace.session_id,
+    // Only record runs created BY THIS binding. Do NOT seed with the persisted
+    // history: `flush_tool_state` merges this list with the latest workspace
+    // (see appendWorkspaceRunIds), so seeding the full snapshot would turn a
+    // stale startup snapshot into write authority and let a later flush revert
+    // a newer canvas owner or reactivate a terminal run. An empty list is a
+    // no-op flush (shouldSyncLiveVoiceRunIds returns false), so reconnect never
+    // yanks the pointer either.
     createdRunIds: [],
     finalNotes: [],
     objectiveToolCalls: [],
@@ -2122,7 +2163,14 @@ export async function createCodexLiveVoiceBinding(input: {
     },
     flush_tool_state: () => {
       const next = currentWorkspace();
-      syncWorkspaceRunIds(next, state.createdRunIds);
+      // Merge — never overwrite. Only runs created by THIS binding are appended
+      // to the latest persisted history, so an external canvas-owner change
+      // (run B) stays in history and the active pointer only advances when this
+      // binding created something newer. An empty createdRunIds is a no-op and
+      // never yanks the pointer. See issue #168.
+      if (shouldSyncLiveVoiceRunIds(state.createdRunIds)) {
+        syncWorkspaceRunIds(next, appendWorkspaceRunIds(next, state.createdRunIds));
+      }
       applyVoiceSurfaceFromResult(next, {
         voice_surface: {
           progress: state.voiceSurface.progress,

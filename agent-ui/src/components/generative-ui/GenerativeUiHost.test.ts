@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
 import type {
   GenerativeUiCompositionItemV1,
   GenerativeUiCompositionV1,
@@ -101,6 +101,38 @@ function mount(component: Parameters<typeof createApp>[0], props: Record<string,
   app.use(i18n)
   app.mount(root)
   return root
+}
+
+/**
+ * Mount `component` with reactive `document` / `composition` refs so a test can
+ * drive a genuine revision change after the initial render. Returns setters to
+ * update each prop along with the root element.
+ */
+function mountReactive(
+  component: Parameters<typeof createApp>[0],
+  initial: {
+    document: GenerativeUiDocumentV1
+    composition: GenerativeUiCompositionV1
+    registry?: GenerativeUiRendererRegistry
+  },
+): { root: HTMLElement; setDocument: (next: GenerativeUiDocumentV1) => void } {
+  const documentRef = ref<GenerativeUiDocumentV1>(initial.document)
+  const compositionRef = ref<GenerativeUiCompositionV1>(initial.composition)
+  const wrapper = defineComponent({
+    render() {
+      return h(component, {
+        document: documentRef.value,
+        composition: compositionRef.value,
+        ...(initial.registry ? { registry: initial.registry } : {}),
+      })
+    },
+  })
+  root = document.createElement('div')
+  document.body.appendChild(root)
+  app = createApp(wrapper)
+  app.use(i18n)
+  app.mount(root)
+  return { root, setDocument: (next) => { documentRef.value = next } }
 }
 
 afterEach(() => {
@@ -322,7 +354,7 @@ describe('GenerativeUiSurfaceHost', () => {
       hidden_node_ids: [],
     }
 
-    const mounted = mount(GenerativeUiSurfaceHost, {
+    const { root: mounted, setDocument } = mountReactive(GenerativeUiSurfaceHost, {
       document: documentValue,
       composition: compositionValue,
       registry: new GenerativeUiRendererRegistry([]),
@@ -334,6 +366,22 @@ describe('GenerativeUiSurfaceHost', () => {
     expect(mounted.querySelector('.generative-ui-surface-host')?.getAttribute('data-content-layout')).toBe('flow')
     expect([...mounted.querySelectorAll('[data-canvas-size]')].map(element => element.getAttribute('data-canvas-size')))
       .toEqual(['1x1', '1x2', '3x3'])
+    // Issue #168: a fresh mount must NOT auto-focus the latest Block. No node
+    // should be focused after the initial population.
+    expect(document.activeElement?.getAttribute('data-generative-ui-node')).toBeFalsy()
+
+    // A genuine revision change to the latest-updated node focuses it.
+    setDocument({
+      ...documentValue,
+      revision: 4,
+      updated_at: '2026-07-11T19:02:00.000Z',
+      nodes: nodes.map((candidate) => candidate.id === 'graph'
+        ? { ...candidate, revision: 2, updated_at: '2026-07-11T19:02:00.000Z' }
+        : candidate),
+    })
+    // flush:'post' watcher needs a couple of ticks to settle.
+    await nextTick()
+    await nextTick()
     expect(document.activeElement?.getAttribute('data-generative-ui-node')).toBe('graph')
   })
 
@@ -342,23 +390,25 @@ describe('GenerativeUiSurfaceHost', () => {
     const nodes = [node('motion-card', {
       presentation: { density: 'summary', canvas_size: '1x2', motion_profile: 'standard' },
     })]
-    const mounted = mount(GenerativeUiSurfaceHost, {
-      document: {
-        ir_version: 1,
-        document_id: 'document-motion',
-        scope: { type: 'voice_session', id: 'session-motion' },
-        revision: 1,
-        nodes,
-        updated_at: '2026-07-11T19:00:00.000Z',
-      } satisfies GenerativeUiDocumentV1,
-      composition: {
-        composition_version: 1,
-        document_id: 'document-motion',
-        document_revision: 1,
-        context,
-        items: [placement('motion-card', 1)],
-        hidden_node_ids: [],
-      } satisfies GenerativeUiCompositionV1,
+    const documentValue = {
+      ir_version: 1,
+      document_id: 'document-motion',
+      scope: { type: 'voice_session', id: 'session-motion' },
+      revision: 1,
+      nodes,
+      updated_at: '2026-07-11T19:00:00.000Z',
+    } satisfies GenerativeUiDocumentV1
+    const compositionValue = {
+      composition_version: 1,
+      document_id: 'document-motion',
+      document_revision: 1,
+      context,
+      items: [placement('motion-card', 1)],
+      hidden_node_ids: [],
+    } satisfies GenerativeUiCompositionV1
+    const { root: mounted, setDocument } = mountReactive(GenerativeUiSurfaceHost, {
+      document: documentValue,
+      composition: compositionValue,
       registry: new GenerativeUiRendererRegistry([]),
     })
     await nextTick()
@@ -366,6 +416,22 @@ describe('GenerativeUiSurfaceHost', () => {
     const host = mounted.querySelector<HTMLElement>('[data-generative-ui-node="motion-card"]')!
     expect(mounted.querySelector('.generative-ui-surface-host')?.getAttribute('data-content-layout')).toBe('single')
     expect(host.dataset.motionProfile).toBe('standard')
+    // Issue #168: attention is not asserted on the initial mount; it must fire
+    // on a genuine revision change instead.
+    expect(host.dataset.attention).toBe('false')
+
+    // A real revision change drives the motion profile and Manager attention.
+    setDocument({
+      ...documentValue,
+      revision: 2,
+      updated_at: '2026-07-11T19:00:01.000Z',
+      nodes: [{ ...nodes[0], revision: 2, updated_at: '2026-07-11T19:00:01.000Z' }],
+    })
+    // flush:'post' watcher needs a couple of ticks to settle; under fake timers
+    // we also flush any timer-queued microtasks.
+    await nextTick()
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(0)
     expect(host.dataset.attention).toBe('true')
     expect(host.classList.contains('generative-ui-node-host--attention')).toBe(true)
 
