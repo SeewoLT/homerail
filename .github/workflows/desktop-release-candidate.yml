@@ -260,7 +260,7 @@ jobs:
           }
           foreach ($signedFile in @($installer.FullName, $appExecutable)) {
             $signature = Get-AuthenticodeSignature -LiteralPath $signedFile
-            Write-Host "Authenticode status for $signedFile: $($signature.Status) ($($signature.StatusMessage))"
+            Write-Host "Authenticode status for ${signedFile}: $($signature.Status) ($($signature.StatusMessage))"
             if ($env:RELEASE_CHANNEL -eq 'alpha') {
               if ($signature.Status -ne 'NotSigned') {
                 throw "Windows Alpha binaries must be explicitly unsigned; got $($signature.Status) for $signedFile"
