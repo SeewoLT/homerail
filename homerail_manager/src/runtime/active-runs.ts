@@ -1311,6 +1311,135 @@ export function getActiveRun(runId: string): ActiveRun | undefined {
   return store.get(runId);
 }
 
+interface BrokerActionRequirement {
+  credential_ref: string;
+  broker: string;
+  action: string;
+  when?: {
+    field: string;
+    equals: unknown;
+  };
+}
+
+interface BrokerActionReceipt extends BrokerActionRequirement {
+  node_id: string;
+  session_id: string;
+  recorded_at: number;
+}
+
+const BROKER_ACTION_RECEIPTS_KEY = "broker_action_receipts";
+const BROKER_ACTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function _outputBrokerActionRequirements(
+  run: ActiveRun,
+  nodeId: string,
+  port?: string,
+  content?: unknown,
+  evaluateConditions = false,
+): BrokerActionRequirement[] {
+  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  const workflowSpec = node?.extra?.workflow_spec_v1;
+  if (!workflowSpec || typeof workflowSpec !== "object" || Array.isArray(workflowSpec)) return [];
+  const rawByPort = (workflowSpec as Record<string, unknown>).output_broker_requirements;
+  if (!rawByPort || typeof rawByPort !== "object" || Array.isArray(rawByPort)) return [];
+  const selected = port === undefined
+    ? Object.values(rawByPort as Record<string, unknown>).flatMap((value) => Array.isArray(value) ? value : [])
+    : (rawByPort as Record<string, unknown>)[port];
+  if (!Array.isArray(selected)) return [];
+  return selected.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const entry = value as Record<string, unknown>;
+    if (![entry.credential_ref, entry.broker, entry.action].every((field) => (
+      typeof field === "string" && BROKER_ACTION_NAME.test(field)
+    ))) return [];
+    let when: BrokerActionRequirement["when"];
+    if (entry.when !== undefined) {
+      if (!entry.when || typeof entry.when !== "object" || Array.isArray(entry.when)) return [];
+      const rawWhen = entry.when as Record<string, unknown>;
+      if (typeof rawWhen.field !== "string"
+        || !/^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/.test(rawWhen.field)
+        || !("equals" in rawWhen)) return [];
+      when = { field: rawWhen.field, equals: rawWhen.equals };
+    }
+    if (evaluateConditions && when) {
+      let actual = content;
+      for (const segment of when.field.split(".")) {
+        if (!actual || typeof actual !== "object" || Array.isArray(actual)) {
+          actual = undefined;
+          break;
+        }
+        actual = (actual as Record<string, unknown>)[segment];
+      }
+      if (!isDeepStrictEqual(actual, when.equals)) return [];
+    }
+    return [{
+      credential_ref: String(entry.credential_ref),
+      broker: String(entry.broker),
+      action: String(entry.action),
+      ...(when ? { when } : {}),
+    }];
+  });
+}
+
+function _brokerActionReceipts(run: ActiveRun): BrokerActionReceipt[] {
+  const raw = run.brokerState[BROKER_ACTION_RECEIPTS_KEY];
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const entry = value as Record<string, unknown>;
+    if (![entry.credential_ref, entry.broker, entry.action, entry.node_id, entry.session_id].every((field) => (
+      typeof field === "string" && BROKER_ACTION_NAME.test(field)
+    )) || typeof entry.recorded_at !== "number" || !Number.isFinite(entry.recorded_at)) return [];
+    return [{
+      credential_ref: String(entry.credential_ref),
+      broker: String(entry.broker),
+      action: String(entry.action),
+      node_id: String(entry.node_id),
+      session_id: String(entry.session_id),
+      recorded_at: entry.recorded_at,
+    }];
+  });
+}
+
+export function recordActiveRunBrokerActionSuccess(input: {
+  run_id: string;
+  node_id: string;
+  session_id: string;
+  credential_ref: string;
+  broker: string;
+  action: string;
+}): void {
+  const run = store.get(input.run_id);
+  if (!run || run.status !== "active") throw new Error("Broker action receipt run is not active");
+  const required = _outputBrokerActionRequirements(run, input.node_id).some((requirement) => (
+    requirement.credential_ref === input.credential_ref
+    && requirement.broker === input.broker
+    && requirement.action === input.action
+  ));
+  if (!required) return;
+  const session = run.nodeSessions.get(input.node_id);
+  if (!session || session.sessionId !== input.session_id) {
+    throw new Error("Broker action receipt session is stale");
+  }
+  const receipt: BrokerActionReceipt = {
+    credential_ref: input.credential_ref,
+    broker: input.broker,
+    action: input.action,
+    node_id: input.node_id,
+    session_id: input.session_id,
+    recorded_at: Date.now(),
+  };
+  const receipts = _brokerActionReceipts(run).filter((entry) => !(
+    entry.node_id === receipt.node_id
+    && entry.session_id === receipt.session_id
+    && entry.credential_ref === receipt.credential_ref
+    && entry.broker === receipt.broker
+    && entry.action === receipt.action
+  ));
+  run.brokerState[BROKER_ACTION_RECEIPTS_KEY] = [...receipts, receipt].slice(-64);
+  writeRunMetadata(input.run_id, serializeRunMetadata(run));
+}
+
 export function getActiveRunBrokerState(runId: string, key: string): unknown {
   const run = store.get(runId);
   if (!run || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key)) return undefined;
@@ -2357,6 +2486,8 @@ function _assertHandoffPreconditions(
   if (surfaceViolation) throw new Error(surfaceViolation);
   const contractViolation = _handoffContractViolation(run, fromNode, port, content);
   if (contractViolation) throw new Error(contractViolation);
+  const brokerRequirementViolation = _handoffBrokerRequirementViolation(run, fromNode, port, content);
+  if (brokerRequirementViolation) throw new Error(brokerRequirementViolation);
   if (run.counters.handoffs >= run.limits.max_handoffs) {
     if (abortOnLimit) abortActiveRun(run.runId, `max_handoffs (${run.limits.max_handoffs}) exceeded`, fromNode);
     throw new Error(`max_handoffs (${run.limits.max_handoffs}) exceeded`);
@@ -2372,6 +2503,28 @@ function _assertHandoffPreconditions(
       throw new Error(`edge retry limit (${edgeLimit}) exceeded for ${key}`);
     }
   }
+}
+
+function _handoffBrokerRequirementViolation(
+  run: ActiveRun,
+  fromNode: string,
+  port: string,
+  content: unknown,
+): string | undefined {
+  const requirements = _outputBrokerActionRequirements(run, fromNode, port, content, true);
+  if (requirements.length === 0) return undefined;
+  const sessionId = run.nodeSessions.get(fromNode)?.sessionId;
+  if (!sessionId) return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: node has no active session`;
+  const receipts = _brokerActionReceipts(run);
+  const missing = requirements.find((requirement) => !receipts.some((receipt) => (
+    receipt.node_id === fromNode
+    && receipt.session_id === sessionId
+    && receipt.credential_ref === requirement.credential_ref
+    && receipt.broker === requirement.broker
+    && receipt.action === requirement.action
+  )));
+  if (!missing) return undefined;
+  return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: ${missing.credential_ref}/${missing.broker}/${missing.action}`;
 }
 
 function _requiredSurfaceFinalViolation(

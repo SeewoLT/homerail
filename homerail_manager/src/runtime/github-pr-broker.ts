@@ -24,6 +24,7 @@ interface GithubPullRequestContext {
   task_document_sha256: string;
   require_draft: boolean;
   writable_paths: string[];
+  required_checks: string[];
 }
 
 interface GithubPullRequestState {
@@ -60,8 +61,7 @@ function jsonRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function safeRelativePath(raw: unknown, label: string, allowDot = false): string {
-  if (allowDot && raw === ".") return ".";
+function safeRelativePath(raw: unknown, label: string): string {
   if (typeof raw !== "string" || !raw || raw.includes("\\") || raw.startsWith("/") || raw.includes("\0")) {
     throw new Error(`${label} is not a safe repository path`);
   }
@@ -112,8 +112,22 @@ function parsePullRequestContext(runId: string): GithubPullRequestContext {
     throw new Error("pr_context writable_paths must be a non-empty bounded allowlist");
   }
   const writablePaths = raw.writable_paths.map((entry, index) => (
-    safeRelativePath(entry, `pr_context writable_paths[${index}]`, true)
+    safeRelativePath(entry, `pr_context writable_paths[${index}]`)
   ));
+  if (!Array.isArray(raw.required_checks) || raw.required_checks.length < 1 || raw.required_checks.length > 32) {
+    throw new Error("pr_context required_checks must be a non-empty bounded list");
+  }
+  const requiredChecks = raw.required_checks.map((entry, index) => {
+    if (typeof entry !== "string") throw new Error(`pr_context required_checks[${index}] is invalid`);
+    const name = entry.trim();
+    if (!name || name.length > 256 || /[\u0000-\u001f\u007f]/.test(name)) {
+      throw new Error(`pr_context required_checks[${index}] is invalid`);
+    }
+    return name;
+  });
+  if (new Set(requiredChecks).size !== requiredChecks.length) {
+    throw new Error("pr_context required_checks must be unique");
+  }
   return {
     version: 1,
     owner,
@@ -127,6 +141,7 @@ function parsePullRequestContext(runId: string): GithubPullRequestContext {
     task_document_sha256: taskDocumentSha256,
     require_draft: raw.require_draft !== false,
     writable_paths: Array.from(new Set(writablePaths)).sort(),
+    required_checks: [...requiredChecks].sort(),
   };
 }
 
@@ -308,13 +323,44 @@ export async function githubChecksSnapshot(context: CredentialBrokerContext): Pr
   };
 }
 
+export async function githubRequiredChecks(context: CredentialBrokerContext): Promise<unknown> {
+  const { token, binding, state } = await boundPull(context);
+  const body = await githubApi<{ check_runs?: Array<Record<string, unknown>> }>(
+    token,
+    `${repoPath(binding)}/commits/${state.current_head_sha}/check-runs?per_page=100`,
+  );
+  const checks = body.check_runs ?? [];
+  const required = binding.required_checks.map((name) => {
+    const latest = checks
+      .filter((check) => String(check.name ?? "") === name)
+      .sort((left, right) => Number(right.id ?? 0) - Number(left.id ?? 0))[0];
+    return {
+      name,
+      id: Number(latest?.id ?? 0),
+      status: String(latest?.status ?? "missing"),
+      conclusion: latest?.conclusion === null || latest === undefined
+        ? null
+        : String(latest.conclusion ?? ""),
+    };
+  });
+  const failed = required.filter((check) => check.status !== "completed" || check.conclusion !== "success");
+  if (failed.length > 0) {
+    throw new Error(`Required GitHub checks are not successful: ${failed.map((check) => check.name).join(", ")}`);
+  }
+  return {
+    passed: true,
+    head_sha: state.current_head_sha,
+    required_checks: required,
+  };
+}
+
 function pathAllowed(pathname: string, prefixes: string[]): boolean {
   if (
     pathname === ".git" || pathname.startsWith(".git/")
-    || pathname === ".github/workflows" || pathname.startsWith(".github/workflows/")
+    || pathname === ".github" || pathname.startsWith(".github/")
     || pathname === "input" || pathname.startsWith("input/")
   ) return false;
-  return prefixes.some((prefix) => prefix === "." || pathname === prefix || pathname.startsWith(`${prefix}/`));
+  return prefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 function commitFilesInput(input: Readonly<Record<string, unknown>>, binding: GithubPullRequestContext): {

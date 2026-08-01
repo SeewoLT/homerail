@@ -7,11 +7,15 @@ import {
   recordCredentialUseFailure,
   type CredentialRecord,
 } from "../persistence/credentials.js";
-import { getActiveRun } from "./active-runs.js";
+import {
+  getActiveRun,
+  recordActiveRunBrokerActionSuccess,
+} from "./active-runs.js";
 import {
   githubChecksSnapshot,
   githubCommitFiles,
   githubPullRequestSnapshot,
+  githubRequiredChecks,
 } from "./github-pr-broker.js";
 
 export interface CredentialBrokerContext {
@@ -178,6 +182,14 @@ export async function executeCredentialBrokerCall(
         ...(request.generation === undefined ? {} : { generation: request.generation }),
       },
     });
+    recordActiveRunBrokerActionSuccess({
+      run_id: request.run_id,
+      node_id: request.node_id,
+      session_id: request.session_id,
+      credential_ref: request.credential_ref,
+      broker: request.broker,
+      action: request.action,
+    });
     return { request_id: request.request_id, ok: true, result };
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error);
@@ -243,4 +255,5 @@ registerCredentialBroker("lark_bot", "bot_info", async ({ credential, secret }) 
 
 registerCredentialBroker("github_pr", "pull_request_snapshot", githubPullRequestSnapshot);
 registerCredentialBroker("github_pr", "checks_snapshot", githubChecksSnapshot);
+registerCredentialBroker("github_pr", "required_checks", githubRequiredChecks);
 registerCredentialBroker("github_pr", "commit_files", githubCommitFiles);

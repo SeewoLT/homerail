@@ -13,6 +13,9 @@ import {
 import {
   _clearActiveRuns,
   createActiveRun,
+  getCurrentNodeSession,
+  handoffActiveRun,
+  markNodeDispatched,
   recoverAllActiveRuns,
 } from "../src/runtime/active-runs.js";
 import { executeCredentialBrokerCall } from "../src/runtime/credential-broker.js";
@@ -53,9 +56,15 @@ spec:
       kind: agent
       agent: actor
       allowed_dag_tools: [handoff, credential_broker_call]
-      credentials:${binding("pull_request_snapshot, checks_snapshot")}
+      credentials:${binding("pull_request_snapshot, checks_snapshot, required_checks")}
       inputs: { task: {} }
-      outputs: { done: {} }
+      outputs:
+        reviewed:
+          required_broker_actions:
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: required_checks
+              when: { field: verdict, equals: approve }
     implementer:
       kind: agent
       agent: actor
@@ -65,7 +74,7 @@ spec:
   edges:
     - { from: $run.input, to: aggregate.task }
     - { from: aggregate.done, to: reviewer.task }
-    - { from: reviewer.done, to: implementer.task }
+    - { from: reviewer.reviewed, to: implementer.task }
     - { from: implementer.done, to: done.result }
 `;
 }
@@ -76,7 +85,56 @@ describe("bounded GitHub Draft PR credential broker", () => {
   let remoteHead: string;
   let pullState: string;
   let headRepository: string;
+  let checkName: string;
+  let checkConclusion: string;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  function createBoundRun(
+    runId: string,
+    writablePaths: string[] = ["src", "tests", ".github"],
+  ): void {
+    const taskArtifact = stageDagRunInputArtifact({
+      scope_id: runId,
+      name: "task.md",
+      media_type: "text/markdown",
+      content: "# Bounded task\n",
+    });
+    const prArtifact = stageDagRunInputArtifact({
+      scope_id: runId,
+      name: "pr-context.json",
+      media_type: "application/json",
+      content: JSON.stringify({
+        version: 1,
+        owner: "acme",
+        repo: "widget",
+        pull_number: 7,
+        clone_url: "https://github.com/acme/widget.git",
+        head_ref: "autofix/issue-172",
+        base_ref: "main",
+        initial_head_sha: INITIAL_HEAD,
+        base_sha: BASE_HEAD,
+        task_document_sha256: taskArtifact.sha256,
+        require_draft: true,
+        writable_paths: writablePaths,
+        required_checks: ["unit"],
+      }),
+    });
+    const bindings = resolveDagRunInputBindings(runId, [
+      {
+        artifact_id: taskArtifact.artifact_id,
+        logical_name: "task_document",
+        mount_path: "input/task.md",
+      },
+      {
+        artifact_id: prArtifact.artifact_id,
+        logical_name: "pr_context",
+        mount_path: "input/pr-context.json",
+      },
+    ]);
+    const parsed = parseWorkflowSource(workflow());
+    parsed.meta.agents!.actor.agent_type = "deterministic";
+    createActiveRun(runId, parsed, { initialPrompt: "{}", inputArtifacts: bindings });
+  }
 
   beforeEach(() => {
     previousHome = process.env.HOMERAIL_HOME;
@@ -87,6 +145,8 @@ describe("bounded GitHub Draft PR credential broker", () => {
     remoteHead = INITIAL_HEAD;
     pullState = "open";
     headRepository = "acme/widget";
+    checkName = "unit";
+    checkConclusion = "success";
     fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(String(input));
       const method = String(init?.method ?? "GET").toUpperCase();
@@ -110,7 +170,7 @@ describe("bounded GitHub Draft PR credential broker", () => {
         return json([{ filename: "src/fix.ts", status: "modified", additions: 2, deletions: 1, changes: 3, patch: "@@ fake" }]);
       }
       if (method === "GET" && url.pathname.endsWith("/check-runs")) {
-        return json({ check_runs: [{ id: 1, name: "unit", status: "completed", conclusion: "success" }] });
+        return json({ check_runs: [{ id: 1, name: checkName, status: "completed", conclusion: checkConclusion }] });
       }
       if (method === "GET" && url.pathname === `/repos/acme/widget/git/commits/${INITIAL_HEAD}`) {
         return json({ tree: { sha: BASE_TREE } });
@@ -131,46 +191,7 @@ describe("bounded GitHub Draft PR credential broker", () => {
       name: "GitHub Autofix App token",
       secret: { value: "github-secret-token-value" },
     }, { actor: "test" });
-    const taskArtifact = stageDagRunInputArtifact({
-      scope_id: "project-one",
-      name: "task.md",
-      media_type: "text/markdown",
-      content: "# Bounded task\n",
-    });
-    const prArtifact = stageDagRunInputArtifact({
-      scope_id: "project-one",
-      name: "pr-context.json",
-      media_type: "application/json",
-      content: JSON.stringify({
-        version: 1,
-        owner: "acme",
-        repo: "widget",
-        pull_number: 7,
-        clone_url: "https://github.com/acme/widget.git",
-        head_ref: "autofix/issue-172",
-        base_ref: "main",
-        initial_head_sha: INITIAL_HEAD,
-        base_sha: BASE_HEAD,
-        task_document_sha256: taskArtifact.sha256,
-        require_draft: true,
-        writable_paths: ["src", "tests"],
-      }),
-    });
-    const bindings = resolveDagRunInputBindings("project-one", [
-      {
-        artifact_id: taskArtifact.artifact_id,
-        logical_name: "task_document",
-        mount_path: "input/task.md",
-      },
-      {
-        artifact_id: prArtifact.artifact_id,
-        logical_name: "pr_context",
-        mount_path: "input/pr-context.json",
-      },
-    ]);
-    const parsed = parseWorkflowSource(workflow());
-    parsed.meta.agents!.actor.agent_type = "deterministic";
-    createActiveRun("github-broker-run", parsed, { initialPrompt: "{}", inputArtifacts: bindings });
+    createBoundRun("github-broker-run");
   });
 
   afterEach(() => {
@@ -179,17 +200,28 @@ describe("bounded GitHub Draft PR credential broker", () => {
     closeDb();
     if (previousHome === undefined) delete process.env.HOMERAIL_HOME;
     else process.env.HOMERAIL_HOME = previousHome;
-    const inputRoot = path.join(home, "workspace", "github-broker-run", "input");
-    if (fs.existsSync(inputRoot)) fs.chmodSync(inputRoot, 0o700);
+    const workspaceRoot = path.join(home, "workspace");
+    if (fs.existsSync(workspaceRoot)) {
+      for (const runId of fs.readdirSync(workspaceRoot)) {
+        const inputRoot = path.join(workspaceRoot, runId, "input");
+        if (fs.existsSync(inputRoot)) fs.chmodSync(inputRoot, 0o700);
+      }
+    }
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  function call(nodeId: string, action: string, input: Record<string, unknown> = {}) {
+  function call(
+    nodeId: string,
+    action: string,
+    input: Record<string, unknown> = {},
+    runId = "github-broker-run",
+    sessionId = `session-${nodeId}`,
+  ) {
     return executeCredentialBrokerCall("worker-one", {
       request_id: `${nodeId}-${action}`,
-      run_id: "github-broker-run",
+      run_id: runId,
       node_id: nodeId,
-      session_id: `session-${nodeId}`,
+      session_id: sessionId,
       credential_ref: "github-autofix",
       broker: "github_pr",
       action,
@@ -213,12 +245,63 @@ describe("bounded GitHub Draft PR credential broker", () => {
       ok: false,
       error: expect.stringContaining("not declared"),
     });
-    const deniedPath = await call("aggregate", "commit_files", {
+    const deniedWorkflow = await call("aggregate", "commit_files", {
       expected_head_sha: INITIAL_HEAD,
       message: "attempt workflow change",
       files: [{ path: ".github/workflows/pwn.yml", content_base64: Buffer.from("bad").toString("base64") }],
     });
-    expect(deniedPath).toMatchObject({ ok: false, error: expect.stringContaining("outside the PR write allowlist") });
+    expect(deniedWorkflow).toMatchObject({ ok: false, error: expect.stringContaining("outside the PR write allowlist") });
+    const deniedAction = await call("aggregate", "commit_files", {
+      expected_head_sha: INITIAL_HEAD,
+      message: "attempt local action change",
+      files: [{ path: ".github/actions/pwn/action.yml", content_base64: Buffer.from("bad").toString("base64") }],
+    });
+    expect(deniedAction).toMatchObject({ ok: false, error: expect.stringContaining("outside the PR write allowlist") });
+  });
+
+  it("rejects repository-wide writable paths instead of treating dot as an allow-all prefix", async () => {
+    createBoundRun("github-broker-dot-run", ["."]);
+    const snapshot = await call(
+      "reviewer",
+      "pull_request_snapshot",
+      {},
+      "github-broker-dot-run",
+    );
+    expect(snapshot).toMatchObject({ ok: false, error: expect.stringContaining("not a safe repository path") });
+  });
+
+  it("requires successful immutable checks in the current reviewer dispatch before approval", async () => {
+    expect(markNodeDispatched("github-broker-run", "aggregate")).toBe(true);
+    handoffActiveRun("github-broker-run", "aggregate", "done", {});
+    expect(markNodeDispatched("github-broker-run", "reviewer")).toBe(true);
+    const sessionId = getCurrentNodeSession("github-broker-run", "reviewer")?.sessionId;
+    if (!sessionId) throw new Error("reviewer session was not created");
+
+    const approval = { verdict: "approve" };
+    expect(() => handoffActiveRun("github-broker-run", "reviewer", "reviewed", approval))
+      .toThrow(/DAG_HANDOFF_BROKER_REQUIREMENT_MISSING/);
+
+    checkName = "unrelated";
+    await expect(call("reviewer", "required_checks", {}, "github-broker-run", sessionId))
+      .resolves.toMatchObject({ ok: false, error: expect.stringContaining("unit") });
+    checkName = "unit";
+    checkConclusion = "failure";
+    await expect(call("reviewer", "required_checks", {}, "github-broker-run", sessionId))
+      .resolves.toMatchObject({ ok: false, error: expect.stringContaining("unit") });
+    expect(() => handoffActiveRun("github-broker-run", "reviewer", "reviewed", approval))
+      .toThrow(/DAG_HANDOFF_BROKER_REQUIREMENT_MISSING/);
+
+    checkConclusion = "success";
+    await expect(call("reviewer", "required_checks", {}, "github-broker-run", sessionId))
+      .resolves.toMatchObject({
+        ok: true,
+        result: {
+          passed: true,
+          head_sha: INITIAL_HEAD,
+          required_checks: [{ name: "unit", status: "completed", conclusion: "success" }],
+        },
+      });
+    expect(() => handoffActiveRun("github-broker-run", "reviewer", "reviewed", approval)).not.toThrow();
   });
 
   it("commits through a non-force expected-head fence and restores the advanced head", async () => {

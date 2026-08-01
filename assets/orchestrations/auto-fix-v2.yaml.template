@@ -236,8 +236,11 @@ spec:
         For the initial candidate set review_round to 1. For a revision, derive
         review_round as input.fixes.context.review_round + 1. Approve only when
         all acceptance criteria are met and checks/evidence are sufficient.
-        On approval return empty feedback and fix_tasks. Otherwise return clear
-        feedback and exactly one fix_tasks item containing the whole feedback.
+        Before handing off a verdict of approve, call github_pr/required_checks;
+        Manager will reject the reviewed handoff unless every immutable required
+        check passed for this dispatch. On approval return empty feedback and
+        fix_tasks. Otherwise return clear feedback and exactly one fix_tasks item
+        containing the whole feedback.
 
     fixer:
       description: DeepSeek V4 Flash dynamically generated PR fixer
@@ -247,7 +250,8 @@ spec:
         latest Draft PR head, apply all feedback in input.item, run focused
         tests, and publish file bytes only through github_pr/commit_files with
         the snapshot head as expected_head_sha. Never git push and never modify
-        .github/workflows. Hand off fixed with both previous and new head SHAs.
+        any path below .github. Hand off fixed with both previous and new head
+        SHAs.
 
   nodes:
     prepare_repository:
@@ -352,9 +356,17 @@ spec:
           inject:
             mode: manager_broker
             broker: github_pr
-            allowed_actions: [pull_request_snapshot, checks_snapshot]
+            allowed_actions: [pull_request_snapshot, checks_snapshot, required_checks]
       inputs: { candidate: { contract: Candidate } }
-      outputs: { reviewed: { contract: ReviewDecision }, failed: {} }
+      outputs:
+        reviewed:
+          contract: ReviewDecision
+          required_broker_actions:
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: required_checks
+              when: { field: verdict, equals: approve }
+        failed: {}
 
     review_gate:
       kind: while
@@ -419,9 +431,17 @@ spec:
           inject:
             mode: manager_broker
             broker: github_pr
-            allowed_actions: [pull_request_snapshot, checks_snapshot]
+            allowed_actions: [pull_request_snapshot, checks_snapshot, required_checks]
       inputs: { fixes: {} }
-      outputs: { reviewed: { contract: ReviewDecision }, failed: {} }
+      outputs:
+        reviewed:
+          contract: ReviewDecision
+          required_broker_actions:
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: required_checks
+              when: { field: verdict, equals: approve }
+        failed: {}
 
     done: { kind: terminal, outcome: success, inputs: { result: {} } }
     preparation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }

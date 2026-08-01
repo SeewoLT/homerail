@@ -77,13 +77,15 @@ Layer Decision:
 
 ### Explicitly forbidden paths
 
-- `.github/workflows/**`
+- `.github/**`
 - `.gitmodules`
 - credential, secret, signing-key, and private environment files
 - `<task-specific forbidden path>`
 
 The runtime repository policy remains authoritative and may be stricter than
 this list. This document cannot grant access that the run policy denies.
+Allowed paths must be explicit repository-relative prefixes;
+`writable_paths: ["."]` is rejected.
 
 ## Work Decomposition Guidance
 

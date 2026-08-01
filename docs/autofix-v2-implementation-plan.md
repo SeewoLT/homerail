@@ -4,13 +4,13 @@ Proposed GitHub Issue title:
 
 > feat(autofix-v2): document-first Draft-PR repair DAG with secure dynamic fan-out
 
-Status: Opt-in MVP implemented and locally verified on 2026-08-01. The real
+Status: Opt-in MVP implemented and locally verified on 2026-08-02. The real
 Draft-PR pilot and production adoption gates remain open. This is the umbrella
 delivery plan for [`Auto Fix v2`](architecture/autofix-v2.md); it does not
 authorize replacing the existing `auto-fix` workflow or enabling automatic PR
 publication.
 
-## Implementation checkpoint (2026-08-01)
+## Implementation checkpoint (2026-08-02)
 
 Implemented in the MVP:
 
@@ -19,8 +19,12 @@ Implemented in the MVP:
 - fail-closed dynamic worker policy inheritance, unique repeated-fanout node
   ids, and isolated Git worktrees;
 - `session_scope: dispatch` for transcript-free review re-entry;
-- a Manager-only `github_pr` broker for bounded PR/files/check snapshots and
-  expected-head, non-force file commits;
+- a Manager-only `github_pr` broker for bounded PR/files/check snapshots,
+  exact-head required-check enforcement, and expected-head, non-force file
+  commits;
+- generic conditional output handoff requirements backed by same-dispatch
+  Manager-broker action receipts, used to prevent `approve` when an immutable
+  required check is missing or unsuccessful;
 - an opt-in eight-static-node `auto-fix-v2` WorkflowSpec, mixed-model profile
   configurator, CLI input staging, operator runbook, and deterministic fake
   remote/recovery proof.
@@ -34,10 +38,10 @@ Required before the first real Issue #172 pilot:
   and GLM-5.2 settings after deploying the v2-capable release;
 - sync the opt-in workflow and mixed-model profile, then run a
   broker-write-disabled real PR snapshot dry run;
-- add a trusted validation gateway that prevents approval unless required
-  checks for the exact current head are complete and successful. The MVP
-  exposes `checks_snapshot` to GLM but does not make that result an
-  orchestration-level approval fence.
+- configure immutable exact required-check names in `pr-context.json` and
+  arrange trusted CI to publish those checks on the exact Draft head. This
+  repository skips Draft PR CI by default, so the pilot operator must manually
+  dispatch CI with the Draft head branch selected before approval can complete.
 
 ## Outcome
 
@@ -48,7 +52,7 @@ Deliver a manual `auto-fix-v2` workflow in which:
 - dynamically created DeepSeek V4 Flash implementers work without remote
   credentials in isolated worktrees;
 - a DeepSeek V4 Flash aggregator integrates their patches;
-- deterministic validation runs before review;
+- exact-head required checks form a Manager-enforced approval fence;
 - GLM-5.2 reviews each candidate with a fresh provider context;
 - a new DeepSeek V4 Flash fixer handles each rejected round;
 - no more than five candidate/review rounds run;
@@ -189,23 +193,25 @@ Tests:
 
 ## Phase 4: GitHub PR Capability Broker
 
-### AFV2-401: Implement read-only PR snapshots
+### AFV2-401: Implement read-only PR and check gates
 
-- [ ] Add a `github_pr` Manager broker with `snapshot` and `read_checks`.
+- [ ] Add a `github_pr` Manager broker with `pull_request_snapshot`,
+      `checks_snapshot`, and `required_checks`.
 - [ ] Bind repo, PR, Draft state, base branch/SHA, head branch/SHA, and policy id
       to the run.
 - [ ] Reject fork PRs, non-Draft PRs, disallowed branches, closed PRs, and
       mismatched repositories in the pilot.
 - [ ] Return bounded, redacted, immutable receipts.
+- [ ] Reject an approval handoff unless the same reviewer dispatch has a
+      successful `required_checks` receipt for the exact current head.
 
-### AFV2-402: Implement fast-forward `push_patch`
+### AFV2-402: Implement fast-forward `commit_files`
 
-- [ ] Accept only a persisted patch artifact and exact `expected_head_sha`.
+- [ ] Accept only bounded file bytes and an exact `expected_head_sha`.
 - [ ] Revalidate path, file count, size, binary, symlink, submodule, and secret
       restrictions in trusted code.
-- [ ] Apply the patch to a fresh trusted checkout with hooks and credential
-      helpers disabled.
-- [ ] Commit with a fixed bot noreply identity.
+- [ ] Create bounded Git blobs, a tree, and a commit without giving the Worker
+      a checkout credential or Git transport.
 - [ ] Re-read the remote head immediately before a fast-forward-only push.
 - [ ] Return old/new head, commit, patch digest, run/node/session/generation, and
       timestamp in an immutable receipt.
@@ -258,7 +264,7 @@ Tests:
 
 ### AFV2-504: Build the five-round review/fix loop
 
-- [ ] Push each collected candidate through `push_patch` using exact head
+- [ ] Push each collected candidate through `commit_files` using exact head
       fencing; a Draft PR may temporarily hold a candidate that later fails
       validation.
 - [ ] Dispatch GLM-5.2 with fresh context against the exact pushed head.

@@ -40,6 +40,12 @@ export interface CanonicalPort {
   name: string;
   contract?: string;
   description?: string;
+  required_broker_actions?: Array<{
+    credential_ref: string;
+    broker: string;
+    action: string;
+    when?: { field: string; equals: unknown };
+  }>;
 }
 
 export interface CanonicalNode {
@@ -249,13 +255,29 @@ function splitPortReference(reference: string): { node: string; port: string } {
   return { node: reference.slice(0, index), port: reference.slice(index + 1) };
 }
 
-function portEntries(ports: Record<string, { contract?: string; description?: string }> | undefined): CanonicalPort[] {
+function portEntries(ports: Record<string, {
+  contract?: string;
+  description?: string;
+  required_broker_actions?: Array<{
+    credential_ref: string;
+    broker: string;
+    action: string;
+    when?: { field: string; equals: unknown };
+  }>;
+}> | undefined): CanonicalPort[] {
   return Object.entries(ports ?? {})
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, port]) => ({
       name,
       ...(port.contract ? { contract: port.contract } : {}),
       ...(port.description ? { description: port.description } : {}),
+      ...(port.required_broker_actions ? {
+        required_broker_actions: [...port.required_broker_actions]
+          .sort((left, right) => (
+            `${left.credential_ref}\0${left.broker}\0${left.action}\0${JSON.stringify(left.when ?? null)}`
+              .localeCompare(`${right.credential_ref}\0${right.broker}\0${right.action}\0${JSON.stringify(right.when ?? null)}`)
+          )),
+      } : {}),
     }));
 }
 
@@ -372,6 +394,34 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
 
   for (const [nodeId, node] of Object.entries(nodes)) {
     const nodePath = `/spec/nodes/${nodeId}`;
+    for (const [portName, port] of Object.entries(node.kind === "terminal" || node.kind === "await_command" ? {} : node.outputs ?? {})) {
+      const requirements = port.required_broker_actions ?? [];
+      if (requirements.length === 0) continue;
+      if (node.kind !== "agent") {
+        add(
+          `${nodePath}/outputs/${portName}/required_broker_actions`,
+          "DAG_SEMANTIC_BROKER_REQUIREMENT_AGENT_ONLY",
+          "required broker actions are supported only on agent output ports",
+        );
+        continue;
+      }
+      for (let index = 0; index < requirements.length; index++) {
+        const requirement = requirements[index];
+        const declared = (node.credentials ?? []).some((binding) => (
+          binding.credential_ref === requirement.credential_ref
+          && binding.inject.mode === "manager_broker"
+          && binding.inject.broker === requirement.broker
+          && binding.inject.allowed_actions.includes(requirement.action)
+        ));
+        if (!declared) {
+          add(
+            `${nodePath}/outputs/${portName}/required_broker_actions/${index}`,
+            "DAG_SEMANTIC_UNDECLARED_BROKER_REQUIREMENT",
+            "required broker action must match a manager_broker credential and allowed action declared on the same node",
+          );
+        }
+      }
+    }
     if (node.kind === "agent" && !agents[node.agent]) {
       add(`${nodePath}/agent`, "DAG_SEMANTIC_UNKNOWN_AGENT", `unknown agent '${node.agent}'`);
     }
@@ -1357,6 +1407,9 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
   const graphNodes: DAGGraphNode[] = executableNodes.map((node) => {
     const inputContracts = Object.fromEntries(node.inputs.filter((port) => port.contract).map((port) => [port.name, port.contract!]));
     const outputContracts = Object.fromEntries(node.outputs.filter((port) => port.contract).map((port) => [port.name, port.contract!]));
+    const outputBrokerRequirements = Object.fromEntries(node.outputs
+      .filter((port) => port.required_broker_actions?.length)
+      .map((port) => [port.name, port.required_broker_actions!]));
     return {
       node_id: node.id,
       name: node.id,
@@ -1370,6 +1423,7 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
         workflow_spec_v1: {
           input_contracts: inputContracts,
           output_contracts: outputContracts,
+          output_broker_requirements: outputBrokerRequirements,
         },
         ...(node.kind === "agent" && node.config ? { agent_runtime: node.config } : {}),
       },
@@ -1417,11 +1471,21 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
   };
 }
 
-function authoringPorts(ports: CanonicalPort[]): Record<string, { contract?: string; description?: string }> | undefined {
+function authoringPorts(ports: CanonicalPort[]): Record<string, {
+  contract?: string;
+  description?: string;
+  required_broker_actions?: Array<{
+    credential_ref: string;
+    broker: string;
+    action: string;
+    when?: { field: string; equals: unknown };
+  }>;
+}> | undefined {
   if (ports.length === 0) return undefined;
   return Object.fromEntries(ports.map((port) => [port.name, {
     ...(port.contract ? { contract: port.contract } : {}),
     ...(port.description ? { description: port.description } : {}),
+    ...(port.required_broker_actions ? { required_broker_actions: port.required_broker_actions } : {}),
   }]));
 }
 

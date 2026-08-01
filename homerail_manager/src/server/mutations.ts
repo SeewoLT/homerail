@@ -35,7 +35,9 @@ import { DagActorLiveCommandRuntimeError } from "../runtime/dag-actor-live-comma
 import { DagActorLiveCommandConflictError } from "../persistence/dag-actor-live-commands.js";
 import {
   canonicalManagerAgentToolCallName,
+  DAG_RUN_INPUT_MEDIA_TYPES,
   normalizeManagerAgentOutcomeCapabilities,
+  type DagRunInputMediaType,
   type DagRunInputBindingRequest,
 } from "homerail-protocol";
 import {
@@ -48,6 +50,11 @@ interface BaseResponse {
   message: string;
   data?: unknown;
   error?: string;
+}
+
+function _isDagRunInputMediaType(value: unknown): value is DagRunInputMediaType {
+  return typeof value === "string"
+    && (DAG_RUN_INPUT_MEDIA_TYPES as readonly string[]).includes(value);
 }
 
 function json(res: http.ServerResponse, status: number, body: BaseResponse) {
@@ -244,11 +251,17 @@ export function mutationRoutesHandler(
       .then((body) => {
         const value = body as Record<string, unknown>;
         try {
+          if (!_isDagRunInputMediaType(value.media_type)) {
+            throw new Error("unsupported run input media_type");
+          }
+          if (typeof value.content !== "string") {
+            throw new Error("run input content must be a string");
+          }
           const artifact = stageDagRunInputArtifact({
             scope_id: typeof value.scope_id === "string" ? value.scope_id : "",
             name: typeof value.name === "string" ? value.name : "",
-            media_type: typeof value.media_type === "string" ? value.media_type as any : "" as any,
-            content: typeof value.content === "string" ? value.content : "" as any,
+            media_type: value.media_type,
+            content: value.content,
           });
           _created(res, "Run input staged", { artifact });
         } catch (error) {

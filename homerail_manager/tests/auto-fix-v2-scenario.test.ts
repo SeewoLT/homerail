@@ -18,6 +18,7 @@ import {
   createActiveRun,
   getActiveRun,
   handoffActiveRun,
+  recordActiveRunBrokerActionSuccess,
   recoverAllActiveRuns,
 } from "../src/runtime/active-runs.js";
 
@@ -109,6 +110,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         task_document_sha256: task.sha256,
         require_draft: true,
         writable_paths: ["src", "tests"],
+        required_checks: ["unit"],
       }),
     });
     const bindings = resolveDagRunInputBindings("pilot", [
@@ -200,14 +202,46 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
       expect(reviewEnvelope.nodeId).toBe("review_revision");
       reviewSessions.push(reviewEnvelope.sessionId!);
       const reviewRound = fixRound + 1;
-      handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", {
-        verdict: "changes_requested",
-        head_sha: head,
-        review_round: reviewRound,
-        summary: `round ${reviewRound}`,
-        feedback: [`fix round ${reviewRound}`],
-        fix_tasks: [{ id: `round-${reviewRound}`, feedback: [`fix round ${reviewRound}`] }],
-      });
+      if (reviewRound === 2) {
+        recordActiveRunBrokerActionSuccess({
+          run_id: "autofix-v2-run",
+          node_id: "review_revision",
+          session_id: reviewEnvelope.sessionId!,
+          credential_ref: "github-autofix",
+          broker: "github_pr",
+          action: "required_checks",
+        });
+      }
+      if (reviewRound === 5) {
+        const approval = {
+          verdict: "approve",
+          head_sha: head,
+          review_round: reviewRound,
+          summary: "approved",
+          feedback: [],
+          fix_tasks: [],
+        };
+        expect(() => handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", approval))
+          .toThrow(/DAG_HANDOFF_BROKER_REQUIREMENT_MISSING/);
+        recordActiveRunBrokerActionSuccess({
+          run_id: "autofix-v2-run",
+          node_id: "review_revision",
+          session_id: reviewEnvelope.sessionId!,
+          credential_ref: "github-autofix",
+          broker: "github_pr",
+          action: "required_checks",
+        });
+        handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", approval);
+      } else {
+        handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", {
+          verdict: "changes_requested",
+          head_sha: head,
+          review_round: reviewRound,
+          summary: `round ${reviewRound}`,
+          feedback: [`fix round ${reviewRound}`],
+          fix_tasks: [{ id: `round-${reviewRound}`, feedback: [`fix round ${reviewRound}`] }],
+        });
+      }
 
       if (fixRound === 1) {
         _clearActiveRuns();
@@ -218,12 +252,12 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     executor.tick("autofix-v2-run");
 
     expect(new Set(reviewSessions).size).toBe(5);
-    expect(getActiveRun("autofix-v2-run")?.status).toBe("cancelled");
+    expect(getActiveRun("autofix-v2-run")?.status).toBe("completed");
     expect(getActiveRun("autofix-v2-run")?.counters.fanout_invocations).toMatchObject({
       implement: 1,
       fix: 4,
     });
-    expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("review_gate")).toBe("CANCELLED");
+    expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("review_gate")).toBe("COMPLETED");
     expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.some((node) => node.node_id.includes("inv_0005"))).toBe(false);
     expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes).toHaveLength(14);
   });

@@ -82,12 +82,37 @@ const ContractSchema = Type.Recursive((This) => Type.Object({
   pattern: Type.Optional(Type.String({ maxLength: 512 })),
 }, { additionalProperties: false }));
 
-const Port = Type.Object({
+const InputPort = Type.Object({
   contract: Type.Optional(ContractIdentifier),
   description: Type.Optional(ShortText),
 }, { additionalProperties: false });
 
-const PortMap = Type.Record(Identifier, Port, { maxProperties: 128 });
+const BrokerActionRequirement = Type.Object({
+  credential_ref: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
+  broker: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
+  action: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
+  when: Type.Optional(Type.Object({
+    field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+    equals: JsonValue,
+  }, { additionalProperties: false })),
+}, { additionalProperties: false });
+
+const OutputPort = Type.Object({
+  contract: Type.Optional(ContractIdentifier),
+  description: Type.Optional(ShortText),
+  required_broker_actions: Type.Optional(Type.Array(BrokerActionRequirement, {
+    minItems: 1,
+    maxItems: 8,
+    uniqueItems: true,
+  })),
+}, { additionalProperties: false });
+
+const InputPortMap = Type.Record(Identifier, InputPort, { maxProperties: 128 });
+const OutputPortMap = Type.Record(Identifier, OutputPort, { maxProperties: 128 });
 
 const NodeBase = {
   description: Type.Optional(ShortText),
@@ -95,8 +120,8 @@ const NodeBase = {
     uniqueItems: true,
     maxItems: 256,
   })),
-  inputs: Type.Optional(PortMap),
-  outputs: Type.Optional(PortMap),
+  inputs: Type.Optional(InputPortMap),
+  outputs: Type.Optional(OutputPortMap),
 };
 
 const AdvisorBinding = Type.Object({
@@ -308,7 +333,7 @@ const AwaitCommandNode = Type.Object({
     uniqueItems: true,
     maxItems: 256,
   })),
-  inputs: Type.Optional(PortMap),
+  inputs: Type.Optional(InputPortMap),
   config: Type.Object({
     primitive_version: Type.Literal(1),
     target_actors: Type.Optional(Type.Array(Identifier, {
@@ -389,7 +414,7 @@ const TerminalNode = Type.Object({
     uniqueItems: true,
     maxItems: 256,
   })),
-  inputs: Type.Optional(PortMap),
+  inputs: Type.Optional(InputPortMap),
   outcome: Type.Union([
     Type.Literal("success"),
     Type.Literal("failure"),

@@ -1,7 +1,7 @@
 # Auto Fix v2: Document-First, Draft-PR-Backed Repair
 
-Status: Opt-in MVP implemented and locally verified; real Draft-PR pilot and
-trusted deterministic validation gate pending
+Status: Opt-in MVP implemented and locally verified; real Draft-PR pilot
+pending
 
 This document defines a replacement architecture for the current Auto Fix
 scenario. It keeps the existing workflow available for rollback and introduces
@@ -13,10 +13,10 @@ The Draft pull request is a mutable delivery surface, and model conversation
 history is never required to recover the task.
 
 The current MVP enforces immutable inputs, secure dynamic fan-out, fresh review
-sessions, and fenced PR reads/writes. It exposes trusted GitHub check snapshots
-to the reviewer, but it does not yet make successful required checks a
-Manager-enforced precondition for approval. That production hardening remains a
-pilot gate rather than an implemented invariant.
+sessions, fenced PR reads/writes, and a Manager-side required-checks approval
+gate. The gate binds an immutable list of exact GitHub check names to the
+current PR head and the current fresh reviewer dispatch. A real Draft-PR pilot
+remains necessary before production adoption.
 
 ## Problem Statement
 
@@ -83,7 +83,9 @@ to stand in for durable task state and deterministic evidence.
    transcript.
 8. Missing evidence, head drift, invalid contracts, exhausted rounds, and
    incomplete validation produce explicit non-success outcomes.
-9. The final successful outcome is `ready_for_human`, not merge approval.
+9. A handoff whose verdict is `approve` requires a successful receipt for all
+   immutable required checks from that same reviewer dispatch.
+10. The final successful outcome is `ready_for_human`, not merge approval.
 
 ## Proposed Flow
 
@@ -96,9 +98,10 @@ caller creates immutable task input and identifies an existing Draft PR
   -> DeepSeek aggregator integrates patches in declared order
        -> broker fast-forward pushes candidate round 1 to Draft PR
   -> candidate round 1
-       -> deterministic required validation of the exact pushed head
+       -> trusted required checks are evaluated on the exact pushed head
        -> fresh GLM review of task + current diff + validation evidence
-       -> approve: final evidence publication -> ready_for_human
+       -> approve: Manager verifies the current-dispatch checks receipt
+                   -> final evidence publication -> ready_for_human
        -> reject: fresh DeepSeek fixer -> broker pushes next candidate round
   -> candidate round 5 rejection: needs_human
 ```
@@ -186,15 +189,19 @@ run binds this immutable context:
 
 ```json
 {
-  "repo": "owner/name",
-  "pr": 123,
-  "draft": true,
+  "version": 1,
+  "owner": "owner",
+  "repo": "name",
+  "pull_number": 123,
   "clone_url": "https://github.com/owner/name.git",
+  "head_ref": "autofix/task-123",
   "base_ref": "main",
+  "initial_head_sha": "...",
   "base_sha": "...",
-  "head_branch": "autofix/task-123",
-  "head_sha": "...",
-  "task_document_sha256": "..."
+  "task_document_sha256": "...",
+  "require_draft": true,
+  "writable_paths": ["src", "tests"],
+  "required_checks": ["Core (Linux, Node 24)"]
 }
 ```
 
@@ -215,7 +222,7 @@ The WorkflowSpec should define these bounded contracts:
 | Contract | Required content |
 | --- | --- |
 | `TaskManifest` | artifact id, digest, media type, size, logical path |
-| `PRContext` | repo, PR, draft state, base/head branches and SHAs |
+| `PRContext` | repo, PR, draft state, base/head branches and SHAs, explicit writable prefixes, exact required-check names |
 | `BoundTask` | task manifest plus verified PR context and policy id |
 | `WorkPlan` | plan digest, 1..3 work items, integration order, global validation |
 | `WorkItem` | id, objective, allowed paths, acceptance checks, context paths, risk |
@@ -306,27 +313,32 @@ conflicts and add glue changes, but all resulting changes remain subject to the
 global path policy and deterministic patch collector.
 
 The aggregator is the first model node allowed to request a PR write. It does
-so by passing the collected patch artifact and exact expected head SHA to the
-Manager broker. It never receives the underlying credential.
+so by passing bounded file bytes and the exact expected head SHA to the Manager
+broker. It never receives the underlying credential.
 
-## Deterministic Validation
+## Trusted Required-Checks Approval Gate
 
 Each implementer runs focused checks named by its WorkItem. After the aggregator
-or fixer pushes a patch-safe candidate, and before any model review in that
-round, a trusted validation node runs the task's required repository validation
-against the exact pushed head.
+or fixer pushes a candidate, trusted repository validation publishes GitHub
+check runs on that exact head. The immutable `PRContext.required_checks` list is
+selected by the caller, not by a model.
 
-- A validation failure skips GLM review and becomes structured fixer input.
-- A validation success is included verbatim, within log bounds, in GLM review
-  context.
-- The validation command is selected by trusted scenario configuration, not by
-  a model.
-- The final result requires validation of the exact final PR head SHA.
+- `checks_snapshot` provides bounded evidence to GLM but cannot authorize an
+  approval.
+- Before handing off `verdict: approve`, the fresh reviewer dispatch must call
+  `required_checks` through its read-only Manager broker capability.
+- The broker requires the newest run for every exact configured check name to
+  be `completed` with conclusion `success` on the bound current head.
+- Runtime records only a bounded action receipt, never the credential or
+  provider body, and accepts it only for the same node provider session.
+- The handoff requirement is conditional on the structured verdict, so changing
+  an output port cannot bypass the approval fence.
 
 The Draft PR may temporarily contain a candidate that fails validation; it is a
-WIP delivery surface. This ordering still prevents model approval of code that
-has not built or tested, while keeping the PR write capability on the
-aggregator/fixer dispatch that produced the patch.
+WIP delivery surface. Missing, pending, cancelled, or failed checks block only
+approval, so GLM can still request a bounded fix. In this repository Draft PR
+CI is skipped by default, so the operator must manually dispatch trusted CI on
+the exact automation head branch before an approval can complete.
 
 ## Fresh-Context Review And Fix Rounds
 
@@ -345,32 +357,40 @@ validation result, and bounded repository evidence. A new DeepSeek fixer
 receives those inputs plus the current structured findings. Neither receives
 previous review prose that is absent from the current contract.
 
+An approval receipt from one dispatch is not valid in a later dispatch, even
+when it is the same logical review node after recovery or a loop iteration.
+
 Tests must assert unique provider session ids, not merely different logical
 round ids.
 
 ## GitHub PR Capability Broker
 
-Add a Manager-side `github_pr` broker. Recommended first-version actions:
+The Manager-side `github_pr` broker implements these first-version actions:
 
 | Action | Purpose |
 | --- | --- |
-| `snapshot` | Return bounded immutable PR metadata and diff identity |
-| `read_checks` | Return checks for an exact head SHA |
-| `push_patch` | Apply a validated patch and fast-forward the bound head branch |
-| `post_comment` | Optional bounded informational comment; disabled by default |
+| `pull_request_snapshot` | Return bounded immutable PR metadata and diff identity |
+| `checks_snapshot` | Return bounded checks for the current exact head SHA |
+| `required_checks` | Fail unless every immutable required check succeeds on that head |
+| `commit_files` | Create bounded blobs/tree/commit and fast-forward the bound head branch |
 
-`push_patch` must enforce:
+`commit_files` enforces:
 
 - the run's exact repository, PR, base branch, and head branch binding;
 - `expected_head_sha` equals the remote PR head immediately before push;
-- the patch's declared base equals the expected head;
 - no force push and no non-fast-forward update;
-- a repository policy for allowed and forbidden paths;
-- patch size, file count, binary, symlink, submodule, and secret-path limits;
-- disabled Git hooks and credential helpers in the trusted checkout;
-- a fixed bot noreply identity and bounded commit message;
-- result provenance containing old head, new head, commit, patch digest, action,
-  run, node, session, actor generation, and timestamp.
+- explicit writable prefixes (`"."` is invalid) and an unconditional deny for
+  `.github/**`, `.git/**`, and mounted input paths;
+- at most 64 unique regular-file paths and 1 MiB total decoded bytes;
+- regular or executable blob modes only, with no delete, symlink, or submodule
+  operation;
+- a bounded single-line commit message;
+- durable current/pending-head reconciliation across Manager recovery.
+
+GitHub's blob/tree/commit/ref calls are not atomic as a group. A failure before
+the final non-force ref update may leave unreachable Git objects, but cannot
+advance the PR head. File/byte bounds, expected-head recovery, and operator
+rate-limit discipline keep this failure mode bounded.
 
 The broker must never expose token values or provider error bodies containing
 secrets. It must reject calls from nodes that lack both the
@@ -380,13 +400,13 @@ secrets. It must reject calls from nodes that lack both the
 
 | Role | Repository workspace | Built-in tools | PR broker |
 | --- | --- | --- | --- |
-| Binder | trusted command | fixed command only | `snapshot` |
+| Binder | trusted command | fixed command only | `pull_request_snapshot` |
 | K3 planner | read-only evidence | Read/Grep/Glob | none |
 | DeepSeek implementer | isolated worktree | bounded read/write/shell | none |
-| DeepSeek aggregator | integration worktree | bounded read/write/shell | `snapshot`, `push_patch` |
-| GLM reviewer | read-only snapshot/evidence | Read/Grep/Glob | `snapshot`, `read_checks` |
-| DeepSeek fixer | fresh integration worktree | bounded read/write/shell | `snapshot`, `push_patch` |
-| Finalizer | trusted command | fixed command only | `snapshot`, `read_checks` |
+| DeepSeek aggregator | integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_files` |
+| GLM reviewer | read-only snapshot/evidence | Read/Grep/Glob | `pull_request_snapshot`, `checks_snapshot`, `required_checks` |
+| DeepSeek fixer | fresh integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_files` |
+| Finalizer | trusted command | fixed command only | `pull_request_snapshot`, `required_checks` |
 
 Reviewer mutation is intentionally excluded. If operator-visible comments are
 required later, add only `post_comment`; never grant review approval or merge
@@ -467,7 +487,7 @@ strict v1 template.
 5. Select an owner-authored, low-risk Issue with an existing Draft PR, at most
    three independent work items, and fewer than approximately twenty changed
    files.
-6. Exclude workflows, credentials, dependency upgrades, migrations, release
+6. Exclude `.github/**`, credentials, dependency upgrades, migrations, release
    automation, and security-sensitive infrastructure from the first pilot.
 7. Run one real Draft-PR pilot with no auto-ready or merge behavior.
 8. Expand only after at least four of five eligible pilots produce a validated

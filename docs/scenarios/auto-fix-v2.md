@@ -22,8 +22,12 @@ predates the runtime and broker support described below.
 - Each rejected review creates one fresh dynamic DeepSeek fixer. Four fix
   rounds plus the initial review give exactly five total review rounds.
 - GitHub writes are expected-head, fast-forward-only, non-force, bounded to 64
-  files/1 MiB, and restricted by `pr_context.writable_paths`. Workflow files,
-  `.git`, and the mounted input directory are always denied.
+  files/1 MiB, and restricted by explicit `pr_context.writable_paths` prefixes.
+  `writable_paths: ["."]` is invalid; `.github/**`, `.git/**`, and the mounted
+  input directory are always denied even when a broader prefix is declared.
+- An `approve` handoff is rejected by Manager unless the same fresh reviewer
+  dispatch successfully called `github_pr/required_checks` and every immutable
+  required check passed on the exact current PR head.
 
 ## GitHub credential
 
@@ -78,19 +82,36 @@ the actually staged `task_document` before any PR action.
   "base_sha": "40-character-base-sha",
   "task_document_sha256": "64-character-sha256-of-task.md",
   "require_draft": true,
-  "writable_paths": ["homerail_manager/src", "homerail_manager/tests"]
+  "writable_paths": ["homerail_manager/src", "homerail_manager/tests"],
+  "required_checks": ["Core (Linux, Node 24)"]
 }
 ```
 
 The broker refuses a non-Draft PR, a different base/head/branch, an external
 head update, a fork/cross-repository PR, a task-document digest mismatch, or a
-write outside the path allowlist.
+write outside the path allowlist. `required_checks` contains one to 32 unique,
+exact GitHub check-run names. It is immutable for the run; the broker selects
+the newest run with each exact name and requires `completed`/`success` on the
+current head.
 
 The broker's token permissions are necessary but not the only boundary. The
 WorkflowSpec also limits which nodes can call which broker actions, the Worker
 transport is fenced to the current lease/session/generation, and `commit_files`
 enforces the immutable PR identity, expected head, writable path allowlist,
 file/byte limits, and `force: false`.
+
+This repository's pull-request CI intentionally skips Draft PRs and does not
+run on Draft `synchronize` events. Before a reviewer can approve, an operator
+or trusted outer automation must manually dispatch CI with the Draft head
+branch selected as the workflow ref, then verify that the configured exact
+check name appears on that head SHA. The DAG credential remains Checks
+read-only and cannot manufacture or override check results.
+
+`commit_files` uses GitHub's bounded Git Data API sequence (blob, tree, commit,
+then non-force ref update). A failure before the ref update can leave
+unreachable Git objects, but cannot advance the PR. Operators should respect
+GitHub rate limits and retry only after re-reading the bound PR head; the broker
+reconciles a pending update during recovery.
 
 ## Model profile
 
@@ -140,10 +161,10 @@ node scripts/auto-fix-v2-runtime-profile.test.mjs
 The fake-remote scenario proves two dynamic implementers, four dynamically
 generated fixers, five total reviews with distinct sessions, cold recovery,
 read-only input projection, per-node GitHub actions, non-force head fencing,
-path denial, task/PR identity binding, fork/closed-PR denial, and
-external-head-drift rejection.
+path denial (including `.github/actions/**`), task/PR identity binding,
+fork/closed-PR denial, external-head-drift rejection, and a Manager-enforced
+required-checks approval fence that cannot reuse a prior dispatch receipt.
 
-This proof does not spend model tokens or mutate GitHub. Before production,
-add a trusted required-checks gate: today GLM can read `checks_snapshot`, but
-the DAG runtime does not independently prevent an approval handoff when checks
-are missing or failing.
+This proof does not spend model tokens or mutate GitHub. A real Draft-PR pilot,
+including creation of the configured check run on the exact Draft head, remains
+required before production adoption.
