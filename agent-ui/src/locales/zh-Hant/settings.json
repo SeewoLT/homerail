@@ -59,11 +59,11 @@
       "channels": {
         "stable": {
           "label": "穩定版",
-          "description": "只接收正式版本，不會看到 Alpha 或 Beta 預發佈版。"
+          "description": "只接收正式版本，不會看到 Beta 預發佈版。"
         },
         "early-access": {
           "label": "搶先體驗",
-          "description": "跟隨目前 Alpha 通道，未來會自然升級到 Beta 和穩定版，無需再次選擇。"
+          "description": "跟隨 Beta 通道，自動接收後續 Beta 和穩定版更新。"
         }
       },
       "currentVersion": "目前安裝版本：{version}",
