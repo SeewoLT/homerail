@@ -44,8 +44,6 @@ Add these environment secrets:
 | Secret | Value |
 | --- | --- |
 | `HOMERAIL_DESKTOP_READ_TOKEN` | Fine-grained token with read-only Contents access to `xiaotianfotos/homerail_desktop` only |
-| `WIN_CSC_LINK` | Base64-encoded trusted Windows Authenticode PFX/P12 |
-| `WIN_CSC_KEY_PASSWORD` | Password for the Windows signing certificate |
 | `MAC_CSC_LINK` | Base64-encoded Developer ID Application P12 |
 | `MAC_CSC_KEY_PASSWORD` | Password for the Mac P12 |
 | `APPLE_API_KEY_P8` | Base64-encoded App Store Connect `.p8` key |
@@ -61,12 +59,10 @@ Both workflow environments set `deployment: false`. They retain environment
 secrets and approvals without creating public Deployment records for signing or
 release administration.
 
-The Candidate workflow keeps Windows Alpha explicitly unsigned. For Beta it
-injects the Windows signing secrets only into the signed Windows build step and
-requires both the NSIS installer and packaged executable to report a `Valid`
-trusted Authenticode signature. A self-signed or otherwise untrusted secret
-fails the candidate. macOS always requires Developer ID signing and Apple
-notarization.
+The Candidate workflow keeps Windows packages explicitly unsigned for both the
+historical Alpha channel and the active Beta channel. It requires both the NSIS
+installer and packaged executable to report `NotSigned` with no signer
+certificate. macOS always requires Developer ID signing and Apple notarization.
 
 Keep all certificate passwords, private keys, and repository tokens out of Git.
 The candidate workflow writes the Apple API key only to the ephemeral macOS
@@ -80,16 +76,17 @@ Version changes are code changes and must be reviewed before building:
 2. Update `homerail_desktop/package.json` and its lock to the same version.
 3. Push the private Desktop branch and record its full 40-character commit SHA.
 4. For Alpha, run the unsigned public **Desktop Build Gate** against that exact
-   unmerged SHA. For Beta, run local CI and merge before using protected signing.
+   unmerged SHA. For Beta, run local CI and merge before using the protected
+   Candidate environment.
 5. Merge the Desktop and public version changes.
-6. Run the immutable Candidate workflow and test its signed artifacts on the
+6. Run the immutable Candidate workflow and test its platform artifacts on the
    real Windows and macOS test machines.
 
 The workflows never rewrite package versions while building. They fail if the
 requested version differs from any public or Desktop package manifest, or if the
 pinned checkout differs from the requested SHA. The Build Gate deliberately
-accepts an unmerged private commit; the signed Candidate additionally requires
-that commit to be merged to `homerail_desktop/main`.
+accepts an unmerged private commit; the Candidate additionally requires that
+commit to be merged to `homerail_desktop/main`.
 
 ## Build an unsigned pre-merge package gate
 
@@ -134,8 +131,8 @@ The workflow:
    versions;
 2. checks out the private Desktop source by full commit SHA;
 3. builds Windows x64 and macOS arm64 on isolated hosted runners;
-4. applies the channel policy: Alpha Windows is explicitly unsigned, Beta
-   Windows is trusted Authenticode-signed, and macOS is signed and notarized;
+4. applies the channel policy: Windows is explicitly unsigned, while macOS is
+   Developer ID signed and Apple-notarized;
 5. asks the pinned Desktop release tooling to prepare and verify channel-specific
    metadata against the packaged files;
 6. creates platform checksums and a combined release manifest;
@@ -151,11 +148,11 @@ metadata from the same build, after the separate Stable gate is enabled. Every
 emitted metadata file is covered by both the platform checksum list and the
 combined candidate manifest.
 
-### Windows channel signing policy
+### Windows unsigned policy
 
-Windows installers are explicitly unsigned while HomeRail is in Alpha. The
-Candidate workflow passes `win.signExecutable=false` and
-`win.verifyUpdateCodeSignature=false` only on the Windows Alpha
+Windows Alpha and Beta installers are explicitly unsigned. The Candidate
+workflow passes `win.signExecutable=false` and
+`win.verifyUpdateCodeSignature=false` on the Windows candidate
 electron-builder command. It does not disable updater signature verification
 globally in Desktop production code. The unsigned pre-merge Build Gate remains
 Alpha-only.
@@ -166,21 +163,20 @@ packaged `app-update.yml` containing `publisherName`. Users should expect
 Windows SmartScreen and an **Unknown Publisher** warning. Update integrity
 currently depends on delivery from the GitHub Release and electron-updater's
 SHA-512 metadata check, supplemented by the candidate SHA-256 manifests. That
-does not authenticate a publisher and is weaker than trusted Authenticode, so
-this exception is only permitted for Alpha.
+does not authenticate a publisher and is weaker than trusted Authenticode.
+Windows Beta is explicitly unsigned under the current release policy.
 
 Omitting `publisherName` also preserves a migration path to a future
-trusted-signed Windows build. An unsigned Alpha can discover and install that
-signed build, but the first update from an unsigned Alpha to a signed installer
-does not verify that installer with Authenticode; the old client's updater
-configuration still relies on GitHub and SHA-512 for that hop. After the signed
-version is installed, its own `app-update.yml` can restore `publisherName` and
-signature verification for subsequent updates.
+trusted-signed Windows build. An unsigned Alpha or Beta can discover and install
+that signed build, but the first update from an unsigned build to a future signed
+installer does not verify that installer with Authenticode; the old client's
+updater configuration still relies on GitHub and SHA-512 for that hop. After the
+signed version is installed, its own `app-update.yml` can restore `publisherName`
+and signature verification for subsequent updates.
 
-Windows Beta uses `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`, enables
-`forceCodeSigning`, and rejects the candidate unless Authenticode reports
-`Valid` for both the installer and packaged `HomeRail.exe`. Its packaged
-`app-update.yml` must restore `publisherName` and target the `beta` channel.
+Windows Beta rejects a candidate unless the Authenticode status is `NotSigned`
+for both the installer and packaged `HomeRail.exe`. Its packaged
+`app-update.yml` must omit `publisherName` and target the `beta` channel.
 
 [SignPath Foundation](https://signpath.org/) is a possible no-cost signing path
 for qualifying open-source projects. HomeRail has not been applied for or
@@ -201,9 +197,9 @@ does not replace the following acceptance checks on a real Windows machine.
 After the hosted-runner gates pass, download the candidate from the workflow
 run and perform direct-install checks:
 
-- Windows Alpha: acknowledge the expected SmartScreen / Unknown Publisher
-  warning. Windows Beta: confirm the trusted publisher and no Unknown Publisher
-  warning. Install, launch HomeRail, complete onboarding, restart, and uninstall once.
+- Windows Beta: acknowledge the expected SmartScreen / Unknown Publisher
+  warning, then install, launch HomeRail, complete onboarding, restart, and
+  uninstall once.
 - macOS: mount the DMG, install HomeRail, confirm Gatekeeper accepts it, launch,
   complete onboarding, quit, and relaunch.
 - Both: verify the packaged CLI, Manager/Node/Worker startup, settings
@@ -282,7 +278,8 @@ Create the version tag only when all of these are true:
 - release notes and the source commits in `release-manifest.json` were reviewed;
 - the publishing environment approval is intentional.
 
-Beta additionally requires trusted Windows signing, a reliable Alpha upgrade
-history, stable configuration/data migrations, no known data-loss or security
-issue, and a substantially frozen core feature set. Stable likewise requires
-trusted Windows signing and is not part of the current release plan.
+Beta additionally requires explicit acceptance of unsigned Windows
+distribution, a reliable Alpha upgrade history, stable configuration/data
+migrations, no known data-loss or security issue, and a substantially frozen
+core feature set. Stable still requires trusted Windows signing and is not part
+of the current release plan.
