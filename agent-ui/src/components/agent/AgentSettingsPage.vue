@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   Brain,
   CheckCircle2,
+  FlaskConical,
   FolderTree,
   GitBranch,
   Loader2,
@@ -23,6 +24,7 @@ import {
 } from 'lucide-vue-next'
 import ModelSettings from './settings/ModelSettings.vue'
 import GeneralSettings from './settings/GeneralSettings.vue'
+import ExperimentalSettings from './settings/ExperimentalSettings.vue'
 import StorageRetentionSettings from './settings/StorageRetentionSettings.vue'
 import PluginSettings from './settings/PluginSettings.vue'
 import SkillSettings from './settings/SkillSettings.vue'
@@ -120,6 +122,7 @@ type SettingsTab =
   | 'git'
   | 'providers'
   | 'voice'
+  | 'experimental'
   | 'device'
   | 'skills'
   | 'plugins'
@@ -296,6 +299,7 @@ const tabs = computed<Array<{ id: SettingsTab; label: string; icon: typeof Setti
   { id: 'git', label: t('settings.tabs.git'), icon: GitBranch },
   { id: 'providers', label: t('settings.tabs.providers'), icon: Settings },
   { id: 'voice', label: t('settings.tabs.voice'), icon: Volume2 },
+  { id: 'experimental', label: t('settings.tabs.experimental'), icon: FlaskConical },
   { id: 'device', label: t('settings.tabs.device'), icon: Network },
   { id: 'skills', label: t('settings.tabs.skills'), icon: Package },
   { id: 'plugins', label: t('settings.tabs.plugins'), icon: Package },
@@ -313,6 +317,7 @@ const activeTabDescription = computed(() => {
   if (activeTab.value === 'git') return t('settings.descriptions.git')
   if (activeTab.value === 'providers') return t('settings.descriptions.providers')
   if (activeTab.value === 'voice') return t('settings.descriptions.voice')
+  if (activeTab.value === 'experimental') return t('settings.descriptions.experimental')
   if (activeTab.value === 'skills') return t('settings.descriptions.skills')
   if (activeTab.value === 'plugins') return t('settings.descriptions.plugins')
   if (activeTab.value === 'device') return ''
@@ -1492,6 +1497,8 @@ onUnmounted(() => {
           <GeneralSettings />
           <StorageRetentionSettings />
         </template>
+
+        <ExperimentalSettings v-if="activeTab === 'experimental'" />
 
         <section v-if="activeTab === 'workspace'" data-testid="agent-settings-section-workspace" class="mt-10 space-y-6">
           <div class="grid gap-3 sm:grid-cols-3">

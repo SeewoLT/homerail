@@ -279,12 +279,20 @@ function writeCandidate(args) {
     args.channel === "alpha"
       ? "- Windows: explicitly unsigned Alpha installer, verified as unsigned under the Alpha release policy."
       : `- Windows: trusted Authenticode signing is required for this ${phase}.`;
+  const prereleaseWarning =
+    args.channel === "alpha"
+      ? [
+          "",
+          "> **Warning:** This is an unstable build intended only for automatic upgrade testing. Do not install it for general use.",
+        ]
+      : [];
   fs.writeFileSync(
     path.join(candidateDir, "release-notes.md"),
     [
       `# HomeRail ${args.version}`,
       "",
       `This HomeRail Desktop ${phase} passed its platform-specific release gates.`,
+      ...prereleaseWarning,
       "",
       `- HomeRail commit: \`${args["source-commit"]}\``,
       `- Desktop commit: \`${args["desktop-commit"]}\``,

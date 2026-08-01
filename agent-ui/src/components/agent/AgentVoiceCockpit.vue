@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAgentStore } from '@/stores/agent-store'
+import { useUiStore } from '@/stores/ui-store'
 import {
   closeVoiceSession,
   createVoiceSession,
@@ -39,6 +40,7 @@ import {
 } from '@/agent/voice-session-restore'
 import {
   CodexLiveVoiceClient,
+  codexLiveVoiceOwnsAudio,
   type CodexLiveVoiceEvent,
   type CodexLiveVoiceState
 } from '@/agent/codex-live-voice-client'
@@ -153,6 +155,7 @@ import {
 } from 'lucide-vue-next'
 
 const store = useAgentStore()
+const uiStore = useUiStore()
 const { t, te } = useI18n()
 const { planLabel } = createProtocolLabels(t)
 // 新手引导配置状态检测（作为独立状态入口，不阻断模型选择）
@@ -283,6 +286,11 @@ const voiceInputAssist = ref(loadBooleanSetting(VOICE_INPUT_ASSIST_KEY, false))
 const VOICE_OUTPUT_ENABLED_KEY = 'homerail.voice.output-enabled'
 const voiceOutputEnabled = ref(loadBooleanSetting(VOICE_OUTPUT_ENABLED_KEY, true))
 const composerRef = ref<HTMLTextAreaElement | null>(null)
+const IMMERSIVE_RETURN_IDLE_MS = 3200
+const IMMERSIVE_EXIT_REVEAL_MS = 1600
+const immersiveMode = ref(false)
+const immersiveSuspended = ref(false)
+const immersiveExitVisible = ref(false)
 const fullscreenPromptVisible = ref(false)
 const fullscreenPromptDismissed = ref(false)
 const cockpitRoot = ref<HTMLElement | null>(null)
@@ -395,6 +403,8 @@ let voiceGamepadFrame = 0
 let voiceGamepadPressedButtons = new Set<number>()
 let voiceGamepadAxisLocks = new Set<VoiceGamepadDirection>()
 let voiceGamepadNoticeTimer = 0
+let immersiveExitTimer = 0
+let immersiveReturnTimer = 0
 let nativeGamepadAnalogAt = 0
 let asrSocket: WebSocket | null = null
 let asrTranscriptRaw = ''
@@ -424,6 +434,7 @@ let speechQueueRunning = false
 let ttsBroadcastChannel: BroadcastChannel | null = null
 let currentTtsSource: AudioBufferSourceNode | null = null
 let currentTtsAudioReject: ((error: Error) => void) | null = null
+let ttsSpeechAbort: AbortController | null = null
 let ttsPlaybackGeneration = 0
 let screenWakeLock: { release: () => Promise<void> } | null = null
 let noSleepPlayerActive = false
@@ -533,13 +544,18 @@ const codexLiveVoiceEffective = computed(
     onboardingStatus.value.liveVoiceEffective
 )
 const codexLiveVoiceSessionActive = computed(
-  () =>
-    !['idle', 'error', 'closed'].includes(codexLiveVoiceState.value)
+  () => codexLiveVoiceOwnsAudio(codexLiveVoiceState.value)
 )
 const codexLiveVoiceConnecting = computed(
   () =>
     codexLiveVoiceState.value === 'connecting' ||
     codexLiveVoiceState.value === 'reconnecting'
+)
+const liveVoiceImmersiveActive = computed(
+  () =>
+    uiStore.liveVoiceImmersiveEnabled &&
+    codexLiveVoiceSessionActive.value &&
+    !codexLiveVoiceConnecting.value
 )
 const codexLiveVoiceHumanInputActive = computed(
   () =>
@@ -694,6 +710,11 @@ const voiceInputLocked = computed(() => {
     onboardingStatus.value.needsOnboarding
   )
 })
+const voiceInputActionLocked = computed(
+  () =>
+    voiceInputLocked.value &&
+    !(codexLiveVoiceEffective.value && codexLiveVoiceSessionActive.value)
+)
 const voiceState = computed(() => {
   if (codexLiveVoiceEffective.value) {
     if (codexLiveVoiceState.value === 'assistant-speaking') return 'speaking'
@@ -1095,7 +1116,8 @@ const voiceCockpitClasses = computed(() => [
     'voice-cockpit--mobile': isMobileDevice.value,
     'voice-cockpit--phone-portrait': isPhonePortrait.value,
     'voice-cockpit--phone-landscape': isCompactPhoneLandscape.value,
-    'voice-cockpit--tv-compact': isTvCompactViewport.value
+    'voice-cockpit--tv-compact': isTvCompactViewport.value,
+    'voice-cockpit--immersive': immersiveMode.value
   }
 ])
 const artifactPreviewModalStyle = computed(() => {
@@ -1172,7 +1194,6 @@ const composerPlaceholder = computed(() => {
 })
 const voiceInputButtonLabel = computed(() => {
   if (!codexLiveVoiceEffective.value) return t('voice.composer.toggleVoice')
-  if (codexLiveVoiceConnecting.value) return voiceStateText.value
   if (codexLiveVoiceSessionActive.value) return t('voice.liveVoice.end')
   return t('voice.liveVoice.tapToStart')
 })
@@ -1185,9 +1206,12 @@ const captionKind = computed(() => {
   return 'state'
 })
 const voiceMainGridStyle = computed(() => ({
-  gridTemplateColumns: isPhonePortrait.value
-    ? 'minmax(0, 1fr)'
-    : `${sidebarColumnWidth()} minmax(0, 1fr) ${detailsColumnWidth()}`
+  gridTemplateColumns:
+    isPhonePortrait.value
+      ? 'minmax(0, 1fr)'
+      : immersiveMode.value
+        ? '0 minmax(0, 1fr) 0'
+        : `${sidebarColumnWidth()} minmax(0, 1fr) ${detailsColumnWidth()}`
 }))
 const voiceShellStyle = computed(() => {
   if (!isCompactPhoneLandscape.value) return {}
@@ -1277,6 +1301,8 @@ onMounted(() => {
   document.addEventListener('visibilitychange', handleVisibilityChange)
   document.addEventListener('pointerdown', closeModelMenuOnOutside)
   window.addEventListener('keydown', handleVoiceKeyboardButton, true)
+  window.addEventListener('keydown', handleImmersiveKeyboard, true)
+  window.addEventListener('pointermove', handleImmersivePointerMove, { passive: true })
   window.addEventListener('keydown', closeModelMenuOnEscape)
   window.addEventListener('gamepadconnected', handleVoiceGamepadConnected)
   window.addEventListener('gamepaddisconnected', handleVoiceGamepadDisconnected)
@@ -1322,6 +1348,15 @@ watch(
 watch(codexLiveVoiceEffective, effective => {
   if (!effective && codexLiveVoiceClient) void stopCodexLiveVoice()
 })
+
+watch(
+  liveVoiceImmersiveActive,
+  (active, previous) => {
+    if (active && !previous) activateLiveVoiceImmersiveMode()
+    else if (!active && previous) exitImmersiveMode()
+  },
+  { immediate: true }
+)
 
 watch(detailsOpen, value => saveBooleanSetting(VOICE_DETAILS_PANE_KEY, value))
 watch(voiceSidebarOpen, value => {
@@ -1387,6 +1422,8 @@ onUnmounted(() => {
   // /ws/events is shared with the DAG runtime store; component teardown only
   // removes this cockpit's subscriptions and must not close the singleton.
   if (widgetHighlightTimer) window.clearTimeout(widgetHighlightTimer)
+  if (immersiveExitTimer) window.clearTimeout(immersiveExitTimer)
+  if (immersiveReturnTimer) window.clearTimeout(immersiveReturnTimer)
   window.removeEventListener('resize', updateViewportSize)
   window.removeEventListener('orientationchange', updateViewportSize)
   document.removeEventListener('fullscreenchange', handleFullscreenChange)
@@ -1394,6 +1431,8 @@ onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   document.removeEventListener('pointerdown', closeModelMenuOnOutside)
   window.removeEventListener('keydown', handleVoiceKeyboardButton, true)
+  window.removeEventListener('keydown', handleImmersiveKeyboard, true)
+  window.removeEventListener('pointermove', handleImmersivePointerMove)
   window.removeEventListener('keydown', closeModelMenuOnEscape)
   window.removeEventListener('gamepadconnected', handleVoiceGamepadConnected)
   window.removeEventListener('gamepaddisconnected', handleVoiceGamepadDisconnected)
@@ -2221,6 +2260,8 @@ function voiceGridItemStyle(
     return { gridRow: '1 / span 3', gridColumn: '1 / span 3' }
   if (isXiaohongshuWidget(widget) && !isPhonePortrait.value && !isCompactPhoneLandscape.value)
     return { gridRow: '1 / span 2', gridColumn: 'auto / span 1' }
+  if (isDagExplorerWidget(widget) && !isPhonePortrait.value && !isCompactPhoneLandscape.value)
+    return { gridRow: '1 / span 2', gridColumn: 'auto / span 2' }
   if (widget.type === 'topic_outline' && !isPhonePortrait.value && !isCompactPhoneLandscape.value)
     return { gridRow: '1 / span 2', gridColumn: 'auto / span 2' }
   if (
@@ -2536,6 +2577,9 @@ function isAgentDagSignalWidget(widget: VoiceWidget): boolean {
     widget.id === 'manager-progress'
   )
     return false
+  // dag_explorer 是自带节点结果渲染的 2x2 面板，必须作为完整 widget 渲染，
+  // 不能被压缩进执行卡的 signal 列表
+  if (isDagExplorerWidget(widget)) return false
   const data = widget.data ?? {}
   const visual = String(data.visual || '').toLowerCase()
   const surface = String(data.surface || '').toLowerCase()
@@ -2562,6 +2606,10 @@ function isXiaohongshuWidget(widget: VoiceWidget): boolean {
     widget.type === 'xiaohongshu_note' ||
     String(widget.data?.visual || '').toLowerCase() === 'xiaohongshu_note'
   )
+}
+
+function isDagExplorerWidget(widget: VoiceWidget): boolean {
+  return widget.type === 'dag_explorer'
 }
 
 function resetSubmittedTranscriptClear(): void {
@@ -3383,6 +3431,13 @@ async function submitDraft(force = false): Promise<void> {
 async function speak(text: string): Promise<void> {
   const clean = text.trim()
   if (!clean) return
+  if (codexLiveVoiceSessionActive.value) {
+    recordTtsDebug(
+      'tts_speak_skipped',
+      `reason=codex_live_voice_active text="${previewSpeechText(clean)}"`
+    )
+    return
+  }
   if (!voiceOutputEnabled.value) {
     recordTtsDebug('tts_output_disabled', `跳过已关闭的语音输出：${previewSpeechText(clean)}`)
     return
@@ -3397,12 +3452,14 @@ async function speak(text: string): Promise<void> {
   pcmChunks = []
   spokenText.value = clean
   speaking.value = true
+  const requestAbort = new AbortController()
+  ttsSpeechAbort = requestAbort
   try {
     recordTtsDebug(
       'tts_speech_request',
       `generation=${playbackToken} text="${previewSpeechText(clean)}"`
     )
-    const response = await speechStream(clean, undefined, false)
+    const response = await speechStream(clean, undefined, false, requestAbort.signal)
     recordTtsDebug(
       'tts_speech_response',
       `generation=${playbackToken} status=${response.status} content-type=${response.headers.get('content-type') || ''}`
@@ -3427,7 +3484,12 @@ async function speak(text: string): Promise<void> {
     await playTtsBlob(blob)
     recordTtsDebug('tts_playback_complete', `generation=${playbackToken}`)
   } catch (err: any) {
-    if (err?.message === 'TTS playback cancelled') {
+    if (
+      err?.name === 'AbortError' ||
+      err?.message === 'TTS playback cancelled' ||
+      playbackToken !== ttsPlaybackGeneration ||
+      codexLiveVoiceSessionActive.value
+    ) {
       recordTtsDebug('tts_speak_cancelled', `generation=${playbackToken}`, 'warning')
       return
     }
@@ -3439,6 +3501,7 @@ async function speak(text: string): Promise<void> {
     voiceConfigError.value = `${t('voice.errors.tts')}: ${err?.message || t('voice.errors.unknown')}`
     throw err
   } finally {
+    if (ttsSpeechAbort === requestAbort) ttsSpeechAbort = null
     if (playbackToken === ttsPlaybackGeneration) speaking.value = false
   }
 }
@@ -3450,6 +3513,13 @@ async function speakText(text: string): Promise<void> {
 function enqueueSpeechEvent(event: VoiceSpeechEvent, source = 'stream'): boolean {
   const text = event.text?.trim()
   if (!text) return false
+  if (codexLiveVoiceSessionActive.value) {
+    recordTtsDebug(
+      'tts_enqueue_skipped',
+      `source=${source} reason=codex_live_voice_active channel=${event.channel} text="${previewSpeechText(text)}"`
+    )
+    return false
+  }
   if (!voiceOutputEnabled.value) {
     recordTtsDebug(
       'tts_enqueue_skipped',
@@ -3649,6 +3719,8 @@ function cancelLocalSpeech(reason: string): void {
     `reason=${reason} generation=${previousGeneration}->${ttsPlaybackGeneration} dropped=${dropped} running=${speechQueueRunning}`,
     reason === 'unmount' ? 'debug' : 'warning'
   )
+  ttsSpeechAbort?.abort()
+  ttsSpeechAbort = null
   stopNativeTtsPlayback()
   try {
     currentTtsSource?.stop(0)
@@ -3768,8 +3840,13 @@ async function playTtsBlob(blob: Blob): Promise<void> {
 }
 
 function applyCodexLiveVoiceState(state: CodexLiveVoiceState): void {
+  const wasActive = codexLiveVoiceSessionActive.value
   codexLiveVoiceState.value = state
-  const active = !['idle', 'error', 'closed'].includes(state)
+  const active = codexLiveVoiceOwnsAudio(state)
+  if (active && !wasActive) {
+    cancelLocalSpeech('codex_live_voice_audio_owner')
+    broadcastVoiceActivity('listening')
+  }
   const microphoneActive = [
     'listening',
     'user-speaking',
@@ -3849,7 +3926,6 @@ async function startCodexLiveVoice(): Promise<void> {
   const sessionId = workspace.value?.session_id
   if (!sessionId || !codexLiveVoiceEffective.value) return
   if (codexLiveVoiceClient) await stopCodexLiveVoice(false)
-  cancelLocalSpeech('codex_live_voice_started')
   closeVoiceInputAfterSubmit()
   voiceTurnAbort?.abort()
   voiceTurnAbort = null
@@ -3864,7 +3940,7 @@ async function startCodexLiveVoice(): Promise<void> {
     selectedNodeId: selectedGenerativeUiNodeId.value || null,
     getUserMedia: async () => {
       const stream = await createVoiceMediaStream()
-      startCodexLiveVoiceMeter(stream)
+      if (codexLiveVoiceClient === client) startCodexLiveVoiceMeter(stream)
       return stream
     },
     onState: applyCodexLiveVoiceState,
@@ -3874,7 +3950,8 @@ async function startCodexLiveVoice(): Promise<void> {
   try {
     await client.start()
   } catch (err: any) {
-    if (codexLiveVoiceClient === client) codexLiveVoiceClient = null
+    if (codexLiveVoiceClient !== client) return
+    codexLiveVoiceClient = null
     stopCodexLiveVoiceMeter()
     applyCodexLiveVoiceState('error')
     error.value = err?.message || t('voice.liveVoice.error')
@@ -3947,14 +4024,14 @@ function stopCodexLiveVoiceMeter(): void {
 }
 
 async function toggleListening(): Promise<void> {
-  if (voiceInputLocked.value) return
+  if (codexLiveVoiceEffective.value && codexLiveVoiceSessionActive.value) {
+    await stopCodexLiveVoice()
+    return
+  }
+  if (voiceInputActionLocked.value) return
   if (codexLiveVoiceEffective.value) {
     activateNoSleepPlayer()
-    if (codexLiveVoiceSessionActive.value) {
-      await stopCodexLiveVoice()
-    } else {
-      await startCodexLiveVoice()
-    }
+    await startCodexLiveVoice()
     return
   }
   if (!tabCanUseVoiceOutput()) return
@@ -4268,6 +4345,7 @@ function handleVoiceGamepadButton(index: number): void {
 function handleVoiceGamepadButtonIntent(
   intent: ReturnType<typeof resolveVoiceGamepadButtonIntent>
 ): void {
+  noteLiveVoiceImmersiveInteraction()
   if (intent === 'system_preview') openSelectedWidgetPreview()
   else if (intent === 'system_cancel') handleVoiceGamepadCancel()
   else if (intent === 'voice_toggle') void toggleListening()
@@ -4287,6 +4365,7 @@ function handleVoiceGamepadButtonIntent(
 }
 
 function handleVoiceGamepadDirection(direction: VoiceGamepadDirection): void {
+  noteLiveVoiceImmersiveInteraction()
   const context = currentVoiceGamepadInputContext()
   const intent = resolveVoiceGamepadDirectionIntent(context, direction)
   if (intent === 'preview_previous') prevArtifactPreviewImage()
@@ -4310,6 +4389,10 @@ function handleVoiceGamepadCancel(): void {
   }
   if (voiceSidebarOpen.value && isPhonePortrait.value) {
     voiceSidebarOpen.value = false
+    return
+  }
+  if (immersiveMode.value) {
+    suspendLiveVoiceImmersiveMode()
     return
   }
   if (effectiveDetailsOpen.value) toggleDetails()
@@ -4939,6 +5022,93 @@ function toggleDetails(): void {
   detailsOpen.value = !detailsOpen.value
 }
 
+function activateLiveVoiceImmersiveMode(): void {
+  if (!liveVoiceImmersiveActive.value) return
+  if (immersiveReturnTimer) window.clearTimeout(immersiveReturnTimer)
+  immersiveReturnTimer = 0
+  immersiveMode.value = true
+  immersiveSuspended.value = false
+  immersiveExitVisible.value = false
+  modelMenuOpen.value = false
+  voiceGamepadFocusMode.value = 'widgets'
+}
+
+function exitImmersiveMode(): void {
+  immersiveMode.value = false
+  immersiveSuspended.value = false
+  immersiveExitVisible.value = false
+  if (immersiveExitTimer) window.clearTimeout(immersiveExitTimer)
+  if (immersiveReturnTimer) window.clearTimeout(immersiveReturnTimer)
+  immersiveExitTimer = 0
+  immersiveReturnTimer = 0
+}
+
+function scheduleImmersiveReturn(): void {
+  if (immersiveReturnTimer) window.clearTimeout(immersiveReturnTimer)
+  immersiveReturnTimer = 0
+  if (
+    immersiveMode.value ||
+    !immersiveSuspended.value ||
+    !liveVoiceImmersiveActive.value
+  ) return
+  immersiveReturnTimer = window.setTimeout(() => {
+    immersiveReturnTimer = 0
+    if (immersiveSuspended.value && liveVoiceImmersiveActive.value) {
+      activateLiveVoiceImmersiveMode()
+    }
+  }, IMMERSIVE_RETURN_IDLE_MS)
+}
+
+function suspendLiveVoiceImmersiveMode(): void {
+  if (!liveVoiceImmersiveActive.value) {
+    exitImmersiveMode()
+    return
+  }
+  immersiveMode.value = false
+  immersiveSuspended.value = true
+  immersiveExitVisible.value = false
+  if (immersiveExitTimer) window.clearTimeout(immersiveExitTimer)
+  immersiveExitTimer = 0
+  scheduleImmersiveReturn()
+}
+
+function noteLiveVoiceImmersiveInteraction(): void {
+  if (immersiveSuspended.value && liveVoiceImmersiveActive.value) {
+    scheduleImmersiveReturn()
+  }
+}
+
+function handleImmersivePointerMove(): void {
+  if (!immersiveMode.value) {
+    noteLiveVoiceImmersiveInteraction()
+    return
+  }
+  immersiveExitVisible.value = true
+  if (immersiveExitTimer) window.clearTimeout(immersiveExitTimer)
+  immersiveExitTimer = window.setTimeout(() => {
+    immersiveExitVisible.value = false
+    immersiveExitTimer = 0
+  }, IMMERSIVE_EXIT_REVEAL_MS)
+}
+
+function handleImmersiveKeyboard(event: KeyboardEvent): void {
+  if (!immersiveMode.value) {
+    noteLiveVoiceImmersiveInteraction()
+    return
+  }
+  if (event.key === 'Escape' || event.key === 'BrowserBack') {
+    if (artifactPreviewModal.value) {
+      event.preventDefault()
+      event.stopPropagation()
+      closeArtifactPreview()
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    suspendLiveVoiceImmersiveMode()
+  }
+}
+
 async function scrollConversationToLatest(): Promise<void> {
   await nextTick()
   const thread = conversationThreadRef.value
@@ -5019,11 +5189,13 @@ async function scrollCardGridToWidget(widgetId?: string): Promise<void> {
 }
 
 function openSettings(): void {
+  exitImmersiveMode()
   store.settingsPageOpen = true
   store.voiceCockpitOpen = false
 }
 
 function openRuntimeOverlay(): void {
+  exitImmersiveMode()
   store.runtimeOverlayOpen = true
 }
 
@@ -5033,6 +5205,7 @@ function openDevOnboarding(): void {
 
 function close(): void {
   if (props.voiceOnly) return
+  exitImmersiveMode()
   void endSession()
   store.voiceCockpitOpen = false
 }
@@ -5083,8 +5256,27 @@ function summarizeTask(value: string): string {
       <em>{{ fullscreenGateHint }}</em>
       <strong>{{ fullscreenGateAction }}</strong>
     </button>
+    <div
+      v-if="immersiveMode"
+      class="voice-immersive-exit-zone"
+      :class="{ 'voice-immersive-exit-zone--visible': immersiveExitVisible }"
+      data-testid="voice-immersive-exit-zone"
+    >
+      <button
+        class="voice-immersive-exit"
+        type="button"
+        :title="t('voice.immersive.exit')"
+        @click="suspendLiveVoiceImmersiveMode"
+      >
+        <X class="h-4 w-4" />
+      </button>
+    </div>
     <div class="voice-shell relative flex h-full min-h-0 flex-col p-4" :style="voiceShellStyle">
       <AgentModeTopBar
+        class="voice-topbar-motion"
+        :class="{ 'voice-topbar--immersive-hidden': immersiveMode }"
+        :aria-hidden="immersiveMode"
+        :inert="immersiveMode"
         active-mode="voice"
         :show-details="topbarAuxControlsVisible"
         :show-settings="topbarAuxControlsVisible"
@@ -5451,7 +5643,12 @@ function summarizeTask(value: string): string {
         <div
           v-if="!isPhonePortrait"
           class="voice-sidebar-slot min-w-0"
-          :class="{ 'voice-sidebar-slot--drawer': tvCompactSidebarDrawerOpen }"
+          :class="{
+            'voice-sidebar-slot--drawer': tvCompactSidebarDrawerOpen,
+            'voice-sidebar-slot--immersive-hidden': immersiveMode
+          }"
+          :aria-hidden="immersiveMode"
+          :inert="immersiveMode"
         >
           <VoiceSessionProjectSidebar
             v-if="effectiveSidebarOpen"
@@ -5829,22 +6026,6 @@ function summarizeTask(value: string): string {
             <div class="voice-control__deck">
               <div
                 v-if="codexLiveVoiceEffective"
-                class="flex items-center gap-2 rounded-full border border-[var(--hr-info-border)] bg-[var(--hr-info-soft)] px-3 py-1.5 text-xs text-[var(--hr-info)]"
-                data-testid="codex-live-voice-managed"
-              >
-                <span>{{ t('voice.liveVoice.managed') }}</span>
-                <button
-                  v-if="codexLiveVoiceSessionActive"
-                  type="button"
-                  class="rounded-full border border-[var(--hr-info-border)] px-2 py-0.5 font-medium hover:bg-[var(--hr-surface-2)]"
-                  data-testid="codex-live-voice-end"
-                  @click="stopCodexLiveVoice()"
-                >
-                  {{ t('voice.liveVoice.end') }}
-                </button>
-              </div>
-              <div
-                v-if="codexLiveVoiceEffective"
                 class="codex-live-voice-meter"
                 :class="{
                   'codex-live-voice-meter--active': codexLiveVoiceHumanInputActive,
@@ -5944,6 +6125,9 @@ function summarizeTask(value: string): string {
               <button
                 v-if="agentActivityActive"
                 class="voice-agent-run-button voice-agent-run-button--running"
+                :class="{ 'voice-agent-run-button--immersive-hidden': immersiveMode }"
+                :aria-hidden="immersiveMode"
+                :inert="immersiveMode"
                 :title="speaking ? agentRunStateText : `${agentRunStateText}. ${t('voice.state.tapToStop')}`"
                 @click="speaking ? undefined : stopAgentLoop"
               >
@@ -6000,21 +6184,24 @@ function summarizeTask(value: string): string {
             <div
               v-if="isTvCompactViewport"
               class="voice-input-dock voice-input-dock--voice-only"
+              :class="{ 'voice-input-dock--immersive-hidden': immersiveMode }"
+              :aria-hidden="immersiveMode"
+              :inert="immersiveMode"
               data-testid="voice-input-dock"
             >
               <button
                 class="voice-input-zone"
                 :class="{
-                  'voice-input-zone--active': listening && !voiceInputLocked,
+                  'voice-input-zone--active': listening && !voiceInputActionLocked,
                   'voice-input-zone--speaking': speaking,
-                  'voice-input-zone--locked': voiceInputLocked,
+                  'voice-input-zone--locked': voiceInputActionLocked,
                   'voice-input-zone--agent-running': agentActivityActive && !listening,
                   'voice-input-zone--live': codexLiveVoiceEffective,
                   'voice-input-zone--live-connected':
                     codexLiveVoiceSessionActive && !codexLiveVoiceConnecting
                 }"
                 :title="voiceInputButtonLabel"
-                :disabled="voiceInputLocked"
+                :disabled="voiceInputActionLocked"
                 @click="toggleListening"
               >
                 <span
@@ -6023,11 +6210,7 @@ function summarizeTask(value: string): string {
                   aria-hidden="true"
                 >
                   <X
-                    v-if="
-                      codexLiveVoiceEffective &&
-                      codexLiveVoiceSessionActive &&
-                      !codexLiveVoiceConnecting
-                    "
+                    v-if="codexLiveVoiceEffective && codexLiveVoiceSessionActive"
                     class="h-6 w-6"
                   />
                   <span
@@ -6093,6 +6276,9 @@ function summarizeTask(value: string): string {
             <form
               v-else
               class="voice-composer"
+              :class="{ 'voice-composer--immersive-hidden': immersiveMode }"
+              :aria-hidden="immersiveMode"
+              :inert="immersiveMode"
               data-testid="voice-composer"
               @submit.prevent="submitComposerDraft"
             >
@@ -6100,25 +6286,21 @@ function summarizeTask(value: string): string {
                 <button
                   class="voice-composer__mic"
                   :class="{
-                    'voice-composer__mic--active': listening && !voiceInputLocked,
+                    'voice-composer__mic--active': listening && !voiceInputActionLocked,
                     'voice-composer__mic--speaking': speaking,
-                    'voice-composer__mic--locked': voiceInputLocked,
+                    'voice-composer__mic--locked': voiceInputActionLocked,
                     'voice-composer__mic--live': codexLiveVoiceEffective,
                     'voice-composer__mic--live-connected':
                       codexLiveVoiceSessionActive && !codexLiveVoiceConnecting
                   }"
                   type="button"
                   :title="voiceInputButtonLabel"
-                  :disabled="voiceInputLocked"
+                  :disabled="voiceInputActionLocked"
                   :aria-label="voiceInputButtonLabel"
                   @click="toggleListening"
                 >
                   <X
-                    v-if="
-                      codexLiveVoiceEffective &&
-                      codexLiveVoiceSessionActive &&
-                      !codexLiveVoiceConnecting
-                    "
+                    v-if="codexLiveVoiceEffective && codexLiveVoiceSessionActive"
                     class="h-6 w-6"
                   />
                   <span
@@ -6170,8 +6352,13 @@ function summarizeTask(value: string): string {
 
         <aside
           v-if="!isPhonePortrait"
-          class="min-w-0 overflow-hidden py-0 pr-6 transition-opacity duration-300"
-          :class="effectiveDetailsOpen ? 'opacity-100' : 'pointer-events-none opacity-0'"
+          class="voice-records-slot min-w-0 overflow-hidden py-0 pr-6"
+          :class="[
+            effectiveDetailsOpen ? 'opacity-100' : 'pointer-events-none opacity-0',
+            immersiveMode ? 'voice-records-slot--immersive-hidden' : ''
+          ]"
+          :aria-hidden="immersiveMode"
+          :inert="immersiveMode"
         >
           <section class="voice-records">
             <div class="voice-records__header">
@@ -6597,12 +6784,45 @@ function summarizeTask(value: string): string {
   height: 100svh;
   height: 100dvh;
   min-height: 0;
+  transition: padding 440ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.voice-main {
+  transition:
+    grid-template-columns 440ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin-top 360ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .voice-cockpit :deep(.agent-mode-topbar) {
   position: relative;
   z-index: 140;
   overflow: visible;
+}
+
+.voice-cockpit :deep(.voice-topbar-motion) {
+  max-height: 56px;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: top center;
+  transition:
+    height 340ms cubic-bezier(0.22, 1, 0.36, 1),
+    min-height 340ms cubic-bezier(0.22, 1, 0.36, 1),
+    max-height 340ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-width 260ms ease,
+    opacity 220ms ease,
+    transform 380ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: 0ms;
+}
+
+.voice-cockpit :deep(.voice-topbar-motion.voice-topbar--immersive-hidden) {
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0;
+  overflow: hidden !important;
+  border-width: 0;
+  opacity: 0;
+  transform: translateY(-18px) scale(0.985);
+  pointer-events: none;
 }
 
 .voice-cockpit :deep(.agent-mode-topbar__left) {
@@ -6665,6 +6885,143 @@ function summarizeTask(value: string): string {
   color: var(--vc-text-1);
   font-size: 13px;
   font-weight: 700;
+}
+
+/* --------------------------------------------------------------------------
+   Immersive Voice Cockpit chrome
+   -------------------------------------------------------------------------- */
+.voice-immersive-exit-zone {
+  position: fixed;
+  top: var(--homerail-electron-titlebar-height, 0px);
+  left: 50%;
+  z-index: 220;
+  width: min(280px, 70vw);
+  height: 14px;
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+.voice-immersive-exit-zone::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 14px;
+  content: "";
+  pointer-events: auto;
+}
+
+.voice-immersive-exit {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  width: 42px;
+  justify-content: center;
+  border: 1px solid var(--vc-border-strong);
+  border-radius: 0 0 16px 16px;
+  background: color-mix(in srgb, var(--vc-panel) 94%, transparent);
+  padding: 0;
+  color: var(--vc-text-1);
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: var(--hr-shadow-floating);
+  opacity: 0;
+  transform: translate(-50%, calc(-100% - 10px));
+  transition:
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: auto;
+  backdrop-filter: blur(20px);
+}
+
+.voice-immersive-exit-zone--visible .voice-immersive-exit,
+.voice-immersive-exit-zone:hover .voice-immersive-exit,
+.voice-immersive-exit:focus-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.voice-cockpit--immersive .voice-shell {
+  padding: 8px;
+}
+
+.voice-cockpit--immersive {
+  --voice-immersive-waveform-gutter: clamp(12px, 1.4vh, 16px);
+}
+
+.voice-cockpit--immersive .voice-main {
+  margin-top: 0;
+}
+
+.voice-cockpit--immersive .voice-stage {
+  margin: 0;
+  border-radius: 24px;
+  padding: clamp(14px, 1.8vw, 26px);
+  padding-bottom: var(--voice-immersive-waveform-gutter);
+  transition-delay: 45ms;
+}
+
+.voice-cockpit--immersive .voice-control {
+  z-index: 30;
+  min-height: 20px;
+  margin-top: var(--voice-immersive-waveform-gutter);
+  border-top-color: transparent;
+  padding-top: 0;
+  gap: 0;
+  pointer-events: none;
+  transition-delay: 90ms;
+}
+
+.voice-cockpit--immersive .voice-composer__preferences,
+.voice-cockpit--immersive .voice-caption-strip {
+  display: none;
+}
+
+.voice-cockpit--immersive .voice-control__deck {
+  justify-content: center;
+  gap: 0;
+}
+
+.voice-cockpit--immersive .codex-live-voice-meter {
+  display: block;
+  width: min(300px, 68vw);
+  height: 20px;
+  margin: 0 auto;
+  opacity: 0.14;
+  filter: grayscale(0.4);
+  mask-image: linear-gradient(90deg, transparent, #000 16%, #000 84%, transparent);
+}
+
+.voice-cockpit--immersive .codex-live-voice-meter--active {
+  opacity: 0.88;
+  filter: drop-shadow(0 0 6px var(--vc-accent-soft));
+  transform: scaleY(1.12);
+}
+
+.voice-cockpit--immersive .codex-live-voice-meter--muted {
+  opacity: 0.08;
+}
+
+.voice-cockpit--immersive .codex-live-voice-meter__connecting {
+  justify-content: center;
+  font-size: 0;
+}
+
+.voice-cockpit--immersive.voice-cockpit--tv-compact .voice-stage {
+  margin: 0;
+  border-radius: 24px;
+  padding: clamp(14px, 1.8vw, 26px);
+}
+
+.voice-cockpit--immersive.voice-cockpit--tv-compact .voice-control,
+.voice-cockpit--immersive.voice-cockpit--phone-portrait .voice-control {
+  min-height: 20px;
+  margin-top: var(--voice-immersive-waveform-gutter);
+  padding-top: 0;
+  gap: 0;
 }
 
 /* --------------------------------------------------------------------------
@@ -6834,6 +7191,22 @@ function summarizeTask(value: string): string {
    -------------------------------------------------------------------------- */
 .voice-sidebar-slot {
   overflow: hidden;
+  opacity: 1;
+  transform: translateX(0) scale(1);
+  transform-origin: left center;
+  transition:
+    opacity 260ms ease,
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 320ms ease;
+  transition-delay: 0ms;
+}
+
+.voice-sidebar-slot--immersive-hidden {
+  opacity: 0;
+  transform: translateX(-26px) scale(0.97);
+  filter: blur(3px);
+  pointer-events: none;
+  transition-delay: 55ms;
 }
 
 .voice-stage {
@@ -6844,7 +7217,11 @@ function summarizeTask(value: string): string {
   box-shadow: var(--hr-shadow-panel);
   transition:
     background 260ms ease,
-    box-shadow 360ms ease;
+    box-shadow 360ms ease,
+    margin 460ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding 460ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 400ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: 0ms;
 }
 
 .voice-cockpit--listening .voice-stage {
@@ -7505,6 +7882,13 @@ function summarizeTask(value: string): string {
   min-height: 88px;
   flex-direction: column;
   gap: 10px;
+  transition:
+    min-height 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin-top 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding-top 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 260ms ease,
+    gap 320ms ease;
+  transition-delay: 0ms;
 }
 
 .voice-control__deck {
@@ -7520,7 +7904,14 @@ function summarizeTask(value: string): string {
   margin-left: auto;
   overflow: hidden;
   opacity: 0.34;
-  transition: opacity 180ms ease, filter 180ms ease;
+  transform-origin: bottom center;
+  transition:
+    width 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 180ms ease,
+    filter 180ms ease,
+    transform 180ms ease;
 }
 
 .codex-live-voice-meter--active {
@@ -7661,9 +8052,27 @@ function summarizeTask(value: string): string {
   color: var(--vc-accent);
   font-size: 13px;
   font-weight: 700;
+  max-width: 320px;
+  overflow: hidden;
+  opacity: 1;
+  transform: translateY(0) scale(1);
   transition:
     border-color 160ms ease,
-    background 160ms ease;
+    background 160ms ease,
+    max-width 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 180ms ease,
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.voice-agent-run-button--immersive-hidden {
+  max-width: 0;
+  border-width: 0;
+  padding-right: 0;
+  padding-left: 0;
+  opacity: 0;
+  transform: translateY(8px) scale(0.92);
+  pointer-events: none;
 }
 
 .voice-agent-run-button:hover {
@@ -7790,6 +8199,24 @@ function summarizeTask(value: string): string {
   flex-direction: column;
   gap: 8px;
   width: 100%;
+  max-height: 180px;
+  overflow: hidden;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: bottom center;
+  transition:
+    max-height 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 220ms ease,
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: 0ms;
+}
+
+.voice-composer--immersive-hidden {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(18px) scale(0.97);
+  pointer-events: none;
+  transition-delay: 95ms;
 }
 
 .voice-composer__row {
@@ -7967,8 +8394,26 @@ function summarizeTask(value: string): string {
 .voice-input-dock {
   display: grid;
   width: 100%;
+  max-height: 132px;
   align-items: stretch;
   gap: 10px;
+  overflow: hidden;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: bottom center;
+  transition:
+    max-height 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 220ms ease,
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: 0ms;
+}
+
+.voice-input-dock--immersive-hidden {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(18px) scale(0.97);
+  pointer-events: none;
+  transition-delay: 95ms;
 }
 
 .voice-input-dock--voice-only {
@@ -8165,6 +8610,27 @@ function summarizeTask(value: string): string {
 /* --------------------------------------------------------------------------
    Records panel (conversation thread)
    -------------------------------------------------------------------------- */
+.voice-records-slot {
+  opacity: 1;
+  transform: translateX(0) scale(1);
+  transform-origin: right center;
+  transition:
+    padding-right 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 260ms ease,
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 320ms ease;
+  transition-delay: 0ms;
+}
+
+.voice-records-slot--immersive-hidden {
+  padding-right: 0;
+  opacity: 0 !important;
+  transform: translateX(26px) scale(0.97);
+  filter: blur(3px);
+  pointer-events: none;
+  transition-delay: 55ms;
+}
+
 .voice-records {
   display: flex;
   height: 100%;
@@ -8794,6 +9260,23 @@ function summarizeTask(value: string): string {
   to {
     transform: translateY(0) scale(1);
     opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-shell,
+  .voice-main,
+  .voice-sidebar-slot,
+  .voice-records-slot,
+  .voice-stage,
+  .voice-control,
+  .voice-composer,
+  .voice-input-dock,
+  .voice-agent-run-button,
+  .codex-live-voice-meter,
+  .voice-cockpit :deep(.voice-topbar-motion) {
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
   }
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   authorizeAdminProxyRequest,
   isProtectedApiMutation,
+  trustedWebSocketProxyFetchSite,
 } from './admin-proxy-trust'
 
 describe('Vite Manager mutation proxy trust', () => {
@@ -48,5 +49,19 @@ describe('Vite Manager mutation proxy trust', () => {
       origin: 'http://localhost:19194',
       secFetchSite: 'cross-site',
     })).toMatchObject({ allowed: false })
+  })
+
+  it('restores the same-origin marker only for a verified UI WebSocket upgrade', () => {
+    expect(trustedWebSocketProxyFetchSite({
+      protocol: 'http',
+      host: '127.0.0.1:19194',
+      origin: 'http://127.0.0.1:19194',
+    })).toBe('same-origin')
+
+    expect(trustedWebSocketProxyFetchSite({
+      protocol: 'http',
+      host: '127.0.0.1:19194',
+      origin: 'https://evil.example',
+    })).toBeUndefined()
   })
 })

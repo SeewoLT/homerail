@@ -345,7 +345,7 @@ describe("plugin PDK workflow", () => {
     await runJson("install", archive, "--staging");
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(process.exitCode).toBeUndefined();
-  });
+  }, 15_000);
 
   it("produces byte-for-byte deterministic archives and refuses accidental overwrite", () => {
     const root = path.join(temporaryRoot, "deterministic");

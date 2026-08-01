@@ -6,6 +6,12 @@ import {
   loadNodeUsages,
 } from "../persistence/store.js";
 import type { PersistedEvent, PersistedRunMetadata, PersistedRunSnapshot, NodeUsageRecord } from "../persistence/types.js";
+import {
+  DAG_NODE_USAGE_AGGREGATION,
+  dagNodeTokenTotal,
+  normalizeDagNodeExecutionIdentity,
+  type DagNodeExecutionIdentity,
+} from "homerail-protocol";
 import { DAG_EVENT_TYPES, subscribe, type DAGEventPayload } from "../events/bus.js";
 import { getDiagnostics } from "../config/diagnostics.js";
 import { runtimeStatusHandler } from "../runtime/status.js";
@@ -172,6 +178,56 @@ function _buildNodeDetail(metadata: PersistedRunMetadata, nodeId: string) {
   };
 }
 
+/**
+ * Result kinds mirror the runtime node_type so the UI can pick a default
+ * human-readable renderer per kind instead of inspecting free-form payloads.
+ */
+function _nodeResultKind(nodeType: string): string {
+  if (nodeType.endsWith("_gateway")) return nodeType.slice(0, -"_gateway".length);
+  return "worker";
+}
+
+function _buildNodeResult(snapshot: PersistedRunSnapshot, nodeId: string) {
+  const metadata = snapshot.metadata;
+  const node = metadata.graph?.nodes.find((n) => n.node_id === nodeId);
+  if (!node && !(nodeId in metadata.nodeStates)) return undefined;
+  const nodeType = node?.node_type || "agent";
+  const resultKind = _nodeResultKind(nodeType);
+  const handoffs = snapshot.handoffs
+    .filter((record) => record.fromNode === nodeId)
+    .map((record) => ({
+      port: record.port,
+      content: record.content ?? null,
+      timestamp: new Date(record.timestamp).toISOString(),
+      ...(record.roundId === undefined ? {} : { round_id: record.roundId }),
+    }));
+  const latest = handoffs[handoffs.length - 1] ?? null;
+  // Command nodes may hand off only the parsed value (result_payload: "value").
+  // The redacted full envelope is always available on the telemetry event.
+  // 从尾部线性扫描：不复制整个事件数组，长跑 run（上万事件）下每次请求零额外分配
+  let telemetry: Record<string, unknown> | undefined;
+  if (resultKind === "command") {
+    for (let i = snapshot.events.length - 1; i >= 0; i -= 1) {
+      const entry = snapshot.events[i];
+      if (entry.type !== "dag:deterministic_command") continue;
+      if ((entry.payload as Record<string, unknown>).nodeId !== nodeId) continue;
+      const { runId: _runId, nodeId: _nodeId, ...rest } = entry.payload as Record<string, unknown>;
+      telemetry = rest;
+      break;
+    }
+  }
+  return {
+    node_id: nodeId,
+    node_name: node?.name || nodeId,
+    node_type: nodeType,
+    result_kind: resultKind,
+    status: _nodeStatus(metadata, nodeId),
+    latest,
+    handoffs,
+    ...(telemetry === undefined ? {} : { telemetry }),
+  };
+}
+
 function _normalizeEvent(event: PersistedEvent) {
   const payload = event.payload as unknown as Record<string, unknown>;
   const rawType = event.type;
@@ -314,7 +370,10 @@ interface NodeMetrics {
     output: number;
     cache_read: number;
     cache_creation: number;
+    total: number;
   } | null;
+  execution: DagNodeExecutionIdentity | null;
+  usage_scope: typeof DAG_NODE_USAGE_AGGREGATION;
   usage_available: boolean;
   duration_ms: number | null;
   num_turns: number | null;
@@ -322,26 +381,82 @@ interface NodeMetrics {
   completed_at: string | null;
 }
 
+function _usageScopeKey(record: NodeUsageRecord): string {
+  const scope = record.scope;
+  if (!scope || Object.keys(scope).length === 0) return "legacy";
+  return JSON.stringify([
+    scope.session_id ?? "",
+    scope.round_id ?? "",
+    scope.generation ?? null,
+    scope.command_id ?? "",
+    scope.execution_id ?? "",
+  ]);
+}
+
+function _nonNegativeToken(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : 0;
+}
+
+function _nodeExecutionIdentity(
+  chats: PersistedRunSnapshot["chats"],
+  nodeId: string,
+): DagNodeExecutionIdentity | null {
+  const entries = chats[nodeId] ?? [];
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.role !== "manager" || entry.type !== "prompt") continue;
+    const content = entry.content && typeof entry.content === "object" && !Array.isArray(entry.content)
+      ? entry.content as Record<string, unknown>
+      : undefined;
+    const agentConfig = content?.agentConfig
+      && typeof content.agentConfig === "object"
+      && !Array.isArray(content.agentConfig)
+      ? content.agentConfig as Record<string, unknown>
+      : undefined;
+    if (!agentConfig) continue;
+    const llm = agentConfig.llm
+      && typeof agentConfig.llm === "object"
+      && !Array.isArray(agentConfig.llm)
+      ? agentConfig.llm as Record<string, unknown>
+      : {};
+    return normalizeDagNodeExecutionIdentity({
+      provider_id: llm.provider,
+      provider_display_name: llm.provider_display_name,
+      model_name: llm.model ?? agentConfig.model,
+      model_display_name: llm.model_display_name,
+      agent_backend: agentConfig.agent_type,
+      protocol: llm.protocol,
+      context_limit: llm.context_limit,
+      context_usage_pct: llm.context_usage_pct,
+    }) ?? null;
+  }
+  return null;
+}
+
 /** Aggregate per-node tool-call counts and token usage for the runtime
  * overlay. Tool calls are counted from persisted chat entries (each
  * tool_use / tool_result stream event is one entry); tool failures are
- * tool_result entries flagged is_error. Token usage comes from the
- * SQLite metrics records emitted by workers (last record per node wins). */
+ * tool_result entries flagged is_error. Token usage comes from persisted
+ * Worker snapshots: the last snapshot in each turn scope wins and scopes are
+ * summed into an authoritative cumulative node total. */
 function _buildMetricsSummary(snapshot: PersistedRunSnapshot) {
   const metadata = snapshot.metadata;
   const nodeIds = metadata.graph?.nodes.map((node) => node.node_id) ?? Object.keys(metadata.nodeStates);
 
-  // Last usage record per node wins (worker emits cumulative totals).
-  const usageByNode = new Map<string, NodeUsageRecord>();
+  const usageByNodeAndScope = new Map<string, Map<string, NodeUsageRecord>>();
   for (const record of snapshot.usages ?? loadNodeUsages(metadata.runId)) {
-    usageByNode.set(record.nodeId, record);
+    const scopes = usageByNodeAndScope.get(record.nodeId) ?? new Map<string, NodeUsageRecord>();
+    scopes.set(_usageScopeKey(record), record);
+    usageByNodeAndScope.set(record.nodeId, scopes);
   }
 
   const nodes: Record<string, NodeMetrics> = {};
   const totals = {
     tool_calls: 0,
     tool_failures: 0,
-    tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0 },
+    tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0 },
     usage_available: false,
   };
 
@@ -358,14 +473,46 @@ function _buildMetricsSummary(snapshot: PersistedRunSnapshot) {
       }
     }
 
-    const usage = usageByNode.get(nodeId);
+    const usageScopes = Array.from(usageByNodeAndScope.get(nodeId)?.values() ?? []);
+    const usage = usageScopes.length > 0
+      ? usageScopes.reduce((summary, record) => {
+          summary.input += _nonNegativeToken(record.usage.input_tokens);
+          summary.output += _nonNegativeToken(record.usage.output_tokens);
+          summary.cache_read += _nonNegativeToken(record.usage.cache_read_input_tokens);
+          summary.cache_creation += _nonNegativeToken(record.usage.cache_creation_input_tokens);
+          if (typeof record.duration_ms === "number" && Number.isFinite(record.duration_ms) && record.duration_ms >= 0) {
+            summary.duration_ms += record.duration_ms;
+            summary.has_duration = true;
+          }
+          if (typeof record.num_turns === "number" && Number.isFinite(record.num_turns) && record.num_turns >= 0) {
+            summary.num_turns += record.num_turns;
+            summary.has_num_turns = true;
+          }
+          return summary;
+        }, {
+          input: 0,
+          output: 0,
+          cache_read: 0,
+          cache_creation: 0,
+          duration_ms: 0,
+          num_turns: 0,
+          has_duration: false,
+          has_num_turns: false,
+        })
+      : undefined;
     const status = (metadata.nodeStates[nodeId] || "PENDING").toLowerCase();
     const tokens = usage
       ? {
-          input: usage.usage.input_tokens,
-          output: usage.usage.output_tokens,
-          cache_read: usage.usage.cache_read_input_tokens,
-          cache_creation: usage.usage.cache_creation_input_tokens,
+          input: usage.input,
+          output: usage.output,
+          cache_read: usage.cache_read,
+          cache_creation: usage.cache_creation,
+          total: dagNodeTokenTotal({
+            input_tokens: usage.input,
+            output_tokens: usage.output,
+            cache_read_input_tokens: usage.cache_read,
+            cache_creation_input_tokens: usage.cache_creation,
+          }),
         }
       : null;
 
@@ -377,9 +524,11 @@ function _buildMetricsSummary(snapshot: PersistedRunSnapshot) {
       tool_calls: toolCalls,
       tool_failures: toolFailures,
       tokens,
-      usage_available: Boolean(usage),
-      duration_ms: usage?.duration_ms ?? null,
-      num_turns: usage?.num_turns ?? null,
+      execution: _nodeExecutionIdentity(snapshot.chats, nodeId),
+      usage_scope: DAG_NODE_USAGE_AGGREGATION,
+      usage_available: usage !== undefined,
+      duration_ms: usage?.has_duration ? usage.duration_ms : null,
+      num_turns: usage?.has_num_turns ? usage.num_turns : null,
       started_at: null,
       completed_at: _isTerminalNodeStatus(status)
         ? (metadata.completedAt ? new Date(metadata.completedAt).toISOString() : null)
@@ -393,6 +542,7 @@ function _buildMetricsSummary(snapshot: PersistedRunSnapshot) {
       totals.tokens.output += tokens.output;
       totals.tokens.cache_read += tokens.cache_read;
       totals.tokens.cache_creation += tokens.cache_creation;
+      totals.tokens.total += tokens.total;
       totals.usage_available = true;
     }
   }
@@ -1170,6 +1320,38 @@ export function inspectionRoutesHandler(
       messages,
       total: messages.length,
     });
+    return true;
+  }
+
+  // GET /api/dag-status/:run_id/node/:node_id/result
+  if (pathname.match(/^\/api\/dag-status\/[^/]+\/node\/[^/]+\/result$/) && req.method === "GET") {
+    const parts = pathname.split("/");
+    let runId: string;
+    let nodeId: string;
+    try {
+      // 路径正则只按 / 分段，畸形 percent-encoding（如 %ZZ）会让 decodeURIComponent
+      // 抛 URIError；统一按 404 处理而不是冒泡成 500
+      runId = decodeURIComponent(parts[3]);
+      nodeId = decodeURIComponent(parts[5]);
+    } catch {
+      _notFound(res, "Invalid run or node ID");
+      return true;
+    }
+    if (!runId || !nodeId) {
+      _notFound(res, "Invalid run or node ID");
+      return true;
+    }
+    const snapshot = loadRunSnapshot(runId);
+    if (!snapshot) {
+      _notFound(res, `Run not found: ${runId}`);
+      return true;
+    }
+    const result = _buildNodeResult(snapshot, nodeId);
+    if (!result) {
+      _notFound(res, `Node not found: ${nodeId}`);
+      return true;
+    }
+    _ok(res, `Node result retrieved (${result.handoffs.length} handoffs)`, result);
     return true;
   }
 

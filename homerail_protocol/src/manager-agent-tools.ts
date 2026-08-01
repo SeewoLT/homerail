@@ -963,7 +963,6 @@ export const MANAGER_AGENT_TOOL_SPECS: Record<ManagerAgentToolName, AgentToolDef
       properties: {
         repo: { type: "string", description: "GitHub repository in owner/name form" },
         pr: { type: "integer", minimum: 1 },
-        expected_usage: { type: "integer", minimum: 0, maximum: 100 },
       },
       required: ["repo", "pr"],
       additionalProperties: false,
@@ -1360,7 +1359,7 @@ export const MANAGER_AGENT_TOOL_SPECS: Record<ManagerAgentToolName, AgentToolDef
   },
   show_dynamic_widget: {
     name: "show_dynamic_widget",
-    description: "显示 Core 兼容动态小组件，例如 html、metric_strip、timeline、dag_flow、chart 或 slide_deck。插件拥有的场景必须使用当前 turn Tool catalog 中的插件 Tool。",
+    description: "显示 Core 兼容动态小组件，例如 html、metric_strip、timeline、dag_flow、dag_explorer、chart 或 slide_deck。汇报 DAG 运行结果或节点失败时优先用 dag_explorer：data 里放 { run_id, focus_node_id? }，面板自带每种节点的默认结果渲染，比生成式 UI 更省 token。插件拥有的场景必须使用当前 turn Tool catalog 中的插件 Tool。",
     input_schema: widgetSchema,
   },
   remove_widget: {

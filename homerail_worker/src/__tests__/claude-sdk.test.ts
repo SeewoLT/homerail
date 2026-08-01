@@ -108,6 +108,97 @@ describe("ClaudeSdkAdapter", () => {
     ]);
   });
 
+  it("deduplicates repeated usage snapshots for the same assistant message id", async () => {
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () =>
+      makeFakeSdk([
+        {
+          type: "assistant",
+          message: {
+            id: "msg-1",
+            content: [{ type: "thinking", thinking: "Reasoning..." }],
+            usage: { input_tokens: 100, output_tokens: 0 },
+          },
+        },
+        {
+          type: "assistant",
+          message: {
+            id: "msg-1",
+            content: [{ type: "tool_use", id: "call-1", name: "echo", input: {} }],
+            usage: { input_tokens: 100, output_tokens: 0 },
+          },
+        },
+        {
+          type: "assistant",
+          message: {
+            id: "msg-1",
+            content: [{ type: "tool_use", id: "call-1", name: "echo", input: {} }],
+            usage: { input_tokens: 110, output_tokens: 0 },
+          },
+        },
+        {
+          type: "assistant",
+          message: {
+            id: "msg-2",
+            content: [{ type: "text", text: "Done." }],
+            stop_reason: "end_turn",
+            usage: {
+              input_tokens: 20,
+              output_tokens: 0,
+              cache_read_input_tokens: 80,
+            },
+          },
+        },
+        {
+          type: "assistant",
+          message: {
+            id: "msg-2",
+            content: [{ type: "text", text: "Done." }],
+            stop_reason: "end_turn",
+            usage: {
+              input_tokens: 20,
+              output_tokens: 0,
+              cache_read_input_tokens: 80,
+            },
+          },
+        },
+        { type: "result", subtype: "success", is_error: false },
+      ]),
+    );
+
+    const { ClaudeSdkAdapter } = await import("../agent/claude-sdk.js");
+    const adapter = new ClaudeSdkAdapter();
+    const events: AgentEvent[] = [];
+    for await (const event of adapter.run("test", [], ctx)) events.push(event);
+
+    const usageEvents = events
+      .filter((event): event is Extract<AgentEvent, { type: "usage" }> => event.type === "usage")
+      .map((event) => event.usage);
+    expect(usageEvents).toEqual([
+      { input_tokens: 100, output_tokens: 0 },
+      { input_tokens: 110, output_tokens: 0 },
+      {
+        input_tokens: 130,
+        output_tokens: 0,
+        cache_read_input_tokens: 80,
+      },
+      {
+        input_tokens: 130,
+        output_tokens: 0,
+        cache_read_input_tokens: 80,
+      },
+    ]);
+    expect(events.at(-1)).toEqual({
+      type: "done",
+      usage: {
+        input_tokens: 130,
+        output_tokens: 0,
+        cache_read_input_tokens: 80,
+      },
+      duration_ms: undefined,
+      num_turns: undefined,
+    });
+  });
+
   it("suppresses per-token thinking diagnostics and reports one aggregate count", async () => {
     const thinkingTokenMessages = Array.from({ length: 10_000 }, () => ({
       type: "system",

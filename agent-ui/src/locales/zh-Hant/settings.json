@@ -8,6 +8,7 @@
     "git": "Git",
     "providers": "供應商與模型",
     "voice": "語音",
+    "experimental": "實驗性功能",
     "device": "WireGuard",
     "skills": "Skills",
     "plugins": "外掛",
@@ -20,6 +21,7 @@
     "git": "管理 Git Server token。項目和倉庫在新增目錄時關聯。",
     "providers": "維護供應商、模型能力和本地加密保存的模型配置。",
     "voice": "配置語音播報和按鍵控制。",
+    "experimental": "管理仍在打磨、可能繼續調整的介面能力。",
     "skills": "查看從靜態 Skills 目錄偵測到的能力說明。",
     "plugins": "查看已解析的外掛能力，並啓用或停用可選場景。",
     "default": "配置 HomeRail Agent UI 使用的本地能力。"
@@ -80,46 +82,46 @@
       }
     }
   },
+  "experimental": {
+    "title": "實驗性功能",
+    "description": "這些功能仍在驗證中，可能隨著使用回饋繼續調整。",
+    "badge": "實驗性",
+    "liveVoiceImmersive": {
+      "title": "Live Voice 沉浸介面",
+      "description": "Codex Live Voice 連線成功後自動收起頂部列、側欄和輸入區，只保留生成式 UI 與底部音量波形；中斷連線後自動恢復完整介面。"
+    }
+  },
   "environment": {
     "statusTitle": "DAG 執行環境",
     "loading": "正在讀取執行環境狀態…",
     "check": "重新檢查",
-    "build": "建置 Worker",
-    "rebuild": "重新建置",
+    "build": "準備 Worker",
+    "rebuild": "更新 Worker",
     "dockerEngine": "Docker Engine",
     "available": "可用",
     "unavailable": "不可用",
     "selectedImage": "目前 Worker 映像",
-    "sourceFingerprint": "目前原始碼指紋",
-    "protocolVersion": "協定版本",
     "connectedWorkers": "已連線 {count} 個 Worker",
+    "workersOnDemand": "DAG 工作需要時會自動啟動 Worker。",
     "imagesTitle": "HomeRail Worker 映像",
     "imagesUnavailable": "Docker 可用後才能讀取映像清單。",
     "noImages": "尚未找到 HomeRail Worker 映像。",
     "inUse": "目前使用",
-    "workerVersion": "Worker 版本",
-    "fingerprint": "原始碼指紋",
     "workersTitle": "執行中的 Worker",
     "noWorkers": "目前沒有已連線的 Worker；新的 DAG 工作會視需要啟動。",
     "buildLog": "建置記錄",
     "state": {
       "unknown": "尚未確認 DAG 執行環境是否就緒。",
       "checking": "正在檢查 Docker 與 Worker 映像…",
-      "building": "正在建置 Worker 映像…",
+      "building": "正在更新 Worker…",
       "ready": "DAG 執行環境已就緒。",
       "dockerUnavailable": "Docker 無法使用，暫時無法啟動 DAG 工作。",
       "workerImageMissing": "尚未建置 Worker 映像。",
-      "workerImageStale": "Worker 映像需要針對目前的 HomeRail 版本重新建置。",
-      "workerImageIncompatible": "Worker 映像使用了不相容的協定版本。",
+      "workerImageStale": "Worker 需要更新後才能啟動 DAG 工作。",
+      "workerImageIncompatible": "Worker 需要更新後才能啟動 DAG 工作。",
       "buildFailed": "Worker 映像建置失敗。",
       "skipped": "已略過 Worker 映像準備。",
       "unavailable": "DAG 執行環境暫時無法使用。"
-    },
-    "compatibility": {
-      "current": "目前版本",
-      "stale": "需要更新",
-      "incompatible": "協定不相容",
-      "unknown": "版本未知"
     },
     "buildStatus": {
       "queued": "等待中",
@@ -137,9 +139,9 @@
       "permissionLinux": "目前使用者無權存取 Docker。請檢查 Docker Desktop 權限，或在 Linux 將使用者加入 docker 群組後重新登入。",
       "linuxEngineWindows": "HomeRail Worker 需要 Linux 容器。請在 Docker Desktop 切換到 Linux containers。",
       "sourceUnavailable": "目前安裝中沒有 Worker 建置原始碼，無法在此主機重新建置映像。",
-      "worker_image_missing": "尚無可用的 Worker 映像，請按「建置 Worker」。",
-      "worker_image_stale": "映像與目前 HomeRail 原始碼不一致，請重新建置。",
-      "worker_image_incompatible": "映像使用不相容的協定版本，請重新建置。",
+      "worker_image_missing": "尚無可用的 Worker，請按「準備 Worker」。",
+      "worker_image_stale": "請更新 Worker 後繼續。",
+      "worker_image_incompatible": "請更新 Worker 後繼續。",
       "worker_image_build_failed": "上次建置失敗。展開建置記錄排查後可以重試。",
       "unknown": "請按一下「重新檢查」，等待 Manager 確認 Docker 與 Worker 映像狀態後再啟動 DAG 工作。",
       "checkFailed": "無法完成 Docker 檢查，請查看 Manager 記錄了解詳情。"

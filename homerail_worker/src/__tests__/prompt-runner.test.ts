@@ -119,6 +119,81 @@ describe("prompt runner", () => {
     expect(parsed.map((msg) => msg.type)).toContain("SESSION_END");
   });
 
+  it("streams cumulative usage snapshots with the authoritative node-turn scope", async () => {
+    const mockAgent: AgentClient = {
+      run() {
+        return (async function* () {
+          yield {
+            type: "usage" as const,
+            usage: {
+              input_tokens: 10,
+              output_tokens: 2,
+              cache_read_input_tokens: 3,
+              cache_creation_input_tokens: 1,
+            },
+          };
+          yield {
+            type: "usage" as const,
+            usage: {
+              input_tokens: 20,
+              output_tokens: 4,
+              cache_read_input_tokens: 5,
+              cache_creation_input_tokens: 2,
+            },
+          };
+          yield {
+            type: "done" as const,
+            usage: {
+              input_tokens: 20,
+              output_tokens: 4,
+              cache_read_input_tokens: 5,
+              cache_creation_input_tokens: 2,
+            },
+            duration_ms: 1500,
+            num_turns: 2,
+          };
+        })();
+      },
+    };
+    registerAgentBackend("test-live-usage", () => mockAgent);
+
+    const sent: string[] = [];
+    await runPrompt(
+      {
+        task: "measure usage",
+        sender: "test",
+        runId: "run-live-usage",
+        dagConfig: makeConfigWith({
+          session_id: "session-live-usage",
+          round_id: "round-0002",
+          actor_id: "researcher",
+          generation: 3,
+          command_id: "command-2",
+        }),
+      },
+      {
+        wsSend: (message) => sent.push(message),
+        agentBackend: "test-live-usage",
+      },
+    );
+
+    const usageEvents = sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === "stream" && message.data?.event === "usage");
+    expect(usageEvents).toHaveLength(3);
+    expect(usageEvents.map((message) => message.data.usage.input_tokens)).toEqual([10, 20, 20]);
+    expect(new Set(usageEvents.map((message) => message.data.execution_id)).size).toBe(1);
+    expect(usageEvents[0]?.data.execution_id).toEqual(expect.any(String));
+    expect(usageEvents.at(-1)?.data).toMatchObject({
+      session_id: "session-live-usage",
+      round_id: "round-0002",
+      generation: 3,
+      command_id: "command-2",
+      duration_ms: 1500,
+      num_turns: 2,
+    });
+  });
+
   it("restricts correction turns to the handoff tool and correction system prompt", async () => {
     let observedTools: string[] = [];
     let observedContext: AgentRunContext | undefined;

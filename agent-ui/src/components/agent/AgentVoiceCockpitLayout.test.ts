@@ -19,7 +19,7 @@ describe('AgentVoiceCockpit responsive layout', () => {
       'class="voice-stage relative mx-6 my-0 flex min-h-0 flex-col overflow-hidden rounded-[28px] p-6"'
     )
     expect(cockpitSource).toContain(
-      'class="min-w-0 overflow-hidden py-0 pr-6 transition-opacity duration-300"'
+      'class="voice-records-slot min-w-0 overflow-hidden py-0 pr-6"'
     )
   })
 
@@ -63,13 +63,75 @@ describe('AgentVoiceCockpit responsive layout', () => {
       cockpitSource.indexOf('async function toggleListening(): Promise<void>'),
       cockpitSource.indexOf('async function setupVoiceHidControl()'),
     )
-    expect(toggleListening).toContain('if (codexLiveVoiceSessionActive.value)')
+    const activeStopGuard =
+      'if (codexLiveVoiceEffective.value && codexLiveVoiceSessionActive.value)'
+    expect(toggleListening).toContain(activeStopGuard)
     expect(toggleListening).toContain('await stopCodexLiveVoice()')
+    expect(toggleListening.indexOf(activeStopGuard)).toBeLessThan(
+      toggleListening.indexOf('if (voiceInputActionLocked.value)')
+    )
     expect(toggleListening).not.toContain('toggleMuted()')
     expect(cockpitSource).toContain(
       'v-if="!codexLiveVoiceEffective && !isTvCompactViewport && (listening || speaking)"'
     )
     expect(cockpitSource).toContain('await refreshOnboarding()')
+  })
+
+  it('gives active Live Voice exclusive ownership of audio output', () => {
+    expect(cockpitSource).toContain(
+      '() => codexLiveVoiceOwnsAudio(codexLiveVoiceState.value)'
+    )
+
+    const speak = cockpitSource.slice(
+      cockpitSource.indexOf('async function speak(text: string)'),
+      cockpitSource.indexOf('async function speakText(text: string)'),
+    )
+    expect(speak).toContain('if (codexLiveVoiceSessionActive.value)')
+    expect(speak).toContain('reason=codex_live_voice_active')
+    expect(speak.indexOf('if (codexLiveVoiceSessionActive.value)')).toBeLessThan(
+      speak.indexOf('speechStream(clean'),
+    )
+    expect(speak).toContain('requestAbort.signal')
+
+    const enqueue = cockpitSource.slice(
+      cockpitSource.indexOf('function enqueueSpeechEvent('),
+      cockpitSource.indexOf('async function drainSpeechQueue()'),
+    )
+    expect(enqueue).toContain('if (codexLiveVoiceSessionActive.value)')
+    expect(enqueue).toContain('reason=codex_live_voice_active')
+
+    const cancel = cockpitSource.slice(
+      cockpitSource.indexOf('function cancelLocalSpeech('),
+      cockpitSource.indexOf('async function unlockTtsDomPlayback()'),
+    )
+    expect(cancel).toContain('ttsSpeechAbort?.abort()')
+    expect(cancel).toContain('speechEventQueue = []')
+
+    const applyState = cockpitSource.slice(
+      cockpitSource.indexOf('function applyCodexLiveVoiceState('),
+      cockpitSource.indexOf('function handleCodexLiveVoiceEvent('),
+    )
+    expect(applyState).toContain('if (active && !wasActive)')
+    expect(applyState).toContain("cancelLocalSpeech('codex_live_voice_audio_owner')")
+    expect(applyState).toContain("broadcastVoiceActivity('listening')")
+  })
+
+  it('uses the main voice button as the only Live Voice start and stop control', () => {
+    expect(cockpitSource).not.toContain('data-testid="codex-live-voice-managed"')
+    expect(cockpitSource).not.toContain('data-testid="codex-live-voice-end"')
+    expect(cockpitSource).toContain(':aria-label="voiceInputButtonLabel"')
+    expect(cockpitSource).toContain('@click="toggleListening"')
+    expect(cockpitSource.match(/:disabled="voiceInputActionLocked"/g)).toHaveLength(2)
+    expect(cockpitSource.match(
+      /v-if="codexLiveVoiceEffective && codexLiveVoiceSessionActive"/g
+    )).toHaveLength(2)
+    expect(cockpitSource).toContain(
+      "if (codexLiveVoiceSessionActive.value) return t('voice.liveVoice.end')"
+    )
+    expect(cockpitSource).toContain(
+      'if (codexLiveVoiceClient === client) startCodexLiveVoiceMeter(stream)'
+    )
+    expect(cockpitSource).toContain('if (codexLiveVoiceClient !== client) return')
   })
 
   it('uses a dense glass model popover with an opaque fallback', () => {
@@ -129,5 +191,57 @@ describe('AgentVoiceCockpit responsive layout', () => {
     expect(cockpitSource).toContain('installGamepadMonitorDebugApi(')
     expect(cockpitSource).toContain('setVoiceGamepadMonitorVisible')
     expect(cockpitSource).toContain('uninstallGamepadMonitorDebugApi?.()')
+  })
+
+  it('automatically presents a waveform-only canvas for Codex Live Voice', () => {
+    expect(cockpitSource).toContain('const immersiveMode = ref(false)')
+    expect(cockpitSource).toContain('const immersiveSuspended = ref(false)')
+    expect(cockpitSource).toContain('codexLiveVoiceSessionActive.value &&')
+    expect(cockpitSource).toContain('!codexLiveVoiceConnecting.value')
+    expect(cockpitSource).toContain('uiStore.liveVoiceImmersiveEnabled')
+    expect(cockpitSource).toContain('activateLiveVoiceImmersiveMode()')
+    expect(cockpitSource).not.toContain('data-testid="voice-immersive-enter"')
+    expect(cockpitSource).toContain('data-testid="voice-immersive-exit-zone"')
+    expect(cockpitSource).toContain("'voice-immersive-exit-zone--visible': immersiveExitVisible")
+    expect(cockpitSource).toContain(
+      "window.addEventListener('pointermove', handleImmersivePointerMove"
+    )
+    expect(cockpitSource).toContain("'voice-cockpit--immersive': immersiveMode.value")
+    expect(cockpitSource).toContain("? '0 minmax(0, 1fr) 0'")
+    expect(cockpitSource).toContain("voiceGamepadFocusMode.value = 'widgets'")
+    expect(cockpitSource).toContain('if (immersiveMode.value) {')
+    expect(cockpitSource).toContain('exitImmersiveMode()')
+    expect(cockpitSource).toContain('@click="suspendLiveVoiceImmersiveMode"')
+    expect(cockpitSource).toContain("'voice-topbar--immersive-hidden': immersiveMode")
+    expect(cockpitSource).toContain("'voice-sidebar-slot--immersive-hidden': immersiveMode")
+    expect(cockpitSource).toContain("immersiveMode ? 'voice-records-slot--immersive-hidden' : ''")
+    expect(cockpitSource).toContain("'voice-composer--immersive-hidden': immersiveMode")
+    expect(cockpitSource).toContain(
+      '.voice-cockpit--immersive .codex-live-voice-meter--active'
+    )
+  })
+
+  it('temporarily reveals Live Voice controls and returns after interaction becomes idle', () => {
+    expect(cockpitSource).toContain('const IMMERSIVE_RETURN_IDLE_MS = 3200')
+    expect(cockpitSource).toContain('function suspendLiveVoiceImmersiveMode(): void')
+    expect(cockpitSource).toContain('function scheduleImmersiveReturn(): void')
+    expect(cockpitSource).toContain('function noteLiveVoiceImmersiveInteraction(): void')
+    expect(cockpitSource).toContain(
+      'immersiveSuspended.value && liveVoiceImmersiveActive.value'
+    )
+    expect(cockpitSource).toContain('}, IMMERSIVE_RETURN_IDLE_MS)')
+    expect(cockpitSource).toContain('noteLiveVoiceImmersiveInteraction()')
+    expect(cockpitSource).toContain('max-height 380ms cubic-bezier(0.22, 1, 0.36, 1)')
+    expect(cockpitSource).toContain(
+      '--voice-immersive-waveform-gutter: clamp(12px, 1.4vh, 16px)'
+    )
+    expect(cockpitSource).toContain(
+      'padding-bottom: var(--voice-immersive-waveform-gutter)'
+    )
+    expect(cockpitSource).toContain(
+      'margin-top: var(--voice-immersive-waveform-gutter)'
+    )
+    expect(cockpitSource).toContain('@media (prefers-reduced-motion: reduce)')
+    expect(cockpitSource).not.toContain('v-if="!immersiveMode && !isPhonePortrait"')
   })
 })

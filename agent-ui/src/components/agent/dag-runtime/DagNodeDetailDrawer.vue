@@ -14,6 +14,8 @@ import { computed, ref, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAgentStore } from '@/stores/agent-store'
 import { useDagNodeMessages } from '@/composables/useDagNodeMessages'
+import { useDagNodeResult } from '@/components/agent/dag-node-result/useDagNodeResult'
+import DagNodeResultView from '@/components/agent/dag-node-result/DagNodeResultView.vue'
 import { getAgentPersona, fmtTokens, contextBarColor, contextUsageText } from '@/lib/agentPersonas'
 import { cn } from '@/lib/utils'
 import { http } from '@/api/clients/http-client'
@@ -52,6 +54,10 @@ const { messages, loading } = useDagNodeMessages(
   isSelectedManager,
 )
 
+// 非 worker 节点（command/join/condition 等 Manager 逻辑节点）的结构化结果
+const selectedNodeIdRef = computed(() => props.selectedNodeId)
+const { result: nodeResult, loading: resultLoading } = useDagNodeResult(dagRunId, selectedNodeIdRef)
+
 const logScrollRef = ref<HTMLElement | null>(null)
 const taskScrollRef = ref<HTMLElement | null>(null)
 
@@ -64,6 +70,26 @@ const nodeMetrics = computed(() => {
   if (!props.selectedNodeId || !props.metrics) return null
   return props.metrics.nodes[props.selectedNodeId] ?? null
 })
+
+const execution = computed(() => nodeMetrics.value?.execution ?? null)
+
+const modelDisplayName = computed(() => (
+  execution.value?.model_display_name
+  || execution.value?.model_name
+  || t('dag.detail.unknown')
+))
+
+const exactModelName = computed(() => {
+  const exact = execution.value?.model_name
+  if (!exact || exact === execution.value?.model_display_name) return null
+  return exact
+})
+
+const providerDisplayName = computed(() => (
+  execution.value?.provider_display_name
+  || execution.value?.provider_id
+  || t('dag.detail.unknown')
+))
 
 const persona = computed(() => {
   return node.value ? getAgentPersona(node.value.agent_name) : null
@@ -235,16 +261,89 @@ defineExpose({ scrollBy })
           <span class="font-mono font-semibold text-[var(--hr-danger)]">{{ nodeMetrics.tool_failures }}</span>
         </span>
         <span class="flex items-center gap-1.5">
-          <Coins class="h-3.5 w-3.5 text-[var(--hr-success)]" />
-          <span class="font-mono font-semibold text-[var(--hr-text-1)]">
-            {{ nodeMetrics.tokens ? fmtTokens(nodeMetrics.tokens.input + nodeMetrics.tokens.output + nodeMetrics.tokens.cache_read) : '—' }}
-          </span>
-        </span>
-        <span class="flex items-center gap-1.5">
           <Clock class="h-3.5 w-3.5 text-[var(--hr-text-3)]" />
           <span class="font-mono text-[var(--hr-text-2)]">{{ fmtDuration(nodeMetrics.duration_ms) }}</span>
         </span>
       </div>
+      <section
+        v-if="nodeSemantic.isWorker"
+        data-testid="dag-node-execution"
+        class="flex-shrink-0 border-b border-[var(--hr-border)] bg-[var(--hr-surface-1)] px-6 py-4"
+      >
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[var(--hr-text-3)]">
+            <Coins class="h-3.5 w-3.5 text-[var(--hr-success)]" />
+            {{ t('dag.detail.execution') }}
+          </div>
+          <span class="text-[10px] text-[var(--hr-text-4)]">{{ t('dag.detail.nodeCumulative') }}</span>
+        </div>
+
+        <div class="mt-3 grid grid-cols-2 gap-x-5 gap-y-3">
+          <div class="min-w-0">
+            <div class="text-[10px] uppercase tracking-wide text-[var(--hr-text-4)]">{{ t('dag.detail.model') }}</div>
+            <div data-testid="dag-execution-model" class="mt-0.5 truncate text-sm font-medium text-[var(--hr-text-1)]">
+              {{ modelDisplayName }}
+            </div>
+            <div v-if="exactModelName" class="truncate font-mono text-[10px] text-[var(--hr-text-4)]">{{ exactModelName }}</div>
+          </div>
+          <div class="min-w-0">
+            <div class="text-[10px] uppercase tracking-wide text-[var(--hr-text-4)]">{{ t('dag.detail.provider') }}</div>
+            <div data-testid="dag-execution-provider" class="mt-0.5 truncate text-sm text-[var(--hr-text-2)]">{{ providerDisplayName }}</div>
+          </div>
+          <div class="min-w-0">
+            <div class="text-[10px] uppercase tracking-wide text-[var(--hr-text-4)]">{{ t('dag.detail.backend') }}</div>
+            <div data-testid="dag-execution-backend" class="mt-0.5 truncate font-mono text-xs text-[var(--hr-text-2)]">
+              {{ execution?.agent_backend || t('dag.detail.unknown') }}
+            </div>
+          </div>
+          <div class="min-w-0">
+            <div class="text-[10px] uppercase tracking-wide text-[var(--hr-text-4)]">{{ t('dag.detail.protocol') }}</div>
+            <div data-testid="dag-execution-protocol" class="mt-0.5 truncate font-mono text-xs text-[var(--hr-text-2)]">
+              {{ execution?.protocol || t('dag.detail.unknown') }}
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-4">
+          <div class="mb-2 text-[10px] uppercase tracking-wide text-[var(--hr-text-4)]">{{ t('dag.detail.tokenUsage') }}</div>
+          <div class="grid grid-cols-5 gap-1.5">
+            <div class="rounded-lg border border-[var(--hr-border)] bg-[var(--hr-panel)] px-2 py-2">
+              <div class="text-[9px] text-[var(--hr-text-4)]">{{ t('dag.detail.inputTokens') }}</div>
+              <div class="mt-0.5 font-mono text-xs text-[var(--hr-text-1)]">{{ nodeMetrics?.tokens ? fmtTokens(nodeMetrics.tokens.input) : t('dag.detail.unknown') }}</div>
+            </div>
+            <div class="rounded-lg border border-[var(--hr-border)] bg-[var(--hr-panel)] px-2 py-2">
+              <div class="text-[9px] text-[var(--hr-text-4)]">{{ t('dag.detail.outputTokens') }}</div>
+              <div class="mt-0.5 font-mono text-xs text-[var(--hr-text-1)]">{{ nodeMetrics?.tokens ? fmtTokens(nodeMetrics.tokens.output) : t('dag.detail.unknown') }}</div>
+            </div>
+            <div class="rounded-lg border border-[var(--hr-border)] bg-[var(--hr-panel)] px-2 py-2">
+              <div class="text-[9px] text-[var(--hr-text-4)]">{{ t('dag.detail.cacheReadTokens') }}</div>
+              <div class="mt-0.5 font-mono text-xs text-[var(--hr-text-1)]">{{ nodeMetrics?.tokens ? fmtTokens(nodeMetrics.tokens.cache_read) : t('dag.detail.unknown') }}</div>
+            </div>
+            <div class="rounded-lg border border-[var(--hr-border)] bg-[var(--hr-panel)] px-2 py-2">
+              <div class="text-[9px] text-[var(--hr-text-4)]">{{ t('dag.detail.cacheCreationTokens') }}</div>
+              <div class="mt-0.5 font-mono text-xs text-[var(--hr-text-1)]">{{ nodeMetrics?.tokens ? fmtTokens(nodeMetrics.tokens.cache_creation) : t('dag.detail.unknown') }}</div>
+            </div>
+            <div
+              class="rounded-lg border border-[var(--hr-success-border)] bg-[var(--hr-success-soft)] px-2 py-2"
+              :title="t('dag.detail.totalTokensHint')"
+            >
+              <div class="text-[9px] text-[var(--hr-success)]">{{ t('dag.detail.totalTokens') }}</div>
+              <div data-testid="dag-execution-total-tokens" class="mt-0.5 font-mono text-xs font-semibold text-[var(--hr-success)]">
+                {{ nodeMetrics?.tokens ? fmtTokens(nodeMetrics.tokens.total) : t('dag.detail.unknown') }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-3 flex items-center gap-2 text-[10px] text-[var(--hr-text-4)]">
+          <span>{{ t('dag.detail.context') }}</span>
+          <span class="font-mono text-[var(--hr-text-2)]">
+            <template v-if="execution?.context_usage_pct != null">{{ execution.context_usage_pct.toFixed(1) }}%</template>
+            <template v-else>{{ t('dag.detail.unknown') }}</template>
+            <template v-if="execution?.context_limit != null"> · {{ fmtTokens(execution.context_limit) }}</template>
+          </span>
+        </div>
+      </section>
       <div
         v-else-if="!nodeSemantic.isWorker"
         class="flex items-center gap-2 border-b border-[var(--hr-border)] bg-[var(--hr-accent-soft)] px-6 py-2.5 text-xs text-[var(--hr-text-2)]"
@@ -252,6 +351,18 @@ defineExpose({ scrollBy })
         <Workflow class="h-3.5 w-3.5 text-[var(--hr-accent)]" />
         {{ t('dag.detail.managerExecuted') }}
       </div>
+
+      <!-- 非 worker 节点：结构化结果（command/join/condition 等，替代纯文字横幅） -->
+      <section
+        v-if="!nodeSemantic.isWorker"
+        data-testid="dag-node-result"
+        class="flex-shrink-0 border-b border-[var(--hr-border)]"
+      >
+        <div class="flex items-center gap-2 px-6 pt-3 text-xs font-semibold uppercase tracking-wider text-[var(--hr-text-3)]">
+          {{ t('dag.result.title') }}
+        </div>
+        <DagNodeResultView :result="nodeResult" :loading="resultLoading" />
+      </section>
 
       <!-- 面板：任务详情 -->
       <button

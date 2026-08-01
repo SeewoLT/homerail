@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { PROTOCOL_VERSION } from "homerail-protocol";
+import { WORKER_CONTRACT_VERSION } from "homerail-protocol";
 import { describe, expect, it } from "vitest";
 import {
   WORKER_RUNTIME_VERSION,
@@ -23,7 +23,7 @@ describe("Worker runtime version identity", () => {
   it("falls back to package and protocol metadata for an ordinary Docker build", () => {
     expect(resolveWorkerRuntimeIdentity({})).toEqual({
       worker_version: packageMetadata.version,
-      protocol_version: PROTOCOL_VERSION,
+      protocol_version: WORKER_CONTRACT_VERSION,
       source_fingerprint: undefined,
       image_revision: undefined,
     });
@@ -32,7 +32,7 @@ describe("Worker runtime version identity", () => {
       HOMERAIL_WORKER_PROTOCOL_VERSION: "",
     })).toMatchObject({
       worker_version: packageMetadata.version,
-      protocol_version: PROTOCOL_VERSION,
+      protocol_version: WORKER_CONTRACT_VERSION,
     });
   });
 

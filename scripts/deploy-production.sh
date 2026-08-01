@@ -122,17 +122,17 @@ WORKER_METADATA="$(
       path.join(repoRoot, "homerail_worker", "package.json"),
       "utf8",
     ));
-    if (!fingerprint || typeof workerPackage.version !== "string" || !protocolModule.PROTOCOL_VERSION) {
+    if (!fingerprint || typeof workerPackage.version !== "string" || !protocolModule.WORKER_CONTRACT_VERSION) {
       throw new Error("Worker image metadata is incomplete.");
     }
-    process.stdout.write(`${fingerprint}\n${protocolModule.PROTOCOL_VERSION}\n${workerPackage.version}\n`);
+    process.stdout.write(`${fingerprint}\n${protocolModule.WORKER_CONTRACT_VERSION}\n${workerPackage.version}\n`);
   '
 )"
 WORKER_SOURCE_FINGERPRINT="$(printf '%s\n' "$WORKER_METADATA" | sed -n '1p')"
-WORKER_PROTOCOL_VERSION="$(printf '%s\n' "$WORKER_METADATA" | sed -n '2p')"
+WORKER_CONTRACT_VERSION="$(printf '%s\n' "$WORKER_METADATA" | sed -n '2p')"
 WORKER_VERSION="$(printf '%s\n' "$WORKER_METADATA" | sed -n '3p')"
 if [[ ! "$WORKER_SOURCE_FINGERPRINT" =~ ^[0-9a-f]{16}$ ]] \
-  || [[ ! "$WORKER_PROTOCOL_VERSION" =~ ^[0-9A-Za-z._+-]+$ ]] \
+  || [[ ! "$WORKER_CONTRACT_VERSION" =~ ^[1-9][0-9]*$ ]] \
   || [[ ! "$WORKER_VERSION" =~ ^[0-9A-Za-z._+-]+$ ]]; then
   echo "Production Worker image metadata is invalid." >&2
   exit 1
@@ -208,12 +208,12 @@ echo "Building production Worker image $WORKER_IMAGE"
 docker build \
   --label "org.homerail.production_revision=$REVISION" \
   --label "org.homerail.worker.source_fingerprint=$WORKER_SOURCE_FINGERPRINT" \
-  --label "org.homerail.worker.protocol_version=$WORKER_PROTOCOL_VERSION" \
+  --label "org.homerail.worker.protocol_version=$WORKER_CONTRACT_VERSION" \
   --label "org.opencontainers.image.version=$WORKER_VERSION" \
   --label "org.opencontainers.image.revision=$REVISION" \
   --label "org.opencontainers.image.created=$WORKER_IMAGE_CREATED" \
   --build-arg "HOMERAIL_WORKER_SOURCE_FINGERPRINT=$WORKER_SOURCE_FINGERPRINT" \
-  --build-arg "HOMERAIL_WORKER_PROTOCOL_VERSION=$WORKER_PROTOCOL_VERSION" \
+  --build-arg "HOMERAIL_WORKER_PROTOCOL_VERSION=$WORKER_CONTRACT_VERSION" \
   --build-arg "HOMERAIL_WORKER_VERSION=$WORKER_VERSION" \
   --build-arg "HOMERAIL_WORKER_IMAGE_REVISION=$REVISION" \
   -t "$WORKER_IMAGE" \

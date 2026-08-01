@@ -21,7 +21,7 @@ import {
 import { handleDagMessageResponse } from "../orchestration/dag-message-router.js";
 import { clearByTargetId, isCurrentDispatchTarget } from "../orchestration/dispatch-tracker.js";
 import { emit } from "../events/bus.js";
-import { appendChatEntry } from "../persistence/store.js";
+import { appendChatEntry, appendNodeUsage } from "../persistence/store.js";
 import { appendSessionTranscriptEntry } from "../persistence/dag-session-files.js";
 import {
   autoHandoffAfterCorrectionExhausted,
@@ -612,6 +612,37 @@ export function setupNodeWebSocket(
               sessionId,
               msg.data,
             );
+            if (msg.data.event === "usage") {
+              const rawUsage = msg.data.usage as {
+                input_tokens?: number;
+                output_tokens?: number;
+                cache_read_input_tokens?: number;
+                cache_creation_input_tokens?: number;
+              } | undefined;
+              if (rawUsage) {
+                const scope = {
+                  ...(typeof msg.data.session_id === "string" ? { session_id: msg.data.session_id } : {}),
+                  ...(typeof msg.data.round_id === "string" ? { round_id: msg.data.round_id } : {}),
+                  ...(typeof msg.data.generation === "number" ? { generation: msg.data.generation } : {}),
+                  ...(typeof msg.data.command_id === "string" ? { command_id: msg.data.command_id } : {}),
+                  ...(typeof msg.data.execution_id === "string" ? { execution_id: msg.data.execution_id } : {}),
+                };
+                appendNodeUsage({
+                  runId,
+                  nodeId,
+                  ...(Object.keys(scope).length > 0 ? { scope } : {}),
+                  usage: {
+                    input_tokens: Number(rawUsage.input_tokens ?? 0),
+                    output_tokens: Number(rawUsage.output_tokens ?? 0),
+                    cache_read_input_tokens: Number(rawUsage.cache_read_input_tokens ?? 0),
+                    cache_creation_input_tokens: Number(rawUsage.cache_creation_input_tokens ?? 0),
+                  },
+                  duration_ms: typeof msg.data.duration_ms === "number" ? msg.data.duration_ms : undefined,
+                  num_turns: typeof msg.data.num_turns === "number" ? msg.data.num_turns : undefined,
+                  timestamp: Date.now(),
+                });
+              }
+            }
           }
           return;
         }

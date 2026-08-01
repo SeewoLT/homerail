@@ -30,8 +30,6 @@ import {
   compactManagerAgentSkillSupervisedDagResult,
   compactManagerAgentSkillViewPresentResult,
   createManagerAgentWidgetFileTools,
-  DEFAULT_PR_REVIEW_EXPECTED_USAGE,
-  defaultPrReviewBudgetKey,
   isFullGitRevision,
   managerAgentDagCommandResult,
   managerAgentDagContextPrompt,
@@ -1200,10 +1198,6 @@ export function createManagerTools(
         const pr = Number(args.pr);
         try {
           const metadata = await resolveGitHubPullRequest(repo, pr);
-          const requestedUsage = Number(args.expected_usage);
-          const expectedUsage = Number.isInteger(requestedUsage) && requestedUsage >= 0 && requestedUsage <= 100
-            ? requestedUsage
-            : DEFAULT_PR_REVIEW_EXPECTED_USAGE;
           const envelope = {
             trigger_id: "manager-agent",
             trigger_type: "manual",
@@ -1217,8 +1211,6 @@ export function createManagerTools(
               head_clone_url: metadata.headCloneUrl,
               title: metadata.title,
               author: metadata.author,
-              expected_usage: expectedUsage,
-              budget_key: defaultPrReviewBudgetKey(repo),
             },
           };
           const body = await requestManager(state.restUrl, "/runs/create-and-run", {
@@ -2013,6 +2005,7 @@ const BUILTIN_VOICE_UI_PRINCIPLES = [
   "- 临时 widget 应能被后续同 id widget 覆盖，或通过 hidden 隐藏。",
   "- 避免重复任务草稿、重复提交状态和低信息量标题。",
   "- 用户还在连续说需求时，优先维护一个稳定的 memo / task-draft widget，而不是不断新增卡片。",
+  "- 汇报 DAG 运行结果或节点失败时，优先用 dag_explorer widget（data: { run_id, focus_node_id? }）聚焦出错节点；它自带每种节点的默认结果渲染，不要为此新做生成式 UI。",
   "- 需要持久化的生成式 UI 使用 Manager 内部 Widget File Protocol：一个 widget 一个 TOML 文件，先校验再渲染。",
   "",
   "语音状态原则：",

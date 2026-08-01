@@ -11,6 +11,8 @@ import {
 } from "../persistence/llm-settings.js";
 import {
   canonicalModelNameForEndpoint,
+  findCatalogEndpoint,
+  findEndpointModel,
   isKimiProviderId,
   KIMI_CN_PROVIDER_ID,
   KIMI_PROVIDER_ID,
@@ -40,7 +42,9 @@ export interface AgentRuntimeResolutionInput {
 
 export interface AgentRuntimeResolution {
   provider_name: string;
+  provider_display_name?: string;
   model: string;
+  model_display_name?: string;
   api_key: string;
   base_url: string;
   protocol: string;
@@ -168,7 +172,9 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
     }
     return {
       provider_name: "",
+      provider_display_name: "OpenAI",
       model,
+      model_display_name: model,
       api_key: "",
       base_url: "",
       protocol: "codex_appserver",
@@ -183,6 +189,11 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
   const requestedModel = input.modelName
     ? canonicalModelNameForEndpoint(setting.provider_id, setting.endpoint_id, input.modelName)
     : undefined;
+  const model = input.settingId ? setting.model_name : requestedModel || setting.model_name;
+  const catalogModel = findEndpointModel(
+    findCatalogEndpoint(setting.provider_id, setting.endpoint_id),
+    model,
+  );
   if (!baseUrl) {
     if (agentType === "claude-sdk") {
       throw new Error(`Claude SDK requires an Anthropic-compatible endpoint for ${setting.provider_id}/${setting.model_name}; Chat Completions endpoints are not supported for harness execution. Configure an Anthropic base URL or use the Kimi Code harness for Kimi.`);
@@ -191,7 +202,11 @@ export function resolveAgentRuntimeConfig(input: AgentRuntimeResolutionInput): A
   }
   return {
     provider_name: setting.provider_id,
-    model: input.settingId ? setting.model_name : requestedModel || setting.model_name,
+    provider_display_name: getProvider(setting.provider_id)?.name ?? setting.provider_id,
+    model,
+    model_display_name: model === setting.model_name
+      ? setting.display_name ?? catalogModel?.display_name ?? catalogModel?.name ?? model
+      : catalogModel?.display_name ?? catalogModel?.name ?? model,
     api_key: setting.api_key,
     base_url: baseUrl,
     protocol: agentType === "claude-sdk" ? "anthropic_compatible" : setting.protocol,

@@ -1161,6 +1161,7 @@ nodes:
     createSetting({
       provider_id: "dual-url-provider",
       model_name: "dual-model",
+      display_name: "Dual Model",
       api_key: "test-key",
       protocol: "openai_compatible",
       base_url: "https://dual.example/v1",
@@ -1194,7 +1195,9 @@ nodes:
     const envelope = dispatcher.dispatch.mock.calls[0]?.[0] as DispatchEnvelope;
     expect(envelope.agentConfig.llm).toMatchObject({
       provider: "dual-url-provider",
+      provider_display_name: "Dual URL Provider",
       model: "dual-model",
+      model_display_name: "Dual Model",
       base_url: "https://dual.example/anthropic",
       protocol: "anthropic_compatible",
     });
