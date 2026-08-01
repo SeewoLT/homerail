@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { workerAllowedMounts } from "../mount-policy.js";
 import { materializeWorkspaceInputs } from "../workspace-inputs.js";
+import { normalizePath } from "../../platform/paths.js";
 
 describe("trusted workspace input projection", () => {
   let home: string;
@@ -43,8 +44,8 @@ describe("trusted workspace input projection", () => {
     expect(fs.readFileSync(target, "utf8")).toBe("# task\n");
     if (process.platform !== "win32") expect(fs.statSync(target).mode & 0o222).toBe(0);
     expect(workerAllowedMounts("run-one", false, true)).toEqual([
-      { host: path.join(home, "workspace", "run-one"), container: "/workspace", mode: "rw" },
-      { host: path.join(home, "workspace", "run-one", "input"), container: "/workspace/input", mode: "ro" },
+      { host: normalizePath(path.join(home, "workspace", "run-one")), container: "/workspace", mode: "rw" },
+      { host: normalizePath(path.join(home, "workspace", "run-one", "input")), container: "/workspace/input", mode: "ro" },
     ]);
   });
 
