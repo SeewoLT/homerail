@@ -59,11 +59,11 @@
       "channels": {
         "stable": {
           "label": "Stable",
-          "description": "Receive final releases only. Alpha and Beta releases stay hidden."
+          "description": "Receive final releases only. Beta prereleases stay hidden."
         },
         "early-access": {
           "label": "Early Access",
-          "description": "Follow the current Alpha train, then Beta and Stable without opting in again."
+          "description": "Follow the Beta channel and automatically receive future Beta and Stable releases."
         }
       },
       "currentVersion": "Installed version: {version}",
