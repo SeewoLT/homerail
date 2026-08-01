@@ -19,6 +19,7 @@ import {
   getActiveRun,
   handoffActiveRun,
   recordActiveRunBrokerActionSuccess,
+  requestNodeCorrection,
   recoverAllActiveRuns,
 } from "../src/runtime/active-runs.js";
 
@@ -85,6 +86,14 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     expect(parsed.meta.workflow_id).toBe("auto-fix-v2");
     expect(parsed.graph.nodes).toHaveLength(8);
     expect(parsed.graph.edges.length).toBeLessThanOrEqual(28);
+    for (const nodeId of ["implement", "fix"]) {
+      expect(parsed.graph.nodes.find((node) => node.node_id === nodeId)?.gateway_config).toMatchObject({
+        workspace_strategy: "isolated_git_worktree",
+        worker_policy: {
+          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: ["input"] },
+        },
+      });
+    }
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
 
     const task = stageDagRunInputArtifact({
@@ -223,6 +232,24 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         };
         expect(() => handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", approval))
           .toThrow(/DAG_HANDOFF_BROKER_REQUIREMENT_MISSING/);
+        expect(requestNodeCorrection(
+          "autofix-v2-run",
+          "review_revision",
+          "approve handoff omitted required broker verification",
+        ).status).toBe("scheduled");
+        executor.tick("autofix-v2-run");
+        expect(dispatcher.dispatched.at(-1)).toMatchObject({
+          nodeId: "review_revision",
+          sessionId: reviewEnvelope.sessionId,
+        });
+        expect(dispatcher.dispatched.at(-1)?.inputs.correction?.[0]).toContain(
+          "github-autofix/github_pr/required_checks",
+        );
+        expect(dispatcher.dispatched.at(-1)?.credentialProjections).toMatchObject([{
+          credential_ref: "github-autofix",
+          broker: "github_pr",
+          allowed_actions: ["required_checks"],
+        }]);
         recordActiveRunBrokerActionSuccess({
           run_id: "autofix-v2-run",
           node_id: "review_revision",
@@ -230,6 +257,23 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
           credential_ref: "github-autofix",
           broker: "github_pr",
           action: "required_checks",
+        });
+        expect(() => handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", {
+          verdict: "approve",
+          head_sha: head,
+          review_round: reviewRound,
+          feedback: [],
+          fix_tasks: [],
+        })).toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
+        expect(requestNodeCorrection(
+          "autofix-v2-run",
+          "review_revision",
+          "approve handoff omitted required summary",
+        ).status).toBe("scheduled");
+        executor.tick("autofix-v2-run");
+        expect(dispatcher.dispatched.at(-1)).toMatchObject({
+          nodeId: "review_revision",
+          sessionId: reviewEnvelope.sessionId,
         });
         handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", approval);
       } else {

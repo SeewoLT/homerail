@@ -237,6 +237,52 @@ describe("prompt runner", () => {
     }));
   });
 
+  it("allows only declared broker verification plus handoff during correction", async () => {
+    let observedTools: string[] = [];
+    let observedContext: AgentRunContext | undefined;
+    const mockAgent: AgentClient = {
+      run(_prompt, tools, context) {
+        observedTools = tools.map((tool) => tool.name);
+        observedContext = context;
+        return (async function* () {
+          await tools.find((tool) => tool.name === "handoff")!.handler({ port: "done", content: "corrected" });
+          yield { type: "done" as const };
+        })();
+      },
+    };
+    registerAgentBackend("test-correction-broker", () => mockAgent);
+
+    await runPrompt(
+      {
+        task: "## input:context\n{}\n\n## input:correction\nVerify checks, then use the exact contract",
+        sender: "test",
+        runId: "run-correction-broker",
+        dagConfig: makeConfigWith({
+          session_id: "review-session",
+          allowed_dag_tools: ["handoff", "credential_broker_call"],
+        }),
+        credentialBrokerBindings: [{
+          credential_ref: "github-autofix",
+          purpose: "verify required checks",
+          mode: "manager_broker",
+          broker: "github_pr",
+          allowed_actions: ["required_checks"],
+        }],
+      },
+      {
+        wsSend: () => {},
+        agentBackend: "test-correction-broker",
+        credentialBrokerCall: async (request) => ({ request_id: request.request_id, ok: true, result: {} }),
+      },
+    );
+
+    expect(observedTools).toEqual(["handoff", "credential_broker_call"]);
+    expect(observedContext?.handoffOnly).toBe(true);
+    expect(observedContext?.systemPrompt).toContain(
+      "declared credential broker verification calls followed by exactly one handoff",
+    );
+  });
+
   it("keeps the Claude Code preset for ordinary DAG work", async () => {
     let observedContext: AgentRunContext | undefined;
     const mockAgent: AgentClient = {

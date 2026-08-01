@@ -34,12 +34,44 @@ describe("CLI immutable run inputs", () => {
     ]);
     expect(post).toHaveBeenNthCalledWith(1, "/api/run-inputs", expect.objectContaining({
       scope_id: "pilot-172",
+      name: "task.md",
       media_type: "text/markdown",
       content: "# Plan\n",
     }));
     expect(post).toHaveBeenNthCalledWith(2, "/api/run-inputs", expect.objectContaining({
+      name: "pr-context.json",
       media_type: "application/json",
     }));
+  });
+
+  it("derives and validates media type from the declared mount path", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-cli-inputs-"));
+    roots.push(root);
+    const source = path.join(root, "payload.txt");
+    fs.writeFileSync(source, '{"version":1}\n');
+    const post = vi.fn().mockResolvedValue({ data: { artifact: { artifact_id: "artifact-json" } } });
+    const client = { post } as unknown as HomeRailClient;
+
+    await expect(stageRunInputFiles(client, "pilot", [
+      `pr_context:input/pr-context.json=${source}`,
+    ])).resolves.toEqual([{
+      artifact_id: "artifact-json",
+      logical_name: "pr_context",
+      mount_path: "input/pr-context.json",
+    }]);
+    expect(post).toHaveBeenCalledWith("/api/run-inputs", {
+      scope_id: "pilot",
+      name: "pr-context.json",
+      media_type: "application/json",
+      content: '{"version":1}\n',
+    });
+
+    fs.writeFileSync(source, "not-json");
+    post.mockClear();
+    await expect(stageRunInputFiles(client, "pilot", [
+      `pr_context:input/pr-context.json=${source}`,
+    ])).rejects.toThrow("must contain valid JSON");
+    expect(post).not.toHaveBeenCalled();
   });
 
   it("requires an explicit scope and safe unique mount paths", async () => {

@@ -2028,6 +2028,7 @@ function _correctionPrompt(
   successPorts: string[],
   failurePorts: string[],
   outputContracts: Record<string, { contract: string; schema: unknown }>,
+  brokerRequirements: BrokerActionRequirement[],
 ): string {
   const declaredPorts = outputPorts.length > 0 ? outputPorts.join(", ") : "done";
   const contractGuidance = Object.keys(outputContracts).length > 0
@@ -2036,6 +2037,13 @@ function _correctionPrompt(
         `Exact output contracts by port (JSON Schema): ${JSON.stringify(outputContracts)}`,
       ]
     : [];
+  const brokerGuidance = brokerRequirements.length > 0
+    ? [
+        "Correction mode permits only declared credential_broker_call verification actions and the final handoff tool call. Do not use any built-in tools or other DAG tools.",
+        `Broker verification actions available when required by the corrected output: ${brokerRequirements.map((requirement) => `${requirement.credential_ref}/${requirement.broker}/${requirement.action}`).join(", ")}.`,
+        "If the corrected output triggers one of those requirements and no valid receipt exists, call that declared broker action before the handoff. Otherwise call handoff directly.",
+      ]
+    : ["Correction mode permits only the handoff tool. Do not repeat investigation, file changes, or other side effects."];
   return [
     `Correction attempt ${attempt}/${maxAttempts} for DAG node ${nodeId}.`,
     `Previous attempt ended without a valid DAG handoff: ${reason}`,
@@ -2047,7 +2055,7 @@ function _correctionPrompt(
     "Use a failure port only when the original task itself cannot complete; never use it merely to report this correction error.",
     "Treat that error as authoritative. Preserve required field names and JSON array/object/number types exactly.",
     "Reuse completed evidence when it is available in the original inputs or current workspace.",
-    "Correction mode permits only the handoff tool. Do not repeat investigation, file changes, or other side effects.",
+    ...brokerGuidance,
     "Never print a pseudo-tool call as prose, XML, or JSON. Invoke the SDK tool itself.",
     "Finish by calling the handoff tool exactly once with one declared output port and contract-valid content. Do not end with prose.",
   ].join("\n");
@@ -2099,14 +2107,18 @@ export function requestNodeCorrection(
       successPorts,
       failurePorts,
       outputContracts,
+      _outputBrokerActionRequirements(run, nodeId),
     ));
     mailbox.set("correction", values);
   }
   resetSkippedSuccessDescendants(run.dagRun, nodeId);
   run.dagRun.nodeStates.set(nodeId, "READY");
   run.dagRun.handoffedNodes.delete(nodeId);
-  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
-  if (_nodeSessionScope(node) === "dispatch") _markNodeSessionStatus(run, nodeId, "completed");
+  // A correction retries the same logical dispatch after a rejected handoff; it
+  // is not a new review round. Keep the provider session (and any broker action
+  // receipts fenced to it) active. A successful handoff still marks the session
+  // completed, so the next real re-entry of a dispatch-scoped node gets a fresh
+  // context through _prepareNodeSessionForDispatch.
   writeRunMetadata(runId, serializeRunMetadata(run));
   _emitNodeStateChanges(run, before);
   emit("dag:node_correction_requested", { runId, nodeId, reason, attempt, maxAttempts });
@@ -4265,6 +4277,7 @@ function _fanoutWorkerRuntime(
     "{{fanout_invocation}}": String(state.invocation),
     "{{fanout_index}}": String(index + 1),
     "{{fanout_child}}": childId,
+    ...(workspacePath ? { "{{fanout_workspace}}": workspacePath } : {}),
   };
   const replacePath = (value: unknown): unknown => {
     if (typeof value !== "string") return value;
@@ -4275,6 +4288,12 @@ function _fanoutWorkerRuntime(
     ? structuredClone(rawAccess as Record<string, unknown>)
     : {};
   if (workspacePath) {
+    const declaredWritablePaths = Array.isArray(access.writable_paths)
+      ? access.writable_paths.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    if (declaredWritablePaths.length !== 1 || declaredWritablePaths[0] !== "{{fanout_workspace}}") {
+      throw new Error("isolated git worktree fanout must explicitly declare {{fanout_workspace}} as its writable path");
+    }
     access.writable_paths = [workspacePath];
   } else {
     access.writable_paths = Array.isArray(access.writable_paths) ? access.writable_paths.map(replacePath) : [];
@@ -4956,6 +4975,19 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
   const surfaceId = actor.surface_id;
   const actorSurfaceView = getDagActorSurfaceView(run.runId, actorId);
   const correctionOnly = Array.isArray(inputs.correction) && inputs.correction.length > 0;
+  const effectiveCredentialProjections = correctionOnly
+    ? credentialProjections.flatMap((projection) => {
+        if (projection.mode !== "manager_broker") return [];
+        const requiredActions = new Set(_outputBrokerActionRequirements(run, nodeId)
+          .filter((requirement) => (
+            requirement.credential_ref === projection.credential_ref
+            && requirement.broker === projection.broker
+          ))
+          .map((requirement) => requirement.action));
+        const allowedActions = projection.allowed_actions.filter((action) => requiredActions.has(action));
+        return allowedActions.length > 0 ? [{ ...projection, allowed_actions: allowedActions }] : [];
+      })
+    : credentialProjections;
   const requestedCheckpointVersion = actor.checkpoint_ref?.match(/^portable:(\d+)$/)?.[1];
   const freshDispatchContext = _nodeSessionScope(node) === "dispatch";
   const actorCheckpointRecord = freshDispatchContext
@@ -5018,7 +5050,9 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
       allowedBuiltinTools: _allowedBuiltinTools(node),
       maxBuiltinToolCalls: _maxBuiltinToolCalls(run, node),
       allowedDagTools: _allowedDagTools(node),
-      ...(credentialProjections.length > 0 ? { credentialProjections } : {}),
+      ...(effectiveCredentialProjections.length > 0
+        ? { credentialProjections: effectiveCredentialProjections }
+        : {}),
       activity: {
         roundId: run.currentRound.round_id,
         actorId,

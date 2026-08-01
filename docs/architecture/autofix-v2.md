@@ -254,11 +254,12 @@ item or `needs_human`. It does not request arbitrary dynamic nodes or edges.
 
 ## Secure Dynamic Fan-Out
 
-The current `fanout` gateway records only a worker Agent and bounded execution
-settings. Dynamically appended child nodes do not currently inherit the full
-Agent node runtime policy.
+The v1 `fanout` gateway records a bounded worker Agent policy and materializes
+that policy onto every dynamically appended child node.
 
-Extend the strict v1 fan-out configuration with a validated worker template:
+The strict v1 fan-out configuration uses a validated worker policy. An
+isolated Git worktree must opt in with the reserved
+`{{fanout_workspace}}` placeholder:
 
 ```yaml
 config:
@@ -267,29 +268,32 @@ config:
   max_items: 3
   max_parallelism: 3
   completion: all
-  worker:
-    agent: implementer
+  worker_agent: implementer
+  worker_policy:
     session_scope: dispatch
     allowed_builtin_tools: [Bash, Read, Write, Edit, Grep, Glob]
     allowed_dag_tools: [handoff]
     max_builtin_tool_calls: 50
     workspace_access:
-      writable_paths: [worktree]
+      writable_paths: ["{{fanout_workspace}}"]
       readonly_paths: [input, evidence]
     credentials: []
-    workspace:
-      mode: isolated_worktree
-      source: repository
+  workspace_strategy: isolated_git_worktree
+  workspace_root: workers
+  repository_path: repo
 ```
 
-The exact final syntax may reuse a common `AgentRuntimePolicy` schema, but its
-semantics must be:
+Its semantics are:
 
 - the compiler validates the complete template;
 - every child receives a canonical copy of it;
 - omitted tool allowlists are empty for dynamic children;
 - omitted credentials mean no credentials;
 - omitted workspace access means no writable paths;
+- `isolated_git_worktree` is rejected unless the worker policy declares
+  exactly `{{fanout_workspace}}`; Manager replaces that placeholder with the
+  unique child worktree path before dispatch, so isolation does not imply a
+  hidden write grant;
 - only `handoff` is available unless DAG tools are declared explicitly;
 - each child has a unique logical actor, provider session, and isolated
   worktree based on the same immutable source SHA;
@@ -345,10 +349,13 @@ the exact automation head branch before an approval can complete.
 Add a declarative dispatch-scoped session policy for Agent nodes and dynamic
 workers. `session_scope: dispatch` means:
 
-- Manager creates a new provider session id for every dispatch;
+- Manager creates a new provider session id for every completed node re-entry
+  or review/fix round;
 - no provider-native transcript is resumed;
-- corrections and later loop iterations receive new session ids unless a node
-  explicitly declares another supported scope;
+- a bounded handoff-contract correction retains the same provider session and
+  same-session broker receipts because it retries the rejected logical
+  dispatch; after a valid handoff, the next loop iteration receives a fresh
+  session id;
 - the run still retains all transcripts as audit evidence, but they are not
   model input.
 
@@ -357,8 +364,12 @@ validation result, and bounded repository evidence. A new DeepSeek fixer
 receives those inputs plus the current structured findings. Neither receives
 previous review prose that is absent from the current contract.
 
-An approval receipt from one dispatch is not valid in a later dispatch, even
-when it is the same logical review node after recovery or a loop iteration.
+An approval receipt from one completed dispatch is not valid in a later review
+round, even when it is the same logical review node after recovery or a loop
+iteration. A correction of that dispatch may reuse its already-recorded receipt
+or repeat only the specifically declared broker verification action in the same
+session before handing off; it cannot use built-in tools, mutate the PR, or
+broaden the permitted broker actions.
 
 Tests must assert unique provider session ids, not merely different logical
 round ids.

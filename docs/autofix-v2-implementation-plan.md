@@ -177,7 +177,9 @@ Tests:
 ### AFV2-301: Add explicit provider session scope
 
 - [ ] Add `session_scope: dispatch` to the reusable Agent runtime policy.
-- [ ] Allocate a new provider session id for every dispatch and loop iteration.
+- [ ] Allocate a new provider session id for every completed node re-entry and
+      loop iteration; keep bounded handoff corrections in the same logical
+      dispatch so same-session verification receipts remain recoverable.
 - [ ] Prevent provider-native transcript resume in dispatch scope.
 - [ ] Retain transcript evidence without feeding it into the next dispatch.
 - [ ] Make the selected scope visible through run/node inspection.

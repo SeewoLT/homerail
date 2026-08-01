@@ -324,9 +324,13 @@ export class ChangeOrchestrator {
     assertProviderPolicy(dagWithRuntime);
 
     const runId = request.runId ?? _generateRunId();
-    const inputArtifacts = request.inputArtifacts && request.inputArtifacts.length > 0
-      ? resolveDagRunInputBindings(request.inputScope ?? "", request.inputArtifacts)
-      : undefined;
+    const requestedInputArtifacts = request.inputArtifacts ?? [];
+    const inputScope = request.inputScope?.trim();
+    let inputArtifacts: ReturnType<typeof resolveDagRunInputBindings> | undefined;
+    if (requestedInputArtifacts.length > 0) {
+      if (!inputScope) throw new Error("input_scope is required when input_artifacts are bound");
+      inputArtifacts = resolveDagRunInputBindings(inputScope, requestedInputArtifacts);
+    }
     const workflowId = dagWithRuntime.meta.workflow_id?.trim();
     const reservation = workflowId
       ? reserveWorkflowRun({

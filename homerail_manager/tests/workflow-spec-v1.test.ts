@@ -513,6 +513,53 @@ spec:
     ]));
   });
 
+  it("requires isolated fanout workers to declare their injected writable worktree", () => {
+    const source = `
+api_version: homerail.ai/v1
+kind: Workflow
+metadata: { id: isolated-fanout, name: Isolated Fanout }
+spec:
+  contracts: { Items: { type: array } }
+  agents: { worker: { system: Work. } }
+  nodes:
+    fan:
+      kind: fanout
+      inputs: { items: { contract: Items } }
+      outputs: { passed: {}, failed: {} }
+      config:
+        input: items
+        worker_agent: worker
+        worker_policy:
+          allowed_dag_tools: [handoff]
+          workspace_access: { writable_paths: [], readonly_paths: [input] }
+        workspace_strategy: isolated_git_worktree
+        repository_path: repo
+        max_items: 2
+        max_parallelism: 1
+        completion: all
+        result_port: passed
+        failed_port: failed
+    done: { kind: terminal, outcome: success, inputs: { result: {} } }
+    failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+  edges:
+    - { from: $run.input, to: fan.items }
+    - { from: fan.passed, to: done.result }
+    - { from: fan.failed, to: failed.result, condition: on_failure }
+`;
+    const missing = compileWorkflowSource(source);
+    expect(missing.valid).toBe(false);
+    expect(missing.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_FANOUT_WORKSPACE_REQUIRED",
+      path: "/spec/nodes/fan/config/worker_policy/workspace_access/writable_paths",
+    }));
+
+    const declared = compileWorkflowSource(source.replace(
+      "writable_paths: []",
+      "writable_paths: ['{{fanout_workspace}}']",
+    ));
+    expect(declared.valid, declared.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+  });
+
   it("rejects an approval workflow that authorizes its proposer", () => {
     const result = compileWorkflowSource(`
 api_version: homerail.ai/v1

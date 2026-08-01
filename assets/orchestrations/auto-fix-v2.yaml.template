@@ -311,7 +311,7 @@ spec:
           allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
           allowed_dag_tools: [handoff]
           max_builtin_tool_calls: 80
-          workspace_access: { writable_paths: [], readonly_paths: [input] }
+          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
         workspace_strategy: isolated_git_worktree
         workspace_root: workers
         repository_path: repo
@@ -395,7 +395,7 @@ spec:
           allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
           allowed_dag_tools: [handoff, credential_broker_call]
           max_builtin_tool_calls: 100
-          workspace_access: { writable_paths: [], readonly_paths: [input] }
+          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
           credentials:
             - credential_ref: github-autofix
               purpose: apply one bounded review revision to the Draft PR

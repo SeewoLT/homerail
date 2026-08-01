@@ -14,11 +14,17 @@ predates the runtime and broker support described below.
 - `task_document` and `pr_context` are staged as content-addressed Manager
   artifacts and projected read-only below `/workspace/input`.
 - K3 analyzes the task. Dynamic DeepSeek V4 Flash implementers receive isolated
-  Git worktrees and no GitHub credential.
+  Git worktrees and no GitHub credential. Their worker policy must explicitly
+  declare `{{fanout_workspace}}`; Manager resolves it to the unique child
+  worktree, so isolation never creates an implicit write grant.
 - The DeepSeek aggregator may read and update only the bound Draft PR through
   the `github_pr` Manager broker.
 - GLM-5.2 reviewer nodes have `session_scope: dispatch`; every re-entry gets a
-  new provider session and no portable checkpoint/transcript.
+  new provider session and no portable checkpoint/transcript. A rejected
+  handoff-contract correction stays in that same logical dispatch so a valid
+  same-session `required_checks` receipt remains usable; if the receipt was
+  missing, correction mode permits only that declared read-only verification
+  call before the final handoff.
 - Each rejected review creates one fresh dynamic DeepSeek fixer. Four fix
   rounds plus the initial review give exactly five total review rounds.
 - GitHub writes are expected-head, fast-forward-only, non-force, bounded to 64
@@ -93,6 +99,10 @@ write outside the path allowlist. `required_checks` contains one to 32 unique,
 exact GitHub check-run names. It is immutable for the run; the broker selects
 the newest run with each exact name and requires `completed`/`success` on the
 current head.
+
+CLI input bindings declare their media type through the immutable mount suffix:
+`.md` is Markdown, `.json` is validated JSON, and `.txt` is plain text. The CLI
+rejects other suffixes, invalid UTF-8, and invalid JSON before staging.
 
 The broker's token permissions are necessary but not the only boundary. The
 WorkflowSpec also limits which nodes can call which broker actions, the Worker

@@ -592,6 +592,23 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
           "fanout workers with manager_broker credentials must allow credential_broker_call",
         );
       }
+      const writablePaths = workerPolicy?.workspace_access?.writable_paths ?? [];
+      const declaresIsolatedWorkspace = writablePaths.length === 1
+        && writablePaths[0] === "{{fanout_workspace}}";
+      if (node.config.workspace_strategy === "isolated_git_worktree" && !declaresIsolatedWorkspace) {
+        add(
+          `${nodePath}/config/worker_policy/workspace_access/writable_paths`,
+          "DAG_SEMANTIC_FANOUT_WORKSPACE_REQUIRED",
+          "isolated_git_worktree fanout must declare exactly ['{{fanout_workspace}}'] as its writable path",
+        );
+      }
+      if (node.config.workspace_strategy !== "isolated_git_worktree" && writablePaths.includes("{{fanout_workspace}}")) {
+        add(
+          `${nodePath}/config/worker_policy/workspace_access/writable_paths`,
+          "DAG_SEMANTIC_FANOUT_WORKSPACE_UNAVAILABLE",
+          "{{fanout_workspace}} is only available with isolated_git_worktree fanout",
+        );
+      }
     }
     if (node.kind === "await_command") {
       for (let index = 0; index < (node.config.target_actors ?? []).length; index++) {

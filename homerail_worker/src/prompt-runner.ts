@@ -308,8 +308,13 @@ export async function runPrompt(
   const selectedDagTools = allowedDagTools === undefined
     ? allDagTools
     : allDagTools.filter((tool) => allowedDagTools.has(tool.name));
+  const correctionAllowsBrokerVerification = allowedDagTools?.has("credential_broker_call") === true
+    && selectedDagTools.some((tool) => tool.name === "credential_broker_call");
   const dagTools = correctionOnly
-    ? allDagTools.filter((tool) => tool.name === "handoff")
+    ? selectedDagTools.filter((tool) => (
+        tool.name === "handoff"
+        || (correctionAllowsBrokerVerification && tool.name === "credential_broker_call")
+      ))
     : selectedDagTools;
   const ordinarySystemPrompt = surfacePatchAllowed
     ? [job.systemPrompt?.trim(), REPORT_SURFACE_STATE_PROMPT].filter(Boolean).join("\n\n")
@@ -319,8 +324,10 @@ export async function runPrompt(
         "DAG CONTRACT CORRECTION MODE.",
         "The previous turn did not produce a contract-valid handoff.",
         `The active DAG run_id is ${job.runId}. Copy it exactly when the output contract requires it.`,
-        "Your only permitted action is one call to the handoff tool.",
-        "Do not emit prose or tool-like markup. Do not call, describe, or simulate any other tool.",
+        correctionAllowsBrokerVerification
+          ? "Your only permitted actions are declared credential broker verification calls followed by exactly one handoff tool call."
+          : "Your only permitted action is one call to the handoff tool.",
+        "Do not emit prose or tool-like markup. Do not call, describe, or simulate any non-permitted tool.",
         "Use the correction message and original inputs to preserve completed work and satisfy the exact output schema.",
         "The original node instructions follow only for output schema and evidence context:",
         job.systemPrompt ?? "",

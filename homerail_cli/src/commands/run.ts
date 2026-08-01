@@ -10,6 +10,23 @@ function collectInputFile(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
+type RunInputMediaType = "text/markdown" | "text/plain" | "application/json";
+
+function declaredRunInputMediaType(mountPath: string, content: string): RunInputMediaType {
+  const extension = path.posix.extname(mountPath).toLowerCase();
+  if (extension === ".json") {
+    try {
+      JSON.parse(content);
+    } catch {
+      throw new Error(`run input mounted at ${mountPath} must contain valid JSON`);
+    }
+    return "application/json";
+  }
+  if (extension === ".md") return "text/markdown";
+  if (extension === ".txt") return "text/plain";
+  throw new Error(`run input mount path must end in .md, .json, or .txt: ${mountPath}`);
+}
+
 export async function stageRunInputFiles(
   client: HomeRailClient,
   scopeId: string | undefined,
@@ -40,12 +57,16 @@ export async function stageRunInputFiles(
     const stat = fs.statSync(localPath);
     if (!stat.isFile() || stat.size < 1 || stat.size > 1024 * 1024) throw new Error(`input file must contain 1 byte to 1 MiB: ${localPath}`);
     const bytes = fs.readFileSync(localPath);
-    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    const extension = path.extname(localPath).toLowerCase();
-    const mediaType = extension === ".json" ? "application/json" : extension === ".md" ? "text/markdown" : "text/plain";
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error(`input file must contain valid UTF-8 text: ${localPath}`);
+    }
+    const mediaType = declaredRunInputMediaType(mountPath, content);
     const response = await client.post<BaseResponse>("/api/run-inputs", {
       scope_id: scope,
-      name: path.basename(localPath),
+      name: path.posix.basename(mountPath),
       media_type: mediaType,
       content,
     });
@@ -70,7 +91,7 @@ export function registerRunCommand(program: Command): void {
     .option("--input-scope <scope>", "Scope for immutable run input artifacts")
     .option(
       "--input-file <binding>",
-      "Stage logical_name[:input/mount]=local_path as an immutable read-only run input",
+      "Stage logical_name[:input/mount]=local_path as immutable UTF-8 input (.md, .json, or .txt mount)",
       collectInputFile,
       [],
     )
