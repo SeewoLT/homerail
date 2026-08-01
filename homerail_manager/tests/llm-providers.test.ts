@@ -91,7 +91,7 @@ describe("custom LLM providers", () => {
     });
   });
 
-  it("catalogs DeepSeek V4 Flash as a Responses-capable Codex runtime", () => {
+  it("catalogs only DeepSeek V4 Flash as a Responses-capable Codex runtime", async () => {
     const deepseek = listProviders().find((provider) => provider.id === "deepseek");
     expect(deepseek).toMatchObject({
       default_model: "deepseek-v4-flash",
@@ -114,6 +114,54 @@ describe("custom LLM providers", () => {
       is_default: true,
     });
     expect(resolveCodexResponsesBaseUrlForSetting(setting)).toBe("https://api.deepseek.com");
+    expect(findActiveCodexCompatibleSetting()?.id).toBe(setting.id);
+
+    const proSetting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-pro",
+      api_key: "sk-deepseek-test",
+      is_active: true,
+    });
+    expect(resolveCodexResponsesBaseUrlForSetting(proSetting)).toBeUndefined();
+
+    const port = await listen(server);
+    const response = await fetch(`http://127.0.0.1:${port}/api/llm/settings?provider_id=deepseek`);
+    const body = await response.json() as {
+      data: { settings: Array<{ id: string; supports_codex_responses: boolean }> };
+    };
+    expect(response.status).toBe(200);
+    expect(body.data.settings.find((candidate) => candidate.id === setting.id))
+      .toMatchObject({ supports_codex_responses: true });
+    expect(body.data.settings.find((candidate) => candidate.id === proSetting.id))
+      .toMatchObject({ supports_codex_responses: false });
+  });
+
+  it("reconciles retired DeepSeek model aliases to V4 Flash", () => {
+    const setting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-flash",
+      models: ["deepseek-v4-flash"],
+      api_key: "sk-deepseek-legacy-test",
+      is_active: true,
+      is_default: true,
+    });
+    getDb().prepare(`
+      UPDATE llm_settings
+      SET model_name = ?, models = ?
+      WHERE id = ?
+    `).run(
+      "deepseek-chat",
+      JSON.stringify(["deepseek-chat", "deepseek-reasoner"]),
+      setting.id,
+    );
+
+    expect(getSetting(setting.id)).toMatchObject({
+      model_name: "deepseek-v4-flash",
+      models: ["deepseek-v4-flash"],
+      responses_base_url: "https://api.deepseek.com",
+    });
     expect(findActiveCodexCompatibleSetting()?.id).toBe(setting.id);
   });
 

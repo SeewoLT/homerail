@@ -191,7 +191,12 @@ default:
       is_active: true,
       is_default: true,
     });
-    upsertDagWorkflowFromYaml({ yaml_text: WORKFLOW_YAML });
+    upsertDagWorkflowFromYaml({
+      yaml_text: WORKFLOW_YAML.replace(
+        "    system: Plan and hand off.",
+        "    system: Plan and hand off.\n    llm:\n      service_tier: priority",
+      ),
+    });
     upsertDagRuntimeProfileFromYaml({
       yaml_text: `
 profile_id: deepseek-codex
@@ -218,6 +223,7 @@ default:
         model: "deepseek-v4-flash",
         protocol: "responses_compatible",
         reasoning_effort: "none",
+        // The explicit profile null must clear the inherited workflow tier.
         service_tier: null,
       },
     });

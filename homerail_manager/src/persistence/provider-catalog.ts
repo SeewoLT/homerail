@@ -196,6 +196,17 @@ export function canonicalModelNameForEndpoint(
 ): string {
   const canonicalProviderId = canonicalProviderIdForEndpoint(providerId, endpointId, undefined, modelName);
   if (
+    canonicalProviderId === "deepseek" &&
+    (endpointId === undefined || endpointId === "deepseek_api") &&
+    (modelName === "deepseek-chat" || modelName === "deepseek-reasoner")
+  ) {
+    // DeepSeek retired both legacy aliases on 2026-07-24. They previously
+    // selected the non-thinking/thinking modes of V4 Flash, respectively.
+    // Reconcile persisted built-in settings to the supported model slug;
+    // reasoning mode remains a harness/runtime concern.
+    return "deepseek-v4-flash";
+  }
+  if (
     canonicalProviderId === KIMI_CN_PROVIDER_ID &&
     endpointId === KIMI_CODING_PLAN_ENDPOINT_ID &&
     modelName === "kimi-k2.7-code"

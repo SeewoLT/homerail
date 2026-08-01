@@ -235,8 +235,9 @@ function harnessForManagerAgentSetting(
   detectedHarness?: Extract<ManagerAgentHarness, 'codex_appserver' | 'claude_agent_sdk' | 'kimi_code'>,
 ): 'codex_appserver' | 'kimi_code' | 'claude_agent_sdk' {
   if (detectedHarness) return detectedHarness
-  // Persisted multi-protocol settings prefer Responses, matching runtime detection.
-  if (setting.responses_base_url) return 'codex_appserver'
+  // The Manager owns provider/model capability policy; a Responses URL alone
+  // does not mean every model on that endpoint is supported by Codex.
+  if (setting.supports_codex_responses === true) return 'codex_appserver'
   if (setting.anthropic_base_url || setting.protocol === 'anthropic_compatible') {
     return 'claude_agent_sdk'
   }

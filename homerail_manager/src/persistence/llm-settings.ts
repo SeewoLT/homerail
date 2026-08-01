@@ -892,7 +892,9 @@ function _resolveEffectiveSetting(raw: unknown): { setting?: LLMSetting; needsSe
 
   // models 向后兼容：旧 setting 无 models 字段时，从 model_name 派生 [model_name]
   const models = Array.isArray(rec.models) && rec.models.every((m) => typeof m === "string")
-    ? (rec.models as string[]).map((item) => canonicalModelNameForEndpoint(providerId, resolvedEndpointId, item))
+    ? Array.from(new Set(
+      (rec.models as string[]).map((item) => canonicalModelNameForEndpoint(providerId, resolvedEndpointId, item)),
+    ))
     : [modelName];
 
   const setting: LLMSetting = {

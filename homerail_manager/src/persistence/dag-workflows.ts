@@ -166,7 +166,9 @@ function _profileEntry(value: unknown): DagRuntimeProfileEntry | undefined {
   const modelAlias = _string(raw.model_alias ?? raw.modelAlias);
   const agentType = _string(raw.agent_type ?? raw.agentType ?? raw.harness);
   const reasoningEffort = _string(raw.reasoning_effort ?? raw.reasoningEffort);
-  const rawServiceTier = raw.service_tier ?? raw.serviceTier;
+  const rawServiceTier = Object.prototype.hasOwnProperty.call(raw, "service_tier")
+    ? raw.service_tier
+    : raw.serviceTier;
   if (llmSettingId) entry.llm_setting_id = llmSettingId;
   if (modelAlias) entry.model_alias = modelAlias;
   if (agentType) entry.agent_type = agentType;
