@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
+import * as path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import type { AgentEvent, AgentRunContext, DagToolDefinition } from "../agent/types.js";
 import { WORKER_RUNTIME_VERSION } from "../runtime-version.js";
@@ -839,7 +840,7 @@ describe("CodexAppServerAdapter", () => {
     expect(reqs2[1].params).toMatchObject({
       baseInstructions: null,
       developerInstructions: "You are a helpful assistant.",
-      cwd: "/test/workspace",
+      cwd: path.resolve("/test/workspace"),
       model: "gpt-4.1",
       approvalPolicy: "never",
       sandbox: "workspace-write",
