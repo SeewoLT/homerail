@@ -9,6 +9,7 @@ export type DAGEventType =
   | "dag:node_correction_requested"
   | "dag:node_auto_handoff"
   | "dag:node_dispatch_retry"
+  | "dag:node_session_reset"
   | "dag:checkpoint_resume"
   | "dag:stale_session_ignored"
   | "dag:stale_lease_ignored"
@@ -86,6 +87,7 @@ export const DAG_EVENT_TYPES: DAGEventType[] = [
   "dag:node_correction_requested",
   "dag:node_auto_handoff",
   "dag:node_dispatch_retry",
+  "dag:node_session_reset",
   "dag:checkpoint_resume",
   "dag:stale_session_ignored",
   "dag:stale_lease_ignored",

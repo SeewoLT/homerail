@@ -29,6 +29,8 @@ import {
   type ResumeWaitingRunRequest,
 } from "../runtime/active-runs.js";
 import type { DagApprovalRecord } from "../persistence/dag-runtime-primitives.js";
+import type { DagRunInputBindingRequest } from "homerail-protocol";
+import { resolveDagRunInputBindings } from "../persistence/run-input-artifacts.js";
 import type { InjectResult, CancelAllResult, CheckpointResumeRequest } from "../runtime/active-runs.js";
 import { emit } from "../events/bus.js";
 import {
@@ -59,6 +61,8 @@ export interface CreateRunRequest {
   expectedWorkflowRevision?: number;
   expectedCanonicalHash?: string;
   expectedProfileUpdatedAt?: string;
+  inputScope?: string;
+  inputArtifacts?: DagRunInputBindingRequest[];
 }
 
 export interface CreateRunResponse {
@@ -320,6 +324,9 @@ export class ChangeOrchestrator {
     assertProviderPolicy(dagWithRuntime);
 
     const runId = request.runId ?? _generateRunId();
+    const inputArtifacts = request.inputArtifacts && request.inputArtifacts.length > 0
+      ? resolveDagRunInputBindings(request.inputScope ?? "", request.inputArtifacts)
+      : undefined;
     const workflowId = dagWithRuntime.meta.workflow_id?.trim();
     const reservation = workflowId
       ? reserveWorkflowRun({
@@ -331,7 +338,7 @@ export class ChangeOrchestrator {
       : { reserved: false };
     const run = (() => {
       try {
-        return this.graphExecutor.createRun(runId, dagWithRuntime, request.prompt);
+        return this.graphExecutor.createRun(runId, dagWithRuntime, request.prompt, inputArtifacts);
       } finally {
         if (reservation.reserved) {
           try {

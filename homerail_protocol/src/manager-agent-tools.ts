@@ -92,6 +92,7 @@ export const MANAGER_AGENT_COMMON_TOOL_NAMES = [
   "create_change",
   "run_pr_review",
   "run_pr_closeout",
+  "stage_run_input",
   "create_and_run",
   "start_supervised_dag",
   "list_dag_actors",
@@ -987,6 +988,21 @@ export const MANAGER_AGENT_TOOL_SPECS: Record<ManagerAgentToolName, AgentToolDef
       additionalProperties: false,
     },
   },
+  stage_run_input: {
+    name: "stage_run_input",
+    description: "Stage an immutable, content-addressed local task document or structured input before starting a DAG. The returned artifact_id must be bound through create_and_run input_artifacts.",
+    input_schema: {
+      type: "object",
+      properties: {
+        scope_id: { type: "string", minLength: 1, maxLength: 128 },
+        name: { type: "string", minLength: 1, maxLength: 128 },
+        media_type: { type: "string", enum: ["text/markdown", "text/plain", "application/json"] },
+        content: { type: "string", minLength: 1, maxLength: 1048576 },
+      },
+      required: ["name", "media_type", "content"],
+      additionalProperties: false,
+    },
+  },
   create_and_run: {
     name: "create_and_run",
     description: "Create and immediately invoke a DAG run from a DB workflow_id or repo-local YAML path.",
@@ -999,6 +1015,22 @@ export const MANAGER_AGENT_TOOL_SPECS: Record<ManagerAgentToolName, AgentToolDef
         profile: { type: "string" },
         prompt: { type: "string" },
         runId: { type: "string" },
+        input_scope: { type: "string", minLength: 1, maxLength: 128 },
+        input_artifacts: {
+          type: "array",
+          minItems: 1,
+          maxItems: 16,
+          items: {
+            type: "object",
+            properties: {
+              artifact_id: { type: "string" },
+              logical_name: { type: "string" },
+              mount_path: { type: "string" },
+            },
+            required: ["artifact_id", "logical_name", "mount_path"],
+            additionalProperties: false,
+          },
+        },
       },
       anyOf: [
         { required: ["workflow_id"] },
@@ -1020,6 +1052,22 @@ export const MANAGER_AGENT_TOOL_SPECS: Record<ManagerAgentToolName, AgentToolDef
         profile: { type: "string" },
         prompt: { type: "string" },
         runId: { type: "string" },
+        input_scope: { type: "string", minLength: 1, maxLength: 128 },
+        input_artifacts: {
+          type: "array",
+          minItems: 1,
+          maxItems: 16,
+          items: {
+            type: "object",
+            properties: {
+              artifact_id: { type: "string" },
+              logical_name: { type: "string" },
+              mount_path: { type: "string" },
+            },
+            required: ["artifact_id", "logical_name", "mount_path"],
+            additionalProperties: false,
+          },
+        },
       },
       anyOf: [
         { required: ["workflow_id"] },

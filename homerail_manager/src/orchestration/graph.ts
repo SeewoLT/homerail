@@ -104,6 +104,11 @@ export interface DAGGatewayConfig {
   item_field?: string;
   context_field?: string;
   worker_agent?: string;
+  worker_policy?: Record<string, unknown>;
+  workspace_strategy?: "shared" | "isolated_git_worktree";
+  workspace_root?: string;
+  repository_path?: string;
+  revision_field?: string;
   max_parallelism?: number;
   completion?: "all" | "any" | "n_of_m" | string;
   result_contract?: string;

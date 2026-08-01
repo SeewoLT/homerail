@@ -524,6 +524,24 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       if (node.config.max_parallelism > node.config.max_items) {
         add(`${nodePath}/config/max_parallelism`, "DAG_SEMANTIC_INVALID_PARALLELISM", "max_parallelism cannot exceed max_items");
       }
+      const workerPolicy = node.config.worker_policy;
+      if (workerPolicy?.allowed_dag_tools !== undefined && !workerPolicy.allowed_dag_tools.includes("handoff")) {
+        add(
+          `${nodePath}/config/worker_policy/allowed_dag_tools`,
+          "DAG_SEMANTIC_HANDOFF_TOOL_REQUIRED",
+          "fanout worker_policy must allow the handoff DAG tool",
+        );
+      }
+      if (
+        (workerPolicy?.credentials ?? []).some((binding) => binding.inject.mode === "manager_broker")
+        && !workerPolicy?.allowed_dag_tools?.includes("credential_broker_call")
+      ) {
+        add(
+          `${nodePath}/config/worker_policy/allowed_dag_tools`,
+          "DAG_SEMANTIC_CREDENTIAL_BROKER_TOOL_REQUIRED",
+          "fanout workers with manager_broker credentials must allow credential_broker_call",
+        );
+      }
     }
     if (node.kind === "await_command") {
       for (let index = 0; index < (node.config.target_actors ?? []).length; index++) {
@@ -758,6 +776,7 @@ function canonicalNode(id: string, node: WorkflowSpecV1Node): CanonicalNode {
         ? { allowed_dag_tools: [...node.allowed_dag_tools].sort() }
         : {}),
       ...(node.credentials !== undefined ? { credentials: node.credentials } : {}),
+      ...(node.session_scope !== undefined ? { session_scope: node.session_scope } : {}),
     };
     return {
       ...base,
@@ -1438,6 +1457,12 @@ function authoringNode(node: CanonicalNode, canonical: CanonicalWorkflowIR): Rec
         : {}),
       ...(Array.isArray(node.config?.allowed_dag_tools)
         ? { allowed_dag_tools: node.config.allowed_dag_tools }
+        : {}),
+      ...(typeof node.config?.session_scope === "string"
+        ? { session_scope: node.config.session_scope }
+        : {}),
+      ...(Array.isArray(node.config?.credentials)
+        ? { credentials: node.config.credentials }
         : {}),
     };
   }

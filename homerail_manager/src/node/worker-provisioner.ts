@@ -12,6 +12,7 @@ import {
   sendWorkerRemoveRequest,
   type LifecycleResult,
 } from "./lifecycle-request.js";
+import type { DagWorkspaceInputProjection } from "homerail-protocol";
 
 /* -------------------------------------------------------------------------- */
 /*  Public interfaces                                                         */
@@ -21,6 +22,7 @@ export interface ProvisionerOptions {
   image?: string;
   workspace?: Record<string, unknown>;
   workspaceReadOnly?: boolean;
+  workspaceInputs?: DagWorkspaceInputProjection[];
   env?: Record<string, string>;
   labels?: Record<string, string>;
   extraHosts?: string[];
@@ -38,6 +40,7 @@ export interface ProvisionerOptions {
       image?: string;
       workspace?: Record<string, unknown>;
       workspaceReadOnly?: boolean;
+      workspaceInputs?: DagWorkspaceInputProjection[];
       env?: Record<string, string>;
       labels?: Record<string, string>;
       extraHosts?: string[];
@@ -133,6 +136,7 @@ export async function provisionWorkerContainer(
     image: options?.image,
     workspace: options?.workspace,
     workspaceReadOnly: options?.workspaceReadOnly,
+    workspaceInputs: options?.workspaceInputs,
     env: options?.env,
     labels: options?.labels,
     extraHosts: options?.extraHosts,

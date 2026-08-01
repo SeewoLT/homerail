@@ -8,11 +8,24 @@ import {
   type CredentialRecord,
 } from "../persistence/credentials.js";
 import { getActiveRun } from "./active-runs.js";
+import {
+  githubChecksSnapshot,
+  githubCommitFiles,
+  githubPullRequestSnapshot,
+} from "./github-pr-broker.js";
 
 export interface CredentialBrokerContext {
   credential: CredentialRecord;
   secret: Readonly<Record<string, string>>;
   input: Readonly<Record<string, unknown>>;
+  transport?: Readonly<{
+    run_id: string;
+    node_id: string;
+    session_id: string;
+    round_id?: string;
+    actor_id?: string;
+    generation?: number;
+  }>;
 }
 
 export type CredentialBrokerHandler = (
@@ -156,6 +169,14 @@ export async function executeCredentialBrokerCall(
       credential: materialized.record,
       secret: materialized.secret,
       input: request.input,
+      transport: {
+        run_id: request.run_id,
+        node_id: request.node_id,
+        session_id: request.session_id,
+        ...(request.round_id ? { round_id: request.round_id } : {}),
+        ...(request.actor_id ? { actor_id: request.actor_id } : {}),
+        ...(request.generation === undefined ? {} : { generation: request.generation }),
+      },
     });
     return { request_id: request.request_id, ok: true, result };
   } catch (error) {
@@ -219,3 +240,7 @@ registerCredentialBroker("lark_bot", "bot_info", async ({ credential, secret }) 
     activate_status: infoBody.bot.activate_status ?? 0,
   };
 });
+
+registerCredentialBroker("github_pr", "pull_request_snapshot", githubPullRequestSnapshot);
+registerCredentialBroker("github_pr", "checks_snapshot", githubChecksSnapshot);
+registerCredentialBroker("github_pr", "commit_files", githubCommitFiles);

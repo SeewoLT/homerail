@@ -157,9 +157,7 @@ const CredentialBinding = Type.Object({
   ]),
 }, { additionalProperties: false });
 
-const AgentNode = Type.Object({
-  kind: Type.Literal("agent"),
-  agent: Identifier,
+const AgentRuntimeFields = {
   advisors: Type.Optional(Type.Array(AdvisorBinding, { uniqueItems: true, maxItems: 16 })),
   workspace_access: Type.Optional(WorkspaceAccess),
   allowed_builtin_tools: Type.Optional(Type.Array(AgentBuiltinToolName, {
@@ -181,6 +179,18 @@ const AgentNode = Type.Object({
     maxItems: 16,
     description: "Credential references and turn-scoped injection policy; secret values are never valid WorkflowSpec fields.",
   })),
+  session_scope: Type.Optional(Type.Union([
+    Type.Literal("node"),
+    Type.Literal("dispatch"),
+  ], {
+    description: "node resumes one provider session; dispatch creates a fresh provider context for every dispatch.",
+  })),
+};
+
+const AgentNode = Type.Object({
+  kind: Type.Literal("agent"),
+  agent: Identifier,
+  ...AgentRuntimeFields,
   ...NodeBase,
 }, { additionalProperties: false });
 
@@ -270,6 +280,14 @@ const FanoutNode = Type.Object({
     item_field: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
     context_field: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
     worker_agent: Identifier,
+    worker_policy: Type.Optional(Type.Object(AgentRuntimeFields, { additionalProperties: false })),
+    workspace_strategy: Type.Optional(Type.Union([
+      Type.Literal("shared"),
+      Type.Literal("isolated_git_worktree"),
+    ])),
+    workspace_root: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+    repository_path: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+    revision_field: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
     max_items: Type.Integer({ minimum: 1, maximum: 256 }),
     max_parallelism: Type.Integer({ minimum: 1, maximum: 256 }),
     completion: Type.Union([Type.Literal("all"), Type.Literal("any"), Type.Literal("n_of_m")]),

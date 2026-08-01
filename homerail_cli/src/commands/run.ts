@@ -2,9 +2,60 @@ import type { Command } from "commander";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getClient } from "../index.js";
-import type { BaseResponse } from "../client.js";
+import type { BaseResponse, HomeRailClient } from "../client.js";
 import { parseSettingIdOption } from "../command-options.js";
 import { orchestrationsDir, resolveTemplatePath } from "./templates.js";
+
+function collectInputFile(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+export async function stageRunInputFiles(
+  client: HomeRailClient,
+  scopeId: string | undefined,
+  specifications: string[],
+): Promise<Array<{ artifact_id: string; logical_name: string; mount_path: string }>> {
+  if (specifications.length === 0) return [];
+  const scope = scopeId?.trim();
+  if (!scope) throw new Error("--input-scope is required with --input-file");
+  if (specifications.length > 16) throw new Error("at most 16 --input-file values are allowed");
+  const logicalNames = new Set<string>();
+  const mountPaths = new Set<string>();
+  const bindings = [];
+  for (const specification of specifications) {
+    const equals = specification.indexOf("=");
+    if (equals < 1 || equals === specification.length - 1) {
+      throw new Error("--input-file must use logical_name[:input/mount]=local_path");
+    }
+    const target = specification.slice(0, equals);
+    const localPath = path.resolve(specification.slice(equals + 1));
+    const colon = target.indexOf(":");
+    const logicalName = (colon < 0 ? target : target.slice(0, colon)).trim();
+    const mountPath = (colon < 0 ? `input/${path.basename(localPath)}` : target.slice(colon + 1)).trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(logicalName)) throw new Error(`invalid input logical name: ${logicalName}`);
+    if (!/^input\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(mountPath)) throw new Error(`invalid input mount path: ${mountPath}`);
+    if (logicalNames.has(logicalName) || mountPaths.has(mountPath)) throw new Error("input logical names and mount paths must be unique");
+    logicalNames.add(logicalName);
+    mountPaths.add(mountPath);
+    const stat = fs.statSync(localPath);
+    if (!stat.isFile() || stat.size < 1 || stat.size > 1024 * 1024) throw new Error(`input file must contain 1 byte to 1 MiB: ${localPath}`);
+    const bytes = fs.readFileSync(localPath);
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const extension = path.extname(localPath).toLowerCase();
+    const mediaType = extension === ".json" ? "application/json" : extension === ".md" ? "text/markdown" : "text/plain";
+    const response = await client.post<BaseResponse>("/api/run-inputs", {
+      scope_id: scope,
+      name: path.basename(localPath),
+      media_type: mediaType,
+      content,
+    });
+    const data = response.data as { artifact?: { artifact_id?: unknown } } | undefined;
+    const artifactId = data?.artifact?.artifact_id;
+    if (typeof artifactId !== "string" || !artifactId) throw new Error(`Manager did not return an artifact id for ${localPath}`);
+    bindings.push({ artifact_id: artifactId, logical_name: logicalName, mount_path: mountPath });
+  }
+  return bindings;
+}
 
 export function registerRunCommand(program: Command): void {
   program
@@ -16,6 +67,13 @@ export function registerRunCommand(program: Command): void {
     .option("--sync", "Sync the template to the Manager database before running it")
     .option("--profile <profile>", "Runtime profile id, or a profile YAML file to sync before running")
     .option("--setting-id <id>", "Database LLM setting id for this DAG run", parseSettingIdOption)
+    .option("--input-scope <scope>", "Scope for immutable run input artifacts")
+    .option(
+      "--input-file <binding>",
+      "Stage logical_name[:input/mount]=local_path as an immutable read-only run input",
+      collectInputFile,
+      [],
+    )
     .action(
       async (
         template: string | undefined,
@@ -26,6 +84,8 @@ export function registerRunCommand(program: Command): void {
           sync?: boolean;
           profile?: string;
           settingId?: string;
+          inputScope?: string;
+          inputFile: string[];
         },
       ) => {
         const globalOpts = program.opts() as {
@@ -96,6 +156,11 @@ export function registerRunCommand(program: Command): void {
           }
           if (opts.settingId) {
             payload.llm_setting_id = opts.settingId;
+          }
+          const inputArtifacts = await stageRunInputFiles(client, opts.inputScope, opts.inputFile);
+          if (inputArtifacts.length > 0) {
+            payload.input_scope = opts.inputScope!.trim();
+            payload.input_artifacts = inputArtifacts;
           }
           const resp = await client.post<BaseResponse>(
             "/api/runs/create-and-run",

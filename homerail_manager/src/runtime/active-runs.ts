@@ -47,6 +47,7 @@ import {
   type DagAgentToolName,
   type DagWorkspaceAccess,
   type DagCredentialProjection,
+  type DagRunInputBinding,
 } from "homerail-protocol";
 import { resolveAgentRuntimeConfig } from "./agent-runtime-resolver.js";
 import {
@@ -88,6 +89,12 @@ import { getDagActivitySequenceCursor } from "../persistence/dag-activity-journa
 import { getDagActorSurfaceView } from "../persistence/dag-actor-surface-patches.js";
 import { getDb } from "../persistence/db.js";
 import { getCredential, materializeCredential } from "../persistence/credentials.js";
+import {
+  bindDagRunInputs,
+  dagRunInputPath,
+  materializeDagRunInputs,
+  verifyDagRunInputs,
+} from "../persistence/run-input-artifacts.js";
 import {
   createInitialDagRunRound,
   getCurrentDagRunRound,
@@ -231,6 +238,8 @@ export interface ActiveRun {
   contracts?: Record<string, unknown>;
   artifacts?: DAGArtifactDeclaration[];
   runInputTargets?: Array<{ node: string; port: string; contract?: string }>;
+  inputArtifacts?: DagRunInputBinding[];
+  brokerState: Record<string, unknown>;
   initialPrompt?: string;
   nodeCount?: number;
   agents?: Record<string, DAGAgentConfig>;
@@ -342,6 +351,7 @@ export interface DAGRunCounters {
   dispatch_retries: Record<string, number>;
   gateway_iterations: Record<string, number>;
   gateway_results: Record<string, unknown[]>;
+  fanout_invocations: Record<string, number>;
   abort_reason?: string;
 }
 
@@ -360,6 +370,7 @@ export interface AppendRunNodeResult {
 
 export interface CreateActiveRunOptions {
   initialPrompt?: string;
+  inputArtifacts?: DagRunInputBinding[];
 }
 
 const store = new Map<string, ActiveRun>();
@@ -416,6 +427,7 @@ function _initialCounters(): DAGRunCounters {
     dispatch_retries: {},
     gateway_iterations: {},
     gateway_results: {},
+    fanout_invocations: {},
   };
 }
 
@@ -433,6 +445,7 @@ function _restoreCounters(counters: DAGRunCounters | undefined): DAGRunCounters 
     dispatch_retries: { ...(counters.dispatch_retries ?? {}) },
     gateway_iterations: { ...(counters.gateway_iterations ?? {}) },
     gateway_results: { ...(counters.gateway_results ?? {}) },
+    fanout_invocations: { ...(counters.fanout_invocations ?? {}) },
   };
 }
 
@@ -642,6 +655,29 @@ function _ensureNodeSession(run: ActiveRun, nodeId: string): NodeSessionState {
   return _persistNodeSession(run, nodeId, state);
 }
 
+function _nodeSessionScope(node: DAGGraphNode | undefined): "node" | "dispatch" {
+  return _agentRuntimeConfig(node ?? {} as DAGGraphNode).session_scope === "dispatch" ? "dispatch" : "node";
+}
+
+function _prepareNodeSessionForDispatch(run: ActiveRun, node: DAGGraphNode): NodeSessionState {
+  const current = _ensureNodeSession(run, node.node_id);
+  if (_nodeSessionScope(node) !== "dispatch") return current;
+  if (!new Set(["completed", "failed", "cancelled"]).has(current.status)) return current;
+  const fresh = _persistNodeSession(run, node.node_id, {
+    sessionId: _newSessionId(run.runId, node.node_id),
+    attempt: current.attempt + 1,
+    status: "active",
+  });
+  emit("dag:node_session_reset", {
+    runId: run.runId,
+    nodeId: node.node_id,
+    previousSessionId: current.sessionId,
+    sessionId: fresh.sessionId,
+    attempt: fresh.attempt,
+  });
+  return fresh;
+}
+
 function _markNodeSessionStatus(run: ActiveRun, nodeId: string, status: string): void {
   const current = run.nodeSessions.get(nodeId);
   if (!current) return;
@@ -764,6 +800,14 @@ export function createActiveRun(
   });
   const dagRun = createDAGRun(parsedDAG, runId);
   const createdAt = Date.now();
+  const inputArtifacts = options.inputArtifacts?.map((binding) => ({
+    ...structuredClone(binding),
+    run_id: runId,
+    bound_at: createdAt,
+  }));
+  if (inputArtifacts && inputArtifacts.length > 0) {
+    materializeDagRunInputs(runId, inputArtifacts);
+  }
   seedInitialPrompt(
     dagRun,
     options.initialPrompt,
@@ -785,6 +829,8 @@ export function createActiveRun(
     runInputTargets: parsedDAG.meta.run_input_targets
       ? parsedDAG.meta.run_input_targets.map((target) => ({ ...target }))
       : undefined,
+    inputArtifacts,
+    brokerState: {},
     initialPrompt: options.initialPrompt,
     nodeCount: parsedDAG.graph.nodes.length,
     agents: parsedDAG.meta.agents
@@ -811,6 +857,7 @@ export function createActiveRun(
   _assertLogicalActorIdentities(run.dagRun.graph.nodes);
   dbTransaction(() => {
     writeRunMetadata(runId, serializeRunMetadata(run));
+    if (inputArtifacts && inputArtifacts.length > 0) bindDagRunInputs(runId, inputArtifacts);
     pinDagRunSkillContexts({
       run_id: runId,
       contexts: skillContexts,
@@ -1084,6 +1131,16 @@ export function restoreActiveRun(
     return { status: "skipped", reason: "run already active in this process" };
   }
 
+  const verifiedInputArtifacts = verifyDagRunInputs(metadata.runId);
+  if ((metadata.inputArtifacts?.length ?? 0) !== verifiedInputArtifacts.length) {
+    throw new Error(`persisted run input provenance does not match bound inputs for ${metadata.runId}`);
+  }
+  if (metadata.inputArtifacts && !isDeepStrictEqual(
+    metadata.inputArtifacts.map((entry) => ({ ...entry })).sort((left, right) => left.logical_name.localeCompare(right.logical_name)),
+    verifiedInputArtifacts.map((entry) => ({ ...entry })).sort((left, right) => left.logical_name.localeCompare(right.logical_name)),
+  )) {
+    throw new Error(`persisted run input provenance changed for ${metadata.runId}`);
+  }
   const { dagRun, nodes } = _rebuildDagRunFromPersisted(metadata, metadata.graph);
   if (!metadata.dagRuntimeState) {
     seedInitialPrompt(dagRun, metadata.initialPrompt, metadata.runInputTargets, metadata.contracts);
@@ -1130,6 +1187,8 @@ export function restoreActiveRun(
     runInputTargets: metadata.runInputTargets
       ? metadata.runInputTargets.map((target) => ({ ...target }))
       : undefined,
+    inputArtifacts: verifiedInputArtifacts.length > 0 ? verifiedInputArtifacts : undefined,
+    brokerState: metadata.brokerState ? structuredClone(metadata.brokerState) : {},
     initialPrompt: metadata.initialPrompt,
     nodeCount: metadata.nodeCount,
     agents: metadata.agents
@@ -1250,6 +1309,24 @@ export function dispatchRecoveredRuns(dispatcher: DAGDispatcher): number {
 
 export function getActiveRun(runId: string): ActiveRun | undefined {
   return store.get(runId);
+}
+
+export function getActiveRunBrokerState(runId: string, key: string): unknown {
+  const run = store.get(runId);
+  if (!run || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key)) return undefined;
+  return run.brokerState[key] === undefined ? undefined : structuredClone(run.brokerState[key]);
+}
+
+export function setActiveRunBrokerState(runId: string, key: string, value: unknown): void {
+  const run = store.get(runId);
+  if (!run || run.status !== "active") throw new Error("Broker state run is not active");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key)) throw new Error("Broker state key is invalid");
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined || Buffer.byteLength(encoded, "utf8") > 64 * 1024) {
+    throw new Error("Broker state exceeds 64 KiB");
+  }
+  run.brokerState[key] = structuredClone(value);
+  writeRunMetadata(runId, serializeRunMetadata(run));
 }
 
 export function getCurrentNodeSession(runId: string, nodeId: string): NodeSessionState | undefined {
@@ -1899,6 +1976,8 @@ export function requestNodeCorrection(
   resetSkippedSuccessDescendants(run.dagRun, nodeId);
   run.dagRun.nodeStates.set(nodeId, "READY");
   run.dagRun.handoffedNodes.delete(nodeId);
+  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  if (_nodeSessionScope(node) === "dispatch") _markNodeSessionStatus(run, nodeId, "completed");
   writeRunMetadata(runId, serializeRunMetadata(run));
   _emitNodeStateChanges(run, before);
   emit("dag:node_correction_requested", { runId, nodeId, reason, attempt, maxAttempts });
@@ -3587,6 +3666,7 @@ function _commandAllowlist(): Set<string> {
 }
 
 const RUN_WORKSPACE_CWD = "$run_workspace";
+const RUN_INPUT_ARGUMENT_PREFIX = "$run_input/";
 
 function _pathIsWithin(root: string, target: string): boolean {
   const relative = path.relative(root, target);
@@ -3650,6 +3730,28 @@ function _commandGatewayResult(run: ActiveRun, node: DAGGraphNode): { port: stri
   if (!Array.isArray(command) || command.length === 0 || command.some((part) => typeof part !== "string")) {
     return { port: config?.failure_port || "failed", payload: { ok: false, error: "invalid command configuration" } };
   }
+  if (command[0].startsWith(RUN_INPUT_ARGUMENT_PREFIX)) {
+    return {
+      port: config?.failure_port || "failed",
+      payload: { ok: false, error: "$run_input cannot be used as a command executable" },
+    };
+  }
+  let resolvedCommand: string[];
+  try {
+    resolvedCommand = command.map((part, index) => {
+      if (index === 0 || !part.startsWith(RUN_INPUT_ARGUMENT_PREFIX)) return part;
+      const logicalName = part.slice(RUN_INPUT_ARGUMENT_PREFIX.length);
+      if (!logicalName || logicalName.includes("/") || logicalName.includes("\\")) {
+        throw new Error("$run_input arguments must reference one logical input name");
+      }
+      return dagRunInputPath(run.runId, logicalName);
+    });
+  } catch (error) {
+    return {
+      port: config?.failure_port || "failed",
+      payload: { ok: false, error: error instanceof Error ? error.message : String(error) },
+    };
+  }
   if (config?.command_field && process.env.HOMERAIL_DAG_ALLOW_DYNAMIC_COMMANDS !== "true") {
     return {
       port: config?.failure_port || "failed",
@@ -3679,7 +3781,7 @@ function _commandGatewayResult(run: ActiveRun, node: DAGGraphNode): { port: stri
       : undefined;
   const captureLimit = Math.max(1, Math.floor(config?.capture_limit ?? 64_000));
   const startedAt = Date.now();
-  const result = spawnSync(command[0], command.slice(1), {
+  const result = spawnSync(resolvedCommand[0], resolvedCommand.slice(1), {
     cwd,
     encoding: "utf8",
     timeout: Math.max(100, Math.floor(config?.timeout_ms ?? 30_000)),
@@ -3966,6 +4068,7 @@ function _startAwaitCommand(run: ActiveRun, node: DAGGraphNode): boolean {
 }
 
 interface FanoutRuntimeState {
+  invocation: number;
   items: unknown[];
   context?: unknown;
   next_index: number;
@@ -3979,12 +4082,134 @@ function _fanoutState(node: DAGGraphNode): FanoutRuntimeState | undefined {
   return raw as unknown as FanoutRuntimeState;
 }
 
+function _fanoutSafeRelativePath(raw: unknown, fallback: string): string {
+  const value = typeof raw === "string" && raw.trim() ? raw.trim().replace(/\\/g, "/") : fallback;
+  const segments = value.split("/");
+  if (path.isAbsolute(value) || segments.some((segment) => !segment || segment === "." || segment === ".." || !/^[A-Za-z0-9._-]+$/.test(segment))) {
+    throw new Error(`fanout workspace path '${value}' is unsafe`);
+  }
+  return segments.join("/");
+}
+
+function _fanoutChildWorkspacePath(node: DAGGraphNode, state: FanoutRuntimeState, index: number): string {
+  const root = _fanoutSafeRelativePath(node.gateway_config?.workspace_root, "workers");
+  return `${root}/${node.node_id}/inv_${String(state.invocation).padStart(4, "0")}/item_${String(index + 1).padStart(4, "0")}`;
+}
+
+function _fanoutWorkerRuntime(
+  node: DAGGraphNode,
+  state: FanoutRuntimeState,
+  index: number,
+  childId: string,
+  workspacePath?: string,
+): Record<string, unknown> {
+  const configured = node.gateway_config?.worker_policy;
+  const policy = configured && typeof configured === "object" && !Array.isArray(configured)
+    ? structuredClone(configured as Record<string, unknown>)
+    : {};
+  const replacements: Record<string, string> = {
+    "{{fanout_parent}}": node.node_id,
+    "{{fanout_invocation}}": String(state.invocation),
+    "{{fanout_index}}": String(index + 1),
+    "{{fanout_child}}": childId,
+  };
+  const replacePath = (value: unknown): unknown => {
+    if (typeof value !== "string") return value;
+    return Object.entries(replacements).reduce((result, [token, replacement]) => result.split(token).join(replacement), value);
+  };
+  const rawAccess = policy.workspace_access;
+  const access = rawAccess && typeof rawAccess === "object" && !Array.isArray(rawAccess)
+    ? structuredClone(rawAccess as Record<string, unknown>)
+    : {};
+  if (workspacePath) {
+    access.writable_paths = [workspacePath];
+  } else {
+    access.writable_paths = Array.isArray(access.writable_paths) ? access.writable_paths.map(replacePath) : [];
+  }
+  access.readonly_paths = Array.from(new Set([
+    "input",
+    ...(Array.isArray(access.readonly_paths) ? access.readonly_paths.map(replacePath).filter((entry): entry is string => typeof entry === "string") : []),
+  ])).sort();
+  policy.workspace_access = access;
+  policy.allowed_builtin_tools = Array.isArray(policy.allowed_builtin_tools) ? policy.allowed_builtin_tools : [];
+  policy.allowed_dag_tools = Array.isArray(policy.allowed_dag_tools) ? policy.allowed_dag_tools : ["handoff"];
+  policy.credentials = Array.isArray(policy.credentials) ? policy.credentials : [];
+  return policy;
+}
+
+function _prepareFanoutGitWorktree(
+  run: ActiveRun,
+  node: DAGGraphNode,
+  state: FanoutRuntimeState,
+  index: number,
+): string | undefined {
+  if (node.gateway_config?.workspace_strategy !== "isolated_git_worktree") return undefined;
+  const workspacePath = _fanoutChildWorkspacePath(node, state, index);
+  const resolved = _commandGatewayCwd(run, RUN_WORKSPACE_CWD);
+  if ("error" in resolved) throw new Error(resolved.error);
+  const runWorkspace = resolved.cwd;
+  const repositoryPath = node.gateway_config?.repository_path === "."
+    ? "."
+    : _fanoutSafeRelativePath(node.gateway_config?.repository_path, "repo");
+  const repository = path.resolve(runWorkspace, repositoryPath);
+  const target = path.resolve(runWorkspace, workspacePath);
+  if (!_pathIsWithin(runWorkspace, repository) || !_pathIsWithin(runWorkspace, target)) {
+    throw new Error("fanout git worktree path escaped the run workspace");
+  }
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const existing = spawnSync("git", ["-C", target, "rev-parse", "--is-inside-work-tree"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    shell: false,
+  });
+  if (existing.status === 0 && String(existing.stdout).trim() === "true") return workspacePath;
+  const selectedRevision = node.gateway_config?.revision_field
+    ? _fieldValue(state.context, node.gateway_config.revision_field)
+    : undefined;
+  const revision = typeof selectedRevision === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(selectedRevision)
+    ? selectedRevision.toLowerCase()
+    : "HEAD";
+  if (revision !== "HEAD") {
+    const local = spawnSync("git", ["-C", repository, "cat-file", "-e", `${revision}^{commit}`], {
+      encoding: "utf8",
+      timeout: 10_000,
+      shell: false,
+    });
+    if (local.status !== 0) {
+      const fetched = spawnSync("git", ["-C", repository, "fetch", "--no-tags", "origin", revision], {
+        encoding: "utf8",
+        timeout: 60_000,
+        maxBuffer: 256_000,
+        shell: false,
+      });
+      if (fetched.status !== 0 || fetched.error) {
+        const detail = String(fetched.stderr || fetched.error?.message || "unknown error").trim().slice(0, 1_000);
+        throw new Error(`fanout git revision fetch failed: ${detail}`);
+      }
+    }
+  }
+  const created = spawnSync("git", ["-C", repository, "worktree", "add", "--detach", target, revision], {
+    encoding: "utf8",
+    timeout: 60_000,
+    maxBuffer: 256_000,
+    shell: false,
+  });
+  if (created.status !== 0 || created.error) {
+    const detail = String(created.stderr || created.error?.message || "unknown error").trim().slice(0, 1_000);
+    throw new Error(`fanout git worktree creation failed: ${detail}`);
+  }
+  return workspacePath;
+}
+
 function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutRuntimeState): void {
   const config = node.gateway_config;
   const maxParallelism = Math.max(1, Math.floor(config?.max_parallelism ?? 1));
   while (state.active.length < maxParallelism && state.next_index < state.items.length) {
     const index = state.next_index++;
-    const childId = `${node.node_id}__item_${String(index + 1).padStart(4, "0")}`;
+    const childId = state.invocation === 1
+      ? `${node.node_id}__item_${String(index + 1).padStart(4, "0")}`
+      : `${node.node_id}__inv_${String(state.invocation).padStart(4, "0")}__item_${String(index + 1).padStart(4, "0")}`;
+    const workspacePath = _prepareFanoutGitWorktree(run, node, state, index);
     const child: DAGGraphNode = {
       node_id: childId,
       name: `${node.name} item ${index + 1}`,
@@ -3997,7 +4222,8 @@ function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutR
         failed: { to: "", condition: "on_failure" },
       },
       extra: {
-        dynamic_fanout: { parent_node: node.node_id, index },
+        dynamic_fanout: { parent_node: node.node_id, index, invocation: state.invocation },
+        agent_runtime: _fanoutWorkerRuntime(node, state, index, childId, workspacePath),
         ...(config?.result_contract ? {
           workflow_spec_v1: {
             input_contracts: {},
@@ -4013,6 +4239,7 @@ function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutR
       index,
       total: state.items.length,
       ...(state.context === undefined ? {} : { context: state.context }),
+      ...(workspacePath === undefined ? {} : { workspace_path: workspacePath }),
     }]);
     state.active.push(childId);
   }
@@ -4041,10 +4268,17 @@ function _startFanout(run: ActiveRun, node: DAGGraphNode): boolean {
       ...(context === undefined ? {} : { context }),
     }));
   }
-  const state: FanoutRuntimeState = { items, context, next_index: 0, active: [], results: [] };
+  const invocation = (run.counters.fanout_invocations[node.node_id] ?? 0) + 1;
+  run.counters.fanout_invocations[node.node_id] = invocation;
+  const state: FanoutRuntimeState = { invocation, items, context, next_index: 0, active: [], results: [] };
   node.extra = { ...(node.extra ?? {}), fanout_runtime: state as unknown as Record<string, unknown> };
   run.dagRun.nodeStates.set(node.node_id, "RUNNING");
-  _spawnFanoutChildren(run, node, state);
+  try {
+    _spawnFanoutChildren(run, node, state);
+  } catch (error) {
+    abortActiveRun(run.runId, error instanceof Error ? error.message : String(error), node.node_id);
+    return false;
+  }
   emit("dag:fanout_started", { runId: run.runId, nodeId: node.node_id, total: items.length, maxParallelism: config?.max_parallelism ?? 1 });
   return true;
 }
@@ -4070,9 +4304,10 @@ function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, c
   const info = dynamic as Record<string, unknown>;
   const parentId = typeof info.parent_node === "string" ? info.parent_node : "";
   const index = typeof info.index === "number" ? info.index : -1;
+  const invocation = typeof info.invocation === "number" ? info.invocation : 1;
   const parent = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === parentId);
   const state = parent ? _fanoutState(parent) : undefined;
-  if (!parent || !state || index < 0 || state.results.some((result) => result.node_id === child.node_id)) return;
+  if (!parent || !state || invocation !== state.invocation || index < 0 || state.results.some((result) => result.node_id === child.node_id)) return;
   state.active = state.active.filter((id) => id !== child.node_id);
   const config = parent.gateway_config;
   const selected = _fieldValue(content, config?.success_field);
@@ -4089,7 +4324,11 @@ function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, c
   const impossible = successes + (total - completed) < threshold;
   const finished = completion === "all" ? completed === total : passed || impossible || completed === total;
   if (!finished) {
-    _spawnFanoutChildren(run, parent, state);
+    try {
+      _spawnFanoutChildren(run, parent, state);
+    } catch (error) {
+      abortActiveRun(run.runId, error instanceof Error ? error.message : String(error), parent.node_id);
+    }
     return;
   }
   if (config?.cancel_remaining) {
@@ -4565,14 +4804,17 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
   const actorSurfaceView = getDagActorSurfaceView(run.runId, actorId);
   const correctionOnly = Array.isArray(inputs.correction) && inputs.correction.length > 0;
   const requestedCheckpointVersion = actor.checkpoint_ref?.match(/^portable:(\d+)$/)?.[1];
-  const actorCheckpointRecord = requestedCheckpointVersion
+  const freshDispatchContext = _nodeSessionScope(node) === "dispatch";
+  const actorCheckpointRecord = freshDispatchContext
+    ? undefined
+    : requestedCheckpointVersion
     ? getDagActorCheckpoint({
         run_id: run.runId,
         actor_id: actorId,
         checkpoint_version: Number(requestedCheckpointVersion),
       })
     : getLatestDagActorCheckpoint({ run_id: run.runId, actor_id: actorId });
-  if (requestedCheckpointVersion && !actorCheckpointRecord) {
+  if (!freshDispatchContext && requestedCheckpointVersion && !actorCheckpointRecord) {
     return { ok: false, reason: `portable checkpoint ${requestedCheckpointVersion} is unavailable for actor ${actorId}` };
   }
   const actorCheckpoint = actorCheckpointRecord?.checkpoint;
@@ -4689,6 +4931,8 @@ export function dispatchReadyNodes(
       continue;
     }
 
+    _prepareNodeSessionForDispatch(run, node);
+
     const built = _buildDispatchEnvelope(run, nodeId);
     if (!built.ok) {
       failActiveRun(runId, nodeId, built.reason);
@@ -4759,6 +5003,7 @@ export function markNodeDispatched(
   if (!node) return false;
 
   const before = _snapshotNodeStates(run);
+  _prepareNodeSessionForDispatch(run, node);
   startNode(run.dagRun, nodeId);
   const nodeSession = _ensureNodeSession(run, nodeId);
   _markNodeSessionStatus(run, nodeId, "running");
