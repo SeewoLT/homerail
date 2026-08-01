@@ -354,6 +354,10 @@ test("Windows candidate runs Node 24 CI before channel-specific signing and inst
     packageVerificationStep,
     /Get-AuthenticodeSignature -LiteralPath \$signedFile/,
   );
+  assert.ok(
+    packageVerificationStep.includes("Authenticode status for ${signedFile}:"),
+    "PowerShell variables followed by a colon must use delimited interpolation",
+  );
   assert.match(packageVerificationStep, /\$signature\.StatusMessage/);
   assert.match(packageVerificationStep, /if \(\$signature\.Status -ne 'NotSigned'\)/);
   assert.match(packageVerificationStep, /if \(\$signature\.Status -ne 'Valid'\)/);
