@@ -73,6 +73,12 @@ function expectedMetadata(channel) {
       macos: ["latest-mac.yml", "alpha-mac.yml", "beta-mac.yml"],
     };
   }
+  if (channel === "beta") {
+    return {
+      windows: ["beta.yml", "alpha.yml"],
+      macos: ["beta-mac.yml", "alpha-mac.yml"],
+    };
+  }
   return {
     windows: [`${channel}.yml`],
     macos: [`${channel}-mac.yml`],
@@ -160,7 +166,7 @@ function validateUpdateMetadata(candidateDir, channel, version) {
         );
       }
     }
-    if (channel === "latest") {
+    if (files.length > 1) {
       const canonicalHash = sha256(files[0]);
       for (const alias of files.slice(1)) {
         if (sha256(alias) !== canonicalHash) {

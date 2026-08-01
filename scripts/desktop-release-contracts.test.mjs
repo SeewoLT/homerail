@@ -307,6 +307,10 @@ test("candidate signs Beta on Windows and macOS while preserving the unsigned Al
   assert.equal((candidateWorkflow.match(/--config\.publish\.channel=/g) ?? []).length, 3);
   assert.match(candidateWorkflow, /verify:update-metadata/);
   assert.match(candidateWorkflow, /metadata_release_channel=stable/);
+  assert.match(candidateWorkflow, /elseif \(\$env:RELEASE_CHANNEL -eq 'beta'\)/);
+  assert.match(candidateWorkflow, /@\('beta\.yml', 'alpha\.yml'\)/);
+  assert.match(candidateWorkflow, /elif \[\[ "\$RELEASE_CHANNEL" == "beta" \]\]/);
+  assert.match(candidateWorkflow, /metadata_names=\("beta-mac\.yml" "alpha-mac\.yml"\)/);
   assert.match(candidateWorkflow, /'latest\.yml', 'alpha\.yml', 'beta\.yml'/);
   assert.match(candidateWorkflow, /"latest-mac\.yml" "alpha-mac\.yml" "beta-mac\.yml"/);
   assert.match(candidateWorkflow, /asset_name="\$\{asset#\.\/\}"/);
@@ -481,7 +485,7 @@ test("publish consumes a successful candidate without rebuilding it", () => {
     'JSON.parse(fs.readFileSync("candidate/release-manifest.json", "utf8"))',
   );
   const prereleaseGuard = candidateVerification.indexOf(
-    'if (!["alpha", "beta"].includes(manifest.channel))',
+    'if (manifest.channel !== "beta")',
   );
   const tagCheck = publishWorkflow.indexOf(
     "Refuse to replace an existing tag or release",
@@ -492,7 +496,7 @@ test("publish consumes a successful candidate without rebuilding it", () => {
   );
   assert.match(
     candidateVerification,
-    /only Alpha and Beta candidates may be published/,
+    /only Beta candidates may be published; Alpha is retired/,
   );
   for (const index of [
     manifestRead,
@@ -521,7 +525,9 @@ test("release docs preserve candidate, publish, update-test, and fix-forward bou
   assert.match(releaseDocs, /0\.1\.0-alpha\.2/);
   assert.match(releaseDocs, /Fix forward with `0\.1\.0-alpha\.3`/i);
   assert.match(releaseDocs, /Do not create the version tag\s+when merging code/);
-  assert.match(releaseDocs, /byte-identical Alpha and Beta compatibility metadata/);
+  assert.match(releaseDocs, /byte-identical Alpha and Beta compatibility\s+metadata/);
+  assert.match(releaseDocs, /Beta.*byte-identical.*Alpha.*compatibility\s+alias/is);
+  assert.match(releaseDocs, /Alpha publishing is retired/i);
   assert.match(releaseDocs, /complete public Node 24 CI suite/);
   assert.match(releaseDocs, /does not replace.*real Windows machine/s);
   assert.match(releaseDocs, /SmartScreen/);
@@ -927,6 +933,70 @@ test("candidate rejects a Windows artifact set without a blockmap", () => {
     assert.match(create.stderr, /windowsBlockmap/);
   } finally {
     fs.rmSync(candidateDir, { recursive: true, force: true });
+  }
+});
+
+test("Beta candidates require byte-identical Alpha compatibility aliases", () => {
+  const goodDir = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-beta-candidate-"));
+  const badDir = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-beta-candidate-bad-"));
+  const script = path.join(repoRoot, "scripts", "desktop-release", "release-candidate.mjs");
+  const metadata = "version: 0.1.0-beta.1\n";
+
+  const writeBetaFixture = (candidateDir, alphaMacMetadata) => {
+    writePlatformFixture(
+      candidateDir,
+      "windows",
+      {
+        "HomeRail Setup 0.1.0-beta.1.exe": "windows-installer",
+        "HomeRail Setup 0.1.0-beta.1.exe.blockmap": "windows-blockmap",
+        "beta.yml": metadata,
+        "alpha.yml": metadata,
+      },
+      "SHA256SUMS-windows.txt",
+    );
+    writePlatformFixture(
+      candidateDir,
+      "macos",
+      {
+        "HomeRail-0.1.0-beta.1-arm64.dmg": "mac-dmg",
+        "HomeRail-0.1.0-beta.1-arm64.zip": "mac-zip",
+        "beta-mac.yml": metadata,
+        "alpha-mac.yml": alphaMacMetadata,
+      },
+      "SHA256SUMS-macos.txt",
+    );
+  };
+  const createArgs = (candidateDir) => [
+    script,
+    "create",
+    "--candidate-dir",
+    candidateDir,
+    "--version",
+    "0.1.0-beta.1",
+    "--tag",
+    "v0.1.0-beta.1",
+    "--channel",
+    "beta",
+    "--source-commit",
+    "a".repeat(40),
+    "--desktop-commit",
+    "b".repeat(40),
+    "--run-id",
+    "12351",
+  ];
+
+  try {
+    writeBetaFixture(goodDir, metadata);
+    const good = spawnSync(process.execPath, createArgs(goodDir), { encoding: "utf8" });
+    assert.equal(good.status, 0, good.stderr);
+
+    writeBetaFixture(badDir, "version: 0.1.0-beta.1\nbridge: stale\n");
+    const bad = spawnSync(process.execPath, createArgs(badDir), { encoding: "utf8" });
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /must be byte-identical/);
+  } finally {
+    fs.rmSync(goodDir, { recursive: true, force: true });
+    fs.rmSync(badDir, { recursive: true, force: true });
   }
 });
 
