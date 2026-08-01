@@ -6,11 +6,19 @@
  * @version 0.1.0
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
+import {
+  CODEX_RESPONSES_PROTOCOL,
+  HOMERAIL_CODEX_MODEL_PROVIDER_ID,
+  buildCodexProviderModelCatalogFromBundled,
+  codexResponsesAppServerArgs,
+  codexResponsesProviderEnvironment,
+  resolveCodexResponsesProviderProfile,
+} from "homerail-protocol";
 import type { AgentClient, AgentEvent, AgentRunContext, DagToolDefinition } from "./types.js";
 import { sanitizedAgentChildEnv } from "./child-env.js";
 import { WORKER_RUNTIME_VERSION } from "../runtime-version.js";
@@ -19,6 +27,7 @@ const CLIENT_NAME = "homerail_codex_appserver";
 const CLIENT_TITLE = "HomeRail Codex AppServer Adapter";
 const DEFAULT_CODEX_BIN = "codex";
 const RESPONSE_TIMEOUT_MS = 60_000;
+const BUNDLED_CODEX_CATALOG_CACHE = new Map<string, string>();
 const SECRET_KEYS = [
   "apiKey", "api_key", "OPENAI_API_KEY",
   "Authorization", "auth_token", "secret",
@@ -56,6 +65,115 @@ interface CodexAssistantMessageState {
   phase?: CodexAssistantMessagePhase;
   deltas: string[];
 }
+
+function isInsideWorkspace(workspace: string, candidate: string): boolean {
+  const relative = path.relative(workspace, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/**
+ * Codex's Linux sandbox protects `<cwd>/.git` before running shell tools. A
+ * DAG workspace can be a container for one or more declared project roots,
+ * so using the container root as cwd fails when that root is mounted read-only
+ * and the actual checkout lives below it. Prefer a declared Git worktree while
+ * keeping the broader workspace as the policy/audit boundary.
+ */
+function resolveCodexWorkingDirectory(context: AgentRunContext): string {
+  const workspace = path.resolve(context.workspace ?? process.cwd());
+  if (fs.existsSync(path.join(workspace, ".git"))) return workspace;
+
+  const access = context.workspaceAccess;
+  const declaredRoots = [
+    ...(access?.writable_paths ?? []),
+    ...(access?.readonly_paths ?? []),
+  ];
+  for (const declaredRoot of declaredRoots) {
+    const candidate = path.resolve(workspace, declaredRoot);
+    if (!isInsideWorkspace(workspace, candidate)) continue;
+    if (fs.existsSync(path.join(candidate, ".git"))) return candidate;
+  }
+  return workspace;
+}
+
+function resolveCodexSandboxMode(context: AgentRunContext): "read-only" | "workspace-write" {
+  return context.workspaceAccess && context.workspaceAccess.writable_paths.length === 0
+    ? "read-only"
+    : "workspace-write";
+}
+
+function projectedSkillName(value: string, fallback: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[^A-Za-z0-9_.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return normalized || fallback;
+}
+
+function projectedSkillInstructions(content: string): string {
+  const normalized = content.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n")) return normalized.trim();
+  const end = normalized.indexOf("\n---\n", 4);
+  return end < 0 ? normalized.trim() : normalized.slice(end + 5).trim();
+}
+
+function prepareCodexSkillProjection(context: AgentRunContext, tempDir: string): { roots: string[]; skillCount: number } {
+  const projection = context.skillProjection;
+  if (!projection) return { roots: [], skillCount: 0 };
+  const skillsRoot = path.join(tempDir, "projected-skills");
+  fs.mkdirSync(skillsRoot, { recursive: true });
+  const names = new Set<string>();
+
+  for (const directory of projection.directories ?? []) {
+    const root = path.resolve(directory);
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const source = path.join(root, entry.name);
+      try {
+        if (!fs.statSync(path.join(source, "SKILL.md")).isFile()) continue;
+      } catch {
+        continue;
+      }
+      const name = projectedSkillName(entry.name, `skill-${names.size + 1}`);
+      if (names.has(name)) continue;
+      const destination = path.join(skillsRoot, name);
+      try {
+        fs.symlinkSync(source, destination, process.platform === "win32" ? "junction" : "dir");
+      } catch {
+        fs.cpSync(source, destination, { recursive: true, force: false, errorOnExist: true });
+      }
+      names.add(name);
+    }
+  }
+
+  for (const definition of projection.definitions ?? []) {
+    const baseName = projectedSkillName(definition.name || definition.id, `skill-${names.size + 1}`);
+    let name = baseName;
+    let suffix = 2;
+    while (names.has(name)) name = `${baseName.slice(0, 61)}-${suffix++}`;
+    const skillDir = path.join(skillsRoot, name);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), [
+      "---",
+      `name: ${JSON.stringify(name)}`,
+      `description: ${JSON.stringify((definition.description || `HomeRail Skill ${definition.id}`).slice(0, 1024))}`,
+      "---",
+      "",
+      projectedSkillInstructions(definition.content),
+      "",
+    ].join("\n"), { encoding: "utf8", mode: 0o600 });
+    names.add(name);
+  }
+  return { roots: [skillsRoot], skillCount: names.size };
+}
+
+export const _prepareCodexSkillProjectionForTest = prepareCodexSkillProjection;
 
 /** Spawn a process with stdin/stdout/stderr piped. */
 function spawnProcess(bin: string, args: string[], env: Record<string, string | undefined>): ChildProcess {
@@ -111,6 +229,8 @@ export class CodexAppServerAdapter implements AgentClient {
     context: AgentRunContext,
   ): AsyncIterable<AgentEvent> {
     const maxIterations = context.maxIterations ?? 10;
+    const workingDirectory = resolveCodexWorkingDirectory(context);
+    const sandboxMode = resolveCodexSandboxMode(context);
 
     // Build tool map for handler lookup
     const toolMap = new Map<string, DagToolDefinition>();
@@ -126,10 +246,22 @@ export class CodexAppServerAdapter implements AgentClient {
     }
 
     // Spawn app-server
+    let modelCatalogPath: string | undefined;
     try {
       this.tempDir = this.createTempDir();
+      modelCatalogPath = context.protocol === CODEX_RESPONSES_PROTOCOL
+        ? this.materializeProviderModelCatalog(context)
+        : undefined;
       const env = this.buildEnv(context);
-      this.process = spawnProcess(this.codexBin, ["app-server"], env);
+      const args = context.protocol === CODEX_RESPONSES_PROTOCOL
+        ? codexResponsesAppServerArgs({
+            providerName: context.provider,
+            baseUrl: context.baseUrl,
+            apiKey: context.apiKey,
+            modelCatalogPath,
+          })
+        : ["app-server"];
+      this.process = spawnProcess(this.codexBin, args, env);
       this.setupReadline();
     } catch (err) {
       yield { type: "error", message: `Failed to start codex app-server: ${err}` };
@@ -137,8 +269,16 @@ export class CodexAppServerAdapter implements AgentClient {
       return;
     }
 
+    let activeThreadId: string | undefined;
+    let activeTurnId: string | undefined;
     const abortHandler = context.abortSignal
-      ? () => this.sendNotification("cancel", {})
+      ? () => {
+          if (!activeThreadId || !activeTurnId) return;
+          void this.sendRequest("turn/interrupt", {
+            threadId: activeThreadId,
+            turnId: activeTurnId,
+          }).catch(() => {});
+        }
       : null;
     if (abortHandler && context.abortSignal) {
       context.abortSignal.addEventListener("abort", abortHandler, { once: true });
@@ -165,7 +305,12 @@ export class CodexAppServerAdapter implements AgentClient {
         codex_bin: this.codexBin,
         model: context.model,
         workspace: context.workspace ?? process.cwd(),
+        cwd: workingDirectory,
+        sandbox_mode: sandboxMode,
         tool_count: tools.length,
+        reasoning_effort: context.reasoningEffort ?? null,
+        service_tier: context.serviceTier ?? null,
+        provider_model_catalog: Boolean(modelCatalogPath),
       });
 
       // Initialize
@@ -182,17 +327,40 @@ export class CodexAppServerAdapter implements AgentClient {
       });
       yield this.debugEvent("appserver_initialized", this.redactSecrets(initResult));
 
+      const cwd = workingDirectory;
+      const skillProjection = prepareCodexSkillProjection(context, this.tempDir!);
+      if (skillProjection.roots.length > 0) {
+        await this.sendRequest("skills/extraRoots/set", { extraRoots: skillProjection.roots });
+        const skillList = await this.sendRequest("skills/list", { cwds: [cwd], forceReload: true });
+        const entries = Array.isArray(skillList.data) ? skillList.data as Array<Record<string, unknown>> : [];
+        const discoveredSkillCount = entries.reduce((total, entry) => (
+          total + (Array.isArray(entry.skills) ? entry.skills.length : 0)
+        ), 0);
+        yield this.debugEvent("native_skills_ready", {
+          projected_skill_count: skillProjection.skillCount,
+          discovered_skill_count: discoveredSkillCount,
+        });
+      }
+
       const dynamicTools = this.buildDynamicToolSpecs(tools);
       const threadResult = await this.sendRequest("thread/start", {
-        baseInstructions: context.systemPrompt ?? null,
-        developerInstructions: null,
-        cwd: context.workspace ?? process.cwd(),
+        // Preserve Codex's native harness instructions and supplement them
+        // with the HomeRail DAG contract.
+        baseInstructions: null,
+        developerInstructions: context.systemPrompt ?? null,
+        cwd,
         model: context.model,
-        modelProvider: context.provider || null,
+        modelProvider: context.protocol === CODEX_RESPONSES_PROTOCOL
+          ? HOMERAIL_CODEX_MODEL_PROVIDER_ID
+          : context.provider || null,
         approvalPolicy: "never",
-        sandbox: "danger-full-access",
+        sandbox: sandboxMode,
         ephemeral: true,
         dynamicTools,
+        serviceTier: context.serviceTier ?? null,
+        ...(context.reasoningEffort
+          ? { config: { model_reasoning_effort: context.reasoningEffort } }
+          : {}),
       });
       const threadId =
         (threadResult.thread_id as string | undefined) ??
@@ -200,6 +368,7 @@ export class CodexAppServerAdapter implements AgentClient {
       if (!threadId) {
         throw new Error("thread/start response did not include a thread id");
       }
+      activeThreadId = threadId;
       yield this.debugEvent("thread_created", { thread_id: threadId });
 
       // Execute turns with iteration guard
@@ -213,13 +382,16 @@ export class CodexAppServerAdapter implements AgentClient {
         const turnResult = await this.sendRequest("turn/start", {
           threadId,
           input: iteration === 1 ? [{ type: "text", text: prompt, text_elements: [] }] : [],
-          cwd: context.workspace ?? process.cwd(),
+          cwd: workingDirectory,
           model: context.model,
+          ...(context.reasoningEffort ? { effort: context.reasoningEffort } : {}),
+          serviceTier: context.serviceTier ?? null,
         });
         const turnId =
           (turnResult.turn_id as string | undefined) ??
           ((turnResult.turn as Record<string, unknown> | undefined)?.id as string | undefined) ??
           "";
+        activeTurnId = turnId || undefined;
         yield this.debugEvent("turn_started", { turn_id: turnId, iteration });
 
         // Drain turn notifications
@@ -288,6 +460,7 @@ export class CodexAppServerAdapter implements AgentClient {
         }
 
         yield this.debugEvent("turn_completed", { turn_id: turnId, iteration });
+        activeTurnId = undefined;
       }
 
       if (iteration >= maxIterations) {
@@ -614,13 +787,12 @@ export class CodexAppServerAdapter implements AgentClient {
     const env = sanitizedAgentChildEnv();
     Object.assign(env, context.environmentVariables ?? {});
 
-    const apiKey = context.apiKey || process.env.OPENAI_API_KEY || process.env.LLM_API_KEY || "";
-    if (apiKey) {
-      env.OPENAI_API_KEY = apiKey;
-    }
-
-    if (context.baseUrl) {
-      env.OPENAI_BASE_URL = context.baseUrl;
+    if (context.protocol === CODEX_RESPONSES_PROTOCOL) {
+      Object.assign(env, codexResponsesProviderEnvironment({
+        providerName: context.provider,
+        baseUrl: context.baseUrl,
+        apiKey: context.apiKey,
+      }));
     }
 
     if (this.tempDir) {
@@ -630,6 +802,41 @@ export class CodexAppServerAdapter implements AgentClient {
     }
 
     return env;
+  }
+
+  private materializeProviderModelCatalog(context: AgentRunContext): string | undefined {
+    if (!this.tempDir) throw new Error("Codex temporary home is not initialized");
+    if (!resolveCodexResponsesProviderProfile(context.provider)) return undefined;
+    const env = sanitizedAgentChildEnv();
+    env.HOME = this.tempDir;
+    env.CODEX_HOME = path.join(this.tempDir, ".codex");
+    let bundledCatalog = BUNDLED_CODEX_CATALOG_CACHE.get(this.codexBin);
+    if (!bundledCatalog) {
+      const result = spawnSync(this.codexBin, ["debug", "models", "--bundled"], {
+        encoding: "utf8",
+        env,
+        shell: windowsCommandNeedsShell(this.codexBin),
+        timeout: 15_000,
+        maxBuffer: 1_000_000,
+        windowsHide: true,
+      });
+      if (result.status !== 0 || !result.stdout?.trim()) {
+        throw new Error(
+          `Unable to load bundled Codex model metadata: ${result.stderr?.trim() || result.error?.message || `exit ${result.status}`}`,
+        );
+      }
+      bundledCatalog = result.stdout;
+      BUNDLED_CODEX_CATALOG_CACHE.set(this.codexBin, bundledCatalog);
+    }
+    const catalog = buildCodexProviderModelCatalogFromBundled(
+      context.provider,
+      context.model,
+      bundledCatalog,
+    );
+    if (!catalog) return undefined;
+    const catalogPath = path.join(this.tempDir, ".codex", "provider-models.json");
+    fs.writeFileSync(catalogPath, JSON.stringify(catalog), { encoding: "utf8", mode: 0o600 });
+    return catalogPath;
   }
 
   private createTempDir(): string {
@@ -713,3 +920,5 @@ function findExecutableOnPath(command: string): string | null {
 }
 
 export const _codexWindowsCommandNeedsShellForTest = windowsCommandNeedsShell;
+export const _resolveCodexWorkingDirectoryForTest = resolveCodexWorkingDirectory;
+export const _resolveCodexSandboxModeForTest = resolveCodexSandboxMode;

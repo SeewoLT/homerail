@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   _clearAllSettings,
   createSetting,
+  findActiveCodexCompatibleSetting,
   findActiveClaudeSdkCompatibleSetting,
   findActiveSetting,
   getSetting,
@@ -14,6 +15,7 @@ import {
   listSettings,
   resolveClaudeSdkAuthModeForSetting,
   resolveClaudeSdkBaseUrlForSetting,
+  resolveCodexResponsesBaseUrlForSetting,
   upsertProvider,
   updateSetting,
 } from "../src/persistence/llm-settings.js";
@@ -87,6 +89,80 @@ describe("custom LLM providers", () => {
       model_name: "kimi-for-coding",
       base_url: "https://api.kimi.com/coding/v1",
     });
+  });
+
+  it("catalogs only DeepSeek V4 Flash as a Responses-capable Codex runtime", async () => {
+    const deepseek = listProviders().find((provider) => provider.id === "deepseek");
+    expect(deepseek).toMatchObject({
+      default_model: "deepseek-v4-flash",
+      responses_base_url: "https://api.deepseek.com",
+    });
+    expect(deepseek?.endpoints?.[0]).toMatchObject({
+      id: "deepseek_api",
+      default_model: "deepseek-v4-flash",
+      responses_base_url: "https://api.deepseek.com",
+    });
+    expect(deepseek?.endpoints?.[0]?.models.map((model) => model.id))
+      .toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+
+    const setting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-flash",
+      api_key: "sk-deepseek-test",
+      is_active: true,
+      is_default: true,
+    });
+    expect(resolveCodexResponsesBaseUrlForSetting(setting)).toBe("https://api.deepseek.com");
+    expect(findActiveCodexCompatibleSetting()?.id).toBe(setting.id);
+
+    const proSetting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-pro",
+      api_key: "sk-deepseek-test",
+      is_active: true,
+    });
+    expect(resolveCodexResponsesBaseUrlForSetting(proSetting)).toBeUndefined();
+
+    const port = await listen(server);
+    const response = await fetch(`http://127.0.0.1:${port}/api/llm/settings?provider_id=deepseek`);
+    const body = await response.json() as {
+      data: { settings: Array<{ id: string; supports_codex_responses: boolean }> };
+    };
+    expect(response.status).toBe(200);
+    expect(body.data.settings.find((candidate) => candidate.id === setting.id))
+      .toMatchObject({ supports_codex_responses: true });
+    expect(body.data.settings.find((candidate) => candidate.id === proSetting.id))
+      .toMatchObject({ supports_codex_responses: false });
+  });
+
+  it("reconciles retired DeepSeek model aliases to V4 Flash", () => {
+    const setting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-flash",
+      models: ["deepseek-v4-flash"],
+      api_key: "sk-deepseek-legacy-test",
+      is_active: true,
+      is_default: true,
+    });
+    getDb().prepare(`
+      UPDATE llm_settings
+      SET model_name = ?, models = ?
+      WHERE id = ?
+    `).run(
+      "deepseek-chat",
+      JSON.stringify(["deepseek-chat", "deepseek-reasoner"]),
+      setting.id,
+    );
+
+    expect(getSetting(setting.id)).toMatchObject({
+      model_name: "deepseek-v4-flash",
+      models: ["deepseek-v4-flash"],
+      responses_base_url: "https://api.deepseek.com",
+    });
+    expect(findActiveCodexCompatibleSetting()?.id).toBe(setting.id);
   });
 
   afterEach(async () => {
@@ -604,7 +680,7 @@ describe("custom LLM providers", () => {
     expect(response.status).toBe(404);
   });
 
-  it("tests all three /v1 endpoints with the exact model and prefers Claude when both harness protocols work", async () => {
+  it("tests all three /v1 endpoints with the exact model and prefers Codex when Responses works", async () => {
     const upstreamRequests: Array<{
       url?: string;
       model?: string;
@@ -658,7 +734,7 @@ describe("custom LLM providers", () => {
       expect(response.status).toBe(200);
       expect(body.data).toMatchObject({
         available: true,
-        preferred_harness: "claude_agent_sdk",
+        preferred_harness: "codex_appserver",
         endpoints: {
           anthropic: {
             available: true,
@@ -705,6 +781,66 @@ describe("custom LLM providers", () => {
     }
   });
 
+  it("probes a saved setting by id using its encrypted key and independent protocol roots", async () => {
+    const seen: Array<{ url?: string; authorization?: string }> = [];
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      seen.push({ url: req.url, authorization: req.headers.authorization });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "probe-result" }));
+    });
+    const upstreamPort = await listen(upstream);
+    const root = `http://127.0.0.1:${upstreamPort}`;
+    upsertProvider({
+      id: "saved-runtime",
+      default_model: "saved-model",
+      base_url: `${root}/openai`,
+      chat_completions_base_url: `${root}/openai`,
+      responses_base_url: `${root}/responses-api`,
+      anthropic_base_url: `${root}/anthropic`,
+    });
+    const setting = createSetting({
+      provider_id: "saved-runtime",
+      endpoint_id: "saved-runtime_custom",
+      model_name: "saved-model",
+      api_key: "saved-secret",
+      protocol: "custom",
+      base_url: `${root}/openai`,
+      chat_completions_base_url: `${root}/openai`,
+      responses_base_url: `${root}/responses-api`,
+      anthropic_base_url: `${root}/anthropic`,
+      is_active: true,
+      is_default: true,
+    });
+
+    try {
+      const port = await listen(server);
+      const response = await fetch(`http://127.0.0.1:${port}/api/llm/models/detect-runtime`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ setting_id: setting.id }),
+      });
+      const body = await response.json() as {
+        data: {
+          preferred_harness: string;
+          endpoints: Record<string, { url: string; base_url?: string }>;
+        };
+      };
+      expect(body.data).toMatchObject({
+        preferred_harness: "codex_appserver",
+        endpoints: {
+          anthropic: { url: `${root}/anthropic/v1/messages`, base_url: `${root}/anthropic/v1` },
+          openai: { url: `${root}/openai/v1/chat/completions`, base_url: `${root}/openai/v1` },
+          responses: { url: `${root}/responses-api/v1/responses`, base_url: `${root}/responses-api/v1` },
+        },
+      });
+      expect(seen).toHaveLength(3);
+      expect(seen.every((request) => request.authorization === "Bearer saved-secret")).toBe(true);
+    } finally {
+      await close(upstream);
+    }
+  });
+
   it("discovers protocol roots from an unversioned base URL and falls back to root endpoints", async () => {
     const upstreamRequests: string[] = [];
     const upstream = http.createServer((req, res) => {
@@ -743,7 +879,7 @@ describe("custom LLM providers", () => {
 
       expect(body.data).toMatchObject({
         available: true,
-        preferred_harness: "claude_agent_sdk",
+        preferred_harness: "codex_appserver",
         endpoints: {
           anthropic: {
             available: true,
@@ -825,7 +961,7 @@ describe("custom LLM providers", () => {
     }
   });
 
-  it("reports a Responses-only endpoint without selecting an unsupported harness", async () => {
+  it("selects Codex for a Responses-only endpoint", async () => {
     const upstream = http.createServer((req, res) => {
       req.resume();
       if (req.url === "/v1/responses") {
@@ -863,8 +999,8 @@ describe("custom LLM providers", () => {
 
       expect(response.status).toBe(200);
       expect(body.data).toMatchObject({
-        available: false,
-        preferred_harness: null,
+        available: true,
+        preferred_harness: "codex_appserver",
         endpoints: {
           anthropic: { available: false, status: 404 },
           openai: { available: false, status: 404 },

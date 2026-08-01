@@ -20,6 +20,7 @@ export interface ManagerAgentRuntimeConfig {
   anthropic_auth_mode?: "api_key" | "auth_token";
   agent_type: string;
   runtime_placement: ManagerAgentHostRuntimePlacement;
+  llm_setting_id?: string;
   project_id?: string;
   project_workspace?: string;
   reasoning_effort?: ManagerAgentReasoningEffort;
@@ -61,6 +62,8 @@ export function resolveManagerAgentConfig(
     modelName,
     settingId,
     harness,
+    reasoningEffort: effort,
+    serviceTier: normalizedServiceTier,
   });
   if (resolved.runtime_placement === "container") {
     throw new Error("Manager Agent must run on the host");
@@ -70,7 +73,7 @@ export function resolveManagerAgentConfig(
     runtime_placement: resolved.runtime_placement,
     project_id: projectId,
     project_workspace: resolveProjectWorkspace(projectId),
-    reasoning_effort: effort ?? "low",
-    service_tier: normalizedServiceTier,
+    reasoning_effort: resolved.reasoning_effort ?? effort ?? "low",
+    service_tier: resolved.service_tier ?? normalizedServiceTier,
   };
 }

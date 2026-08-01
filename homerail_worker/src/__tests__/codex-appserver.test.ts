@@ -76,6 +76,7 @@ function setupMocksWithFs(mockProc: MockProcess) {
       on: mockProc.events.on.bind(mockProc.events),
       kill: mockProc.kill,
     }),
+    spawnSync: vi.fn(),
   }));
 }
 
@@ -823,6 +824,8 @@ describe("CodexAppServerAdapter", () => {
     const ctxWithPrompt: AgentRunContext = {
       ...ctx,
       systemPrompt: "You are a helpful assistant.",
+      reasoningEffort: "max",
+      serviceTier: null,
     };
 
     const consumePromise = (async () => {
@@ -834,17 +837,24 @@ describe("CodexAppServerAdapter", () => {
     const reqs2 = await waitForStdinRequests(mockProc, 2);
     expect(reqs2[1].method).toBe("thread/start");
     expect(reqs2[1].params).toMatchObject({
-      baseInstructions: "You are a helpful assistant.",
+      baseInstructions: null,
+      developerInstructions: "You are a helpful assistant.",
       cwd: "/test/workspace",
       model: "gpt-4.1",
       approvalPolicy: "never",
-      sandbox: "danger-full-access",
+      sandbox: "workspace-write",
       ephemeral: true,
       dynamicTools: [],
+      serviceTier: null,
+      config: { model_reasoning_effort: "max" },
     });
 
     writeResponse(mockProc, reqs2[1].id as number, { thread_id: "t1" });
     const reqs3 = await waitForStdinRequests(mockProc, 3);
+    expect(reqs3[2].params).toMatchObject({
+      effort: "max",
+      serviceTier: null,
+    });
     writeResponse(mockProc, reqs3[2].id as number, { turn_id: "tr1" });
 
     await new Promise((r) => setTimeout(r, 30));

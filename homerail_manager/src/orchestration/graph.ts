@@ -20,6 +20,8 @@ export interface DAGAgentConfig {
     base_url?: string;
     protocol?: string;
     anthropic_auth_mode?: "api_key" | "auth_token";
+    reasoning_effort?: string;
+    service_tier?: string | null;
   };
   model?: string;
   system?: string;

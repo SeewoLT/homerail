@@ -51,14 +51,131 @@ describe("agent runtime resolver", () => {
     });
   });
 
-  it("rejects HomeRail provider metadata instead of treating its model as a Codex account model", () => {
+  it("runs a HomeRail Responses setting through Codex without treating it as an account model", () => {
+    upsertProvider({
+      id: "local-responses",
+      name: "Local Responses",
+      default_model: "local-coder",
+      responses_base_url: "http://127.0.0.1:8000/v1",
+    });
+    const setting = createSetting({
+      provider_id: "local-responses",
+      endpoint_id: "local-responses_custom",
+      model_name: "local-coder",
+      api_key: "local-no-key",
+      protocol: "custom",
+      responses_base_url: "http://127.0.0.1:8000/v1",
+      is_active: true,
+      is_default: true,
+    });
+
+    const resolved = resolveAgentRuntimeConfig({
+      surface: "manager_agent",
+      providerName: "local-responses",
+      modelName: "local-coder",
+      settingId: setting.id,
+      harness: "codex_appserver",
+    });
+
+    expect(resolved).toMatchObject({
+      provider_name: "local-responses",
+      model: "local-coder",
+      api_key: "local-no-key",
+      base_url: "http://127.0.0.1:8000/v1",
+      protocol: "responses_compatible",
+      agent_type: "codex_appserver",
+      runtime_placement: "host",
+      llm_setting_id: setting.id,
+    });
+  });
+
+  it("keeps provider-backed DAG Codex execution containerized", () => {
+    upsertProvider({
+      id: "local-responses",
+      default_model: "local-coder",
+      responses_base_url: "http://127.0.0.1:8000/v1",
+    });
+    const setting = createSetting({
+      provider_id: "local-responses",
+      endpoint_id: "local-responses_custom",
+      model_name: "local-coder",
+      api_key: "local-no-key",
+      protocol: "custom",
+      responses_base_url: "http://127.0.0.1:8000/v1",
+      is_active: true,
+      is_default: true,
+    });
+    expect(resolveAgentRuntimeConfig({
+      surface: "dag",
+      settingId: setting.id,
+      agentType: "codex_appserver",
+    })).toMatchObject({
+      protocol: "responses_compatible",
+      runtime_placement: "container",
+    });
+  });
+
+  it("applies DeepSeek Codex capabilities to both Manager and DAG resolution", () => {
+    const setting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-flash",
+      api_key: "sk-test-deepseek",
+      is_active: true,
+      is_default: true,
+    });
+
+    const defaults = resolveAgentRuntimeConfig({
+      surface: "manager_agent",
+      settingId: setting.id,
+      harness: "codex_appserver",
+    });
+    expect(defaults).toMatchObject({
+      protocol: "responses_compatible",
+      base_url: "https://api.deepseek.com",
+      reasoning_effort: "high",
+      service_tier: null,
+    });
+
+    expect(resolveAgentRuntimeConfig({
+      surface: "dag",
+      settingId: setting.id,
+      agentType: "codex_appserver",
+      reasoningEffort: "none",
+    })).toMatchObject({
+      reasoning_effort: "none",
+      runtime_placement: "container",
+    });
+
+    expect(() => resolveAgentRuntimeConfig({
+      surface: "dag",
+      settingId: setting.id,
+      agentType: "codex_appserver",
+      reasoningEffort: "medium",
+    })).toThrow("Supported values: none, low, high, max");
+
+    expect(() => resolveAgentRuntimeConfig({
+      surface: "dag",
+      settingId: setting.id,
+      agentType: "codex_appserver",
+      serviceTier: "priority",
+    })).toThrow("does not support service tier 'priority'");
+  });
+
+  it("fails closed for DeepSeek models without Responses support", () => {
+    const setting = createSetting({
+      provider_id: "deepseek",
+      endpoint_id: "deepseek_api",
+      model_name: "deepseek-v4-pro",
+      api_key: "sk-test-deepseek",
+      is_active: true,
+      is_default: true,
+    });
     expect(() => resolveAgentRuntimeConfig({
       surface: "manager_agent",
-      providerName: "qwen36",
-      modelName: "qwen3.6",
-      settingId: "local-setting",
+      settingId: setting.id,
       harness: "codex_appserver",
-    })).toThrow("Codex app-server cannot use a HomeRail LLM provider or setting");
+    })).toThrow("Responses is not supported for deepseek/deepseek-v4-pro");
   });
 
   it("does not invent a Codex model when the catalog selection is missing", () => {
@@ -164,6 +281,25 @@ describe("agent runtime resolver", () => {
       runtime_placement: "host_shell",
       llm_setting_id: setting.id,
     });
+  });
+
+  it("does not silently replace an explicit Codex harness with Kimi Code", () => {
+    const setting = createSetting({
+      provider_id: "kimi",
+      endpoint_id: "kimi_coding_plan",
+      model_name: "kimi-k2.7-code",
+      api_key: "pk-test-kimi",
+      protocol: "openai_compatible",
+      plan_type: "coding_plan",
+      is_active: true,
+      is_default: true,
+    });
+
+    expect(() => resolveAgentRuntimeConfig({
+      surface: "manager_agent",
+      settingId: setting.id,
+      harness: "codex_appserver",
+    })).toThrow("Codex app-server requires a Responses endpoint");
   });
 
   it("uses Bearer auth for the Aliyun Token Plan Anthropic gateway", () => {

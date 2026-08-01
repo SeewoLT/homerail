@@ -196,6 +196,17 @@ export function canonicalModelNameForEndpoint(
 ): string {
   const canonicalProviderId = canonicalProviderIdForEndpoint(providerId, endpointId, undefined, modelName);
   if (
+    canonicalProviderId === "deepseek" &&
+    (endpointId === undefined || endpointId === "deepseek_api") &&
+    (modelName === "deepseek-chat" || modelName === "deepseek-reasoner")
+  ) {
+    // DeepSeek retired both legacy aliases on 2026-07-24. They previously
+    // selected the non-thinking/thinking modes of V4 Flash, respectively.
+    // Reconcile persisted built-in settings to the supported model slug;
+    // reasoning mode remains a harness/runtime concern.
+    return "deepseek-v4-flash";
+  }
+  if (
     canonicalProviderId === KIMI_CN_PROVIDER_ID &&
     endpointId === KIMI_CODING_PLAN_ENDPOINT_ID &&
     modelName === "kimi-k2.7-code"
@@ -431,8 +442,9 @@ export const DEFAULT_PROVIDER_CATALOG: CatalogProviderInfo[] = [
     id: "deepseek",
     name: "DeepSeek",
     status: "active",
-    default_model: "deepseek-chat",
+    default_model: "deepseek-v4-flash",
     base_url: "https://api.deepseek.com",
+    responses_base_url: "https://api.deepseek.com",
     docs_url: "https://api-docs.deepseek.com/",
     endpoints: [
       endpoint({
@@ -443,12 +455,16 @@ export const DEFAULT_PROVIDER_CATALOG: CatalogProviderInfo[] = [
         protocol: "openai_compatible",
         base_url: "https://api.deepseek.com",
         chat_completions_base_url: "https://api.deepseek.com",
+        responses_base_url: "https://api.deepseek.com",
         anthropic_base_url: "https://api.deepseek.com/anthropic",
         auth_type: "bearer",
         key_hint: "DeepSeek API Key (sk-*)",
-        default_model: "deepseek-chat",
+        default_model: "deepseek-v4-flash",
         docs_url: "https://api-docs.deepseek.com/",
-        models: [model("deepseek-chat", {}, { recommended: true }), model("deepseek-reasoner")],
+        models: [
+          model("deepseek-v4-flash", {}, { recommended: true }),
+          model("deepseek-v4-pro"),
+        ],
       }),
     ],
   },

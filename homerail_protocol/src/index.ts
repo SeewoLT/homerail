@@ -25,6 +25,8 @@ export * from "./codec.js";
 export * from "./schemas.js";
 export * from "./validation.js";
 export * from "./manager-agent.js";
+export * from "./codex-responses.js";
+export * from "./codex-provider-profiles.js";
 export * from "./manager-agent-tools.js";
 export * from "./manager-agent-widget-tools.js";
 export * from "./manager-agent-prompt.js";
