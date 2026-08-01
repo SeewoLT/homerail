@@ -336,6 +336,23 @@ describe("bounded GitHub Draft PR credential broker", () => {
     expect(stale).toMatchObject({ ok: false, error: expect.stringContaining("expected head is stale") });
   });
 
+  it("accepts commit payloads above the generic broker input limit within the 1 MiB file bound", async () => {
+    const content = Buffer.alloc(100 * 1024, "a");
+    const committed = await call("aggregate", "commit_files", {
+      expected_head_sha: INITIAL_HEAD,
+      message: "fix: larger bounded change",
+      files: [{ path: "src/fix.ts", content_base64: content.toString("base64") }],
+    });
+    expect(committed).toMatchObject({
+      ok: true,
+      result: {
+        previous_head_sha: INITIAL_HEAD,
+        head_sha: NEXT_HEAD,
+        committed_files: ["src/fix.ts"],
+      },
+    });
+  });
+
   it("fails closed when the Draft PR head changes outside the broker", async () => {
     await call("reviewer", "pull_request_snapshot");
     remoteHead = "9".repeat(40);
