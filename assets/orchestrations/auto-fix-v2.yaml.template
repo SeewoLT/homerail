@@ -222,7 +222,12 @@ spec:
         token. Then hand off candidate with review_round 1 and exactly the
         head_sha returned by the final successful commit_files call. Manager
         binds that broker result to the handoff and rejects a worker commit SHA
-        or stale PR head. Refuse unrelated or workflow-file changes.
+        or stale PR head. Refuse unrelated or workflow-file changes. The
+        snapshot tool arguments are exactly
+        {"credential_ref":"github-autofix","action":"pull_request_snapshot","input":{}}.
+        The commit action input is exactly
+        {"expected_head_sha":"<snapshot head_sha>","message":"<single line>",
+        "files":[{"path":"<relative path>","content_base64":"<canonical base64>"}]}.
 
     reviewer:
       description: GLM-5.2 fresh-context reviewer
@@ -253,7 +258,9 @@ spec:
         credential_ref and action commit_files plus the snapshot head as
         expected_head_sha. Never use the broker name github_pr as
         credential_ref, git push, or modify any path below .github. Hand off
-        fixed with both previous and new head SHAs.
+        fixed with both previous and new head SHAs. The snapshot tool arguments
+        are exactly {"credential_ref":"github-autofix",
+        "action":"pull_request_snapshot","input":{}}.
 
   nodes:
     prepare_repository:
@@ -346,6 +353,9 @@ spec:
           required_broker_actions:
             - credential_ref: github-autofix
               broker: github_pr
+              action: pull_request_snapshot
+            - credential_ref: github-autofix
+              broker: github_pr
               action: commit_files
               result_binding: { result_field: head_sha, content_field: head_sha }
         failed: {}
@@ -369,6 +379,12 @@ spec:
         reviewed:
           contract: ReviewDecision
           required_broker_actions:
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: pull_request_snapshot
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: checks_snapshot
             - credential_ref: github-autofix
               broker: github_pr
               action: required_checks
@@ -421,6 +437,10 @@ spec:
         result_required_broker_actions:
           - credential_ref: github-autofix
             broker: github_pr
+            action: pull_request_snapshot
+            when: { field: status, equals: fixed }
+          - credential_ref: github-autofix
+            broker: github_pr
             action: commit_files
             when: { field: status, equals: fixed }
             result_binding: { result_field: head_sha, content_field: head_sha }
@@ -449,6 +469,12 @@ spec:
         reviewed:
           contract: ReviewDecision
           required_broker_actions:
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: pull_request_snapshot
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: checks_snapshot
             - credential_ref: github-autofix
               broker: github_pr
               action: required_checks

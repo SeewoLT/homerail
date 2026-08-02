@@ -81,6 +81,43 @@ describe("prompt runner", () => {
     expect(activities.map((activity) => activity.sequence)).toEqual([1, 2]);
   });
 
+  it("renews activity for reasoning without streaming or persisting its content", async () => {
+    const mockAgent: AgentClient = {
+      run() {
+        return (async function* () {
+          yield { type: "thinking" as const, text: "private chain of thought" };
+          yield { type: "thinking" as const, text: "more private reasoning" };
+          yield { type: "done" as const };
+        })();
+      },
+    };
+    registerAgentBackend("test-reasoning-heartbeat", () => mockAgent);
+
+    const sent: string[] = [];
+    await runPrompt(
+      {
+        task: "reason for a long time",
+        sender: "test",
+        runId: "run-reasoning-heartbeat",
+        dagConfig: makeConfig(),
+      },
+      {
+        wsSend: (data) => sent.push(data),
+        agentBackend: "test-reasoning-heartbeat",
+      },
+    );
+
+    const serialized = sent.join("\n");
+    expect(serialized).not.toContain("private chain of thought");
+    expect(serialized).not.toContain("more private reasoning");
+    const activities = sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === "stream" && message.data?.event === "dag_activity")
+      .map((message) => message.data.activity);
+    expect(activities.map((activity) => activity.type)).toEqual(["started", "progress", "failed"]);
+    expect(activities[1]?.payload).toEqual({ message: "model reasoning" });
+  });
+
   it("sends node_error with agent error when a prompt ends without handoff", async () => {
     const mockAgent: AgentClient = {
       run() {

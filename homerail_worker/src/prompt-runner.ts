@@ -466,6 +466,7 @@ export async function runPrompt(
     reason: "agent turn ended without a successful DAG handoff",
   };
   const toolNamesById = new Map<string, string>();
+  let lastReasoningActivityAt = 0;
 
   activityEmitter.emit("started", {
     session_id: job.dagConfig.session_id ?? job.runId,
@@ -534,6 +535,17 @@ export async function runPrompt(
           audit?.transcript.write({ event: "text", text: redactForTurn(event.text) });
           appendSessionTranscript("text", redactForTurn(event.text));
           break;
+        case "thinking": {
+          // Thinking content is deliberately neither streamed nor persisted.
+          // A generic, throttled activity renews the actor lease while models
+          // such as DeepSeek V4 Flash spend a long time reasoning.
+          const now = Date.now();
+          if (now - lastReasoningActivityAt >= 30_000) {
+            activityEmitter.emit("progress", { message: "model reasoning" });
+            lastReasoningActivityAt = now;
+          }
+          break;
+        }
         case "debug": {
           const debugMessage = String(redactForTurn(event.message));
           const debugData = redactForTurn(event.data ?? {}) as Record<string, unknown>;

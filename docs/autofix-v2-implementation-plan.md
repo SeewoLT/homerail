@@ -133,7 +133,7 @@ Tests:
 ### AFV2-201: Add a canonical fan-out worker runtime policy
 
 - [ ] Add a strict WorkflowSpec worker template or node reference containing
-      Agent, tool, workspace, credential, call-budget, and session policy.
+      Agent, tool, workspace, credential, and session policy.
 - [ ] Compile the worker policy into canonical IR and include it in workflow
       hashing.
 - [ ] Copy the canonical policy to every dynamically appended child.

@@ -37,10 +37,11 @@ predates the runtime and broker support described below.
   binding when they report `fixed`.
 - GLM-5.2 reviewer nodes have `session_scope: dispatch`; every re-entry gets a
   new provider session and no portable checkpoint/transcript. A rejected
-  handoff-contract correction stays in that same logical dispatch so a valid
-  same-session `required_checks` receipt remains usable; if the receipt was
-  missing, correction mode permits only that declared read-only verification
-  call before the final handoff.
+  handoff-contract correction stays in that same logical dispatch so valid
+  same-session broker receipts remain usable. Correction mode retains only the
+  hard broker evidence declared for that output port, including prerequisite
+  `pull_request_snapshot` and `checks_snapshot` reads; it cannot broaden the
+  original capability.
 - Read-only reviewer containers keep `/workspace` read-only and receive one
   nested writable mount only at `/workspace/.homerail-runtime` for trusted
   Worker audit/session telemetry. This prevents audit writer startup from
@@ -195,10 +196,15 @@ node scripts/configure-auto-fix-v2-runtime-profile.mjs
 DeepSeek implementers, aggregator, and fixers use the Codex app-server harness
 against the Responses endpoint with `reasoning_effort: max`. Long multi-minute
 reasoning and high tool counts are expected; operators must not treat elapsed
-thinking time as a stuck worker. GLM review uses the Claude Agent SDK against
-its Anthropic-compatible endpoint. No coding role uses Kimi Code or direct
-chat-completions. An upstream Manager Agent may use any suitable model to author
-`task-plan.json`; that planning session is not part of the execution DAG.
+thinking time as a stuck worker. Codex app-server emits a content-free
+heartbeat every 30 seconds while its notification stream is silent, and Worker
+renews the actor lease with a generic activity without retaining private
+reasoning text. The turn ends only on a real completion/error, operator
+cancellation, or child-process exit. GLM review uses the Claude Agent SDK
+against its Anthropic-compatible endpoint. No coding role uses Kimi Code or
+direct chat-completions. An upstream Manager Agent may use any suitable model
+to author `task-plan.json`; that planning session is not part of the execution
+DAG.
 
 Auto Fix v2 intentionally does not configure any node-level or workflow-level
 tool-call budget. Do not add a fixed tool-call budget to this workflow.

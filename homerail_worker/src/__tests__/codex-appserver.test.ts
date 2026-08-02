@@ -238,6 +238,38 @@ describe("CodexAppServerAdapter", () => {
     expect(doneEvents).toHaveLength(1);
   }, 15000);
 
+  it("keeps a silent turn alive with content-free reasoning heartbeats", async () => {
+    const mockProc = createMockProcess();
+    setupMocksWithFs(mockProc);
+
+    const { CodexAppServerAdapter } = await import("../agent/codex-appserver.js");
+    const adapter = new CodexAppServerAdapter(undefined, 20);
+    const events: AgentEvent[] = [];
+    const consumePromise = (async () => {
+      for await (const event of adapter.run("hi", [], ctx)) events.push(event);
+    })();
+
+    const reqs = await waitForStdinRequests(mockProc, 1);
+    writeResponse(mockProc, reqs[0].id as number, {});
+    const reqs2 = await waitForStdinRequests(mockProc, 2);
+    writeResponse(mockProc, reqs2[1].id as number, { thread_id: "t1" });
+    const reqs3 = await waitForStdinRequests(mockProc, 3);
+    writeResponse(mockProc, reqs3[2].id as number, { turn_id: "tr1" });
+
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    writeNotification(mockProc, "turn/completed", {});
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const closeReq = findRequest(mockProc, "thread/unsubscribe");
+    if (closeReq) writeResponse(mockProc, closeReq.id as number, {});
+    await consumePromise;
+
+    const heartbeats = events.filter((event) => event.type === "thinking");
+    expect(heartbeats.length).toBeGreaterThanOrEqual(2);
+    expect(heartbeats.every((event) => event.type === "thinking" && event.text === "")).toBe(true);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(events.at(-1)).toEqual({ type: "done" });
+  }, 15000);
+
   it("emits only native commentary-phase agent messages as commentary", async () => {
     const mockProc = createMockProcess();
     setupMocksWithFs(mockProc);

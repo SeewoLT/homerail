@@ -17,17 +17,36 @@ export function createCredentialBrokerCallTool(
   bindings: readonly CredentialBrokerBinding[],
   call: CredentialBrokerCaller,
 ): DagToolDefinition {
+  const credentialRefs = Array.from(new Set(bindings.map((binding) => binding.credential_ref))).sort();
+  const actions = Array.from(new Set(bindings.flatMap((binding) => binding.allowed_actions))).sort();
+  const availablePairs = bindings
+    .map((binding) => `${binding.credential_ref}: ${binding.allowed_actions.join(", ")}`)
+    .join("; ");
   return {
     name: "credential_broker_call",
     description:
       "Ask the Manager to perform one declared credential-backed action. "
-      + "The credential stays in the Manager; only the action result is returned.",
+      + "The credential stays in the Manager; only the action result is returned. "
+      + `Available credential/action pairs: ${availablePairs}. `
+      + "Put action arguments only inside input; pass input: {} for an action with no arguments.",
     input_schema: {
       type: "object",
       properties: {
-        credential_ref: { type: "string", minLength: 1, maxLength: 128 },
-        action: { type: "string", minLength: 1, maxLength: 128 },
-        input: { type: "object", additionalProperties: true },
+        credential_ref: {
+          type: "string",
+          enum: credentialRefs,
+          description: "Choose exactly one credential reference from this enum.",
+        },
+        action: {
+          type: "string",
+          enum: actions,
+          description: "Choose exactly one action from this enum; do not prefix it with a broker name.",
+        },
+        input: {
+          type: "object",
+          additionalProperties: true,
+          description: "Action payload only. Use an empty object when the selected action needs no arguments.",
+        },
       },
       required: ["credential_ref", "action"],
       additionalProperties: false,

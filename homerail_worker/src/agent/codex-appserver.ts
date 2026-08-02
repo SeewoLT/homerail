@@ -27,6 +27,7 @@ const CLIENT_NAME = "homerail_codex_appserver";
 const CLIENT_TITLE = "HomeRail Codex AppServer Adapter";
 const DEFAULT_CODEX_BIN = "codex";
 const RESPONSE_TIMEOUT_MS = 60_000;
+const NOTIFICATION_HEARTBEAT_INTERVAL_MS = 30_000;
 const BUNDLED_CODEX_CATALOG_CACHE = new Map<string, string>();
 const SECRET_KEYS = [
   "apiKey", "api_key", "OPENAI_API_KEY",
@@ -58,6 +59,14 @@ interface PendingRequest {
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
+
+interface NotificationWaiter {
+  resolve: (notification: Record<string, unknown>) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+class NotificationWaitTimeoutError extends Error {}
 
 type CodexAssistantMessagePhase = "commentary" | "final_answer";
 
@@ -214,13 +223,22 @@ export class CodexAppServerAdapter implements AgentClient {
   private requestId = 0;
   private pending = new Map<number, PendingRequest>();
   private notifications: Array<Record<string, unknown>> = [];
-  private notifyWaiters: Array<() => void> = [];
+  private notifyWaiters: NotificationWaiter[] = [];
+  private notificationFailure: Error | null = null;
   private codexBin: string;
+  private notificationHeartbeatIntervalMs: number;
   private tempDir: string | null = null;
   private agentMessages = new Map<string, CodexAssistantMessageState>();
 
-  constructor(codexBin?: string) {
+  constructor(
+    codexBin?: string,
+    notificationHeartbeatIntervalMs = NOTIFICATION_HEARTBEAT_INTERVAL_MS,
+  ) {
     this.codexBin = codexBin ?? process.env.CODEX_BIN_PATH ?? DEFAULT_CODEX_BIN;
+    if (!Number.isSafeInteger(notificationHeartbeatIntervalMs) || notificationHeartbeatIntervalMs < 1) {
+      throw new Error("notificationHeartbeatIntervalMs must be a positive safe integer");
+    }
+    this.notificationHeartbeatIntervalMs = notificationHeartbeatIntervalMs;
   }
 
   async *run(
@@ -262,6 +280,8 @@ export class CodexAppServerAdapter implements AgentClient {
           })
         : ["app-server"];
       this.process = spawnProcess(this.codexBin, args, env);
+      this.notifications = [];
+      this.notificationFailure = null;
       this.setupReadline();
     } catch (err) {
       yield { type: "error", message: `Failed to start codex app-server: ${err}` };
@@ -293,10 +313,12 @@ export class CodexAppServerAdapter implements AgentClient {
 
     this.process.on("error", (err) => {
       this.rejectAllPending(`Process error: ${err.message}`);
+      this.rejectNotificationWaiters(`Process error: ${err.message}`);
     });
 
     this.process.on("exit", (code) => {
       this.rejectAllPending(`Process exited with code ${code}`);
+      this.rejectNotificationWaiters(`Process exited with code ${code}`);
     });
 
     try {
@@ -399,9 +421,26 @@ export class CodexAppServerAdapter implements AgentClient {
         while (!turnComplete) {
           let notification: Record<string, unknown>;
           try {
-            notification = await this.waitForNotification(120_000);
-          } catch {
-            yield { type: "error", message: "Timeout waiting for codex app-server notification" };
+            notification = await this.waitForNotification(this.notificationHeartbeatIntervalMs);
+          } catch (err) {
+            if (err instanceof NotificationWaitTimeoutError) {
+              if (context.abortSignal?.aborted) {
+                turnComplete = true;
+                break;
+              }
+              // A silent model may still be reasoning or waiting on its
+              // provider. Emit a content-free heartbeat so the worker keeps
+              // its Manager lease without exposing chain-of-thought. Turn
+              // lifetime remains controlled by cancellation/process exit.
+              yield { type: "thinking", text: "" };
+              continue;
+            }
+            yield {
+              type: "error",
+              message: err instanceof Error
+                ? `Codex app-server notification stream failed: ${err.message}`
+                : "Codex app-server notification stream failed",
+            };
             return;
           }
 
@@ -545,9 +584,14 @@ export class CodexAppServerAdapter implements AgentClient {
         return;
       }
       if ("method" in parsed) {
-        this.notifications.push(parsed as unknown as Record<string, unknown>);
-        const waiters = this.notifyWaiters.splice(0);
-        for (const w of waiters) w();
+        const notification = parsed as unknown as Record<string, unknown>;
+        const waiter = this.notifyWaiters.shift();
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(notification);
+        } else {
+          this.notifications.push(notification);
+        }
       } else if ("id" in parsed && typeof parsed.id === "number") {
         // It's a response
         const pending = this.pending.get(parsed.id);
@@ -570,21 +614,28 @@ export class CodexAppServerAdapter implements AgentClient {
     if (this.notifications.length > 0) {
       return Promise.resolve(this.notifications.shift()!);
     }
+    if (this.notificationFailure) {
+      return Promise.reject(this.notificationFailure);
+    }
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         const idx = this.notifyWaiters.indexOf(waiter);
         if (idx >= 0) this.notifyWaiters.splice(idx, 1);
-        reject(new Error("Notification wait timed out"));
+        reject(new NotificationWaitTimeoutError("Notification wait timed out"));
       }, timeoutMs);
-
-      const waiter = () => {
-        clearTimeout(timer);
-        if (this.notifications.length > 0) {
-          resolve(this.notifications.shift()!);
-        }
-      };
+      const waiter: NotificationWaiter = { resolve, reject, timer };
       this.notifyWaiters.push(waiter);
     });
+  }
+
+  private rejectNotificationWaiters(reason: string): void {
+    const error = new Error(reason);
+    this.notificationFailure = error;
+    const waiters = this.notifyWaiters.splice(0);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
   }
 
   private rejectAllPending(reason: string): void {
@@ -610,6 +661,7 @@ export class CodexAppServerAdapter implements AgentClient {
     }
     this.process = null;
     this.rejectAllPending("Adapter shutting down");
+    this.rejectNotificationWaiters("Adapter shutting down");
     this.cleanupTempDir();
   }
 

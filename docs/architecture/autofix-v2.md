@@ -394,10 +394,13 @@ previous review prose that is absent from the current contract.
 
 An approval receipt from one completed dispatch is not valid in a later review
 round, even when it is the same logical review node after recovery or a loop
-iteration. A correction of that dispatch may reuse its already-recorded receipt
-or repeat only the specifically declared broker verification action in the same
-session before handing off; it cannot use built-in tools, mutate the PR, or
-broaden the permitted broker actions.
+iteration. A correction of that dispatch may reuse its already-recorded
+receipts or repeat only the broker actions declared as hard output evidence for
+that port in the same session before handing off. This preserves prerequisite
+reads such as `pull_request_snapshot` and `checks_snapshot` alongside the final
+`required_checks` or `commit_files` call; correction still cannot use built-in
+tools, mutate beyond the original capability, or broaden the permitted broker
+actions.
 
 Tests must assert unique provider session ids, not merely different logical
 round ids.
@@ -434,6 +437,10 @@ rate-limit discipline keep this failure mode bounded.
 The broker must never expose token values or provider error bodies containing
 secrets. It must reject calls from nodes that lack both the
 `credential_broker_call` DAG tool and the exact declared action.
+The tool schema enumerates the credential references and action names actually
+projected into that dispatch, and its description lists the valid
+credential/action pairs. Trusted runtime validation remains authoritative for
+the pair and its action-specific input.
 
 ### Node permission matrix
 
@@ -466,11 +473,15 @@ profile:
 All DeepSeek V4 Flash roles use the container Codex app-server Responses
 harness with explicit `reasoning_effort: max` and explicit
 `builtin_tool_policy: backend_native`; their long reasoning phase is normal and
-is not an execution timeout signal. This mode authorizes Codex's native
-sandboxed shell/patch surface, not a fictional translation to Claude tool
-names. The outer HomeRail workspace policy still verifies paths after the turn,
-and all GitHub mutation remains fenced behind the Manager broker. GLM-5.2
-review uses the Claude Agent SDK with a fresh dispatch-scoped session.
+is not an execution timeout signal. The adapter waits until a notification,
+operator cancellation, or child-process exit and emits a content-free reasoning
+heartbeat every 30 seconds of silence. Worker converts reasoning events into a
+throttled generic activity renewal without streaming or persisting the model's
+reasoning text. This mode authorizes Codex's native sandboxed shell/patch
+surface, not a fictional translation to Claude tool names. The outer HomeRail
+workspace policy still verifies paths after the turn, and all GitHub mutation
+remains fenced behind the Manager broker. GLM-5.2 review uses the Claude Agent
+SDK with a fresh dispatch-scoped session.
 
 On Linux Docker Nodes, Manager derives a trusted `codex_nested_sandbox` worker
 provisioning flag only from the combination of Codex app-server and

@@ -269,6 +269,30 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
       summary: "candidate",
       tests: ["fixture"],
     })).toThrow(/DAG_HANDOFF_BROKER_REQUIREMENT_MISSING/);
+    expect(requestNodeCorrection(
+      "autofix-v2-run",
+      "aggregate",
+      "candidate handoff omitted broker evidence",
+    ).status).toBe("scheduled");
+    executor.tick("autofix-v2-run");
+    expect(dispatcher.dispatched.at(-1)).toMatchObject({
+      nodeId: "aggregate",
+      sessionId: aggregateSession,
+      credentialProjections: [{
+        credential_ref: "github-autofix",
+        broker: "github_pr",
+        allowed_actions: ["pull_request_snapshot", "commit_files"],
+      }],
+    });
+    recordActiveRunBrokerActionSuccess({
+      run_id: "autofix-v2-run",
+      node_id: "aggregate",
+      session_id: aggregateSession,
+      credential_ref: "github-autofix",
+      broker: "github_pr",
+      action: "pull_request_snapshot",
+      result: { head_sha: head },
+    });
     recordActiveRunBrokerActionSuccess({
       run_id: "autofix-v2-run",
       node_id: "aggregate",
@@ -302,6 +326,17 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     executor.tick("autofix-v2-run");
     expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("review_initial");
     const reviewSessions: string[] = [dispatcher.dispatched.at(-1)?.sessionId ?? ""];
+    for (const action of ["pull_request_snapshot", "checks_snapshot"]) {
+      recordActiveRunBrokerActionSuccess({
+        run_id: "autofix-v2-run",
+        node_id: "review_initial",
+        session_id: reviewSessions[0]!,
+        credential_ref: "github-autofix",
+        broker: "github_pr",
+        action,
+        result: { head_sha: head },
+      });
+    }
     handoffActiveRun("autofix-v2-run", "review_initial", "reviewed", {
       verdict: "changes_requested",
       head_sha: head,
@@ -330,6 +365,15 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         session_id: fixerEnvelope?.sessionId ?? "",
         credential_ref: "github-autofix",
         broker: "github_pr",
+        action: "pull_request_snapshot",
+        result: { head_sha: head },
+      });
+      recordActiveRunBrokerActionSuccess({
+        run_id: "autofix-v2-run",
+        node_id: fixerId,
+        session_id: fixerEnvelope?.sessionId ?? "",
+        credential_ref: "github-autofix",
+        broker: "github_pr",
         action: "commit_files",
         result: { head_sha: head },
       });
@@ -345,6 +389,17 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
       expect(reviewEnvelope.nodeId).toBe("review_revision");
       reviewSessions.push(reviewEnvelope.sessionId!);
       const reviewRound = fixRound + 1;
+      for (const action of ["pull_request_snapshot", "checks_snapshot"]) {
+        recordActiveRunBrokerActionSuccess({
+          run_id: "autofix-v2-run",
+          node_id: "review_revision",
+          session_id: reviewEnvelope.sessionId!,
+          credential_ref: "github-autofix",
+          broker: "github_pr",
+          action,
+          result: { head_sha: head },
+        });
+      }
       if (reviewRound === 2) {
         recordActiveRunBrokerActionSuccess({
           run_id: "autofix-v2-run",
@@ -383,7 +438,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         expect(dispatcher.dispatched.at(-1)?.credentialProjections).toMatchObject([{
           credential_ref: "github-autofix",
           broker: "github_pr",
-          allowed_actions: ["required_checks"],
+          allowed_actions: ["pull_request_snapshot", "checks_snapshot", "required_checks"],
         }]);
         recordActiveRunBrokerActionSuccess({
           run_id: "autofix-v2-run",
