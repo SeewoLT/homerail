@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { materializeTrustedWorkspaceDependencies } from "../workspace-dependencies.js";
 
 const PACKAGES = [
+  "agent-ui",
   "homerail_protocol",
   "homerail_plugin_sdk",
   "homerail_manager",
@@ -75,6 +76,8 @@ describe("trusted workspace dependency projection", () => {
       .toBe(fs.realpathSync(path.join(repository, "homerail_protocol")));
     expect(fs.realpathSync(path.join(repository, "homerail_manager", "node_modules", "homerail-plugin-sdk")))
       .toBe(fs.realpathSync(path.join(repository, "homerail_plugin_sdk")));
+    expect(fs.realpathSync(path.join(repository, "agent-ui", "node_modules", "homerail-protocol")))
+      .toBe(fs.realpathSync(path.join(repository, "homerail_protocol")));
   });
 
   it("fails closed on changed metadata and an untrusted existing dependency tree", () => {

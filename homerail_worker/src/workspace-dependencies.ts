@@ -7,6 +7,7 @@ import type { DagWorkspaceAccess } from "homerail-protocol";
 const DEFAULT_CACHE_ROOT = "/opt/homerail-dependency-cache";
 
 const TRUSTED_PACKAGES = [
+  "agent-ui",
   "homerail_protocol",
   "homerail_plugin_sdk",
   "homerail_manager",
@@ -14,6 +15,9 @@ const TRUSTED_PACKAGES = [
 ] as const;
 
 const LOCAL_DEPENDENCIES: Partial<Record<(typeof TRUSTED_PACKAGES)[number], Record<string, string>>> = {
+  "agent-ui": {
+    "homerail-protocol": "homerail_protocol",
+  },
   homerail_plugin_sdk: {
     "homerail-protocol": "homerail_protocol",
   },

@@ -23,22 +23,22 @@ predates the runtime and broker support described below.
   native sandboxed shell/patch surface, is mutually exclusive with the exact
   Claude-style `allowed_builtin_tools` field, and requires `workspace_access`.
   HomeRail still verifies that the turn changed only declared paths.
-- On Linux Docker Nodes, Manager automatically requests the fixed nested-Codex
-  sandbox profile only for that `codex_appserver + backend_native`
-  combination. It relaxes the outer container's seccomp/AppArmor profiles so
-  the inner unprivileged `bwrap` sandbox can start, but adds no capabilities
-  and does not use privileged containers. Codex still enforces
-  `workspace-write`; Docker mounts, network, cgroups, and HomeRail's post-turn
-  path verification remain active.
-- The Worker image contains an immutable dependency cache for the HomeRail
-  protocol, plugin SDK, Manager, and Worker packages. Before a writable Codex
+- On Linux Docker Nodes, Manager automatically requests the fixed Codex Worker
+  profile only for the `codex_appserver + backend_native` combination. It adds
+  no capabilities and does not use privileged containers. Auto Fix v2's
+  writable coding roles explicitly select `danger-full-access` for Codex's
+  command layer so test subprocesses and loopback listeners behave normally;
+  Docker mounts, cgroups, the disposable-container lifecycle, and HomeRail's
+  post-turn path verification remain active.
+- The Worker image contains an immutable dependency cache for Agent UI and the
+  HomeRail protocol, plugin SDK, Manager, and Worker packages. Before a writable Codex
   dispatch, Worker compares each worktree's dependency-relevant normalized
   `package.json` and `package-lock.json` with the image-owned copies. Matches receive an
   ignored `node_modules` facade made only of links into the image; local
   HomeRail dependencies link back to that dispatch's worktree. A metadata
-  mismatch or an unmarked existing dependency tree is not reused. Agent turns
-  remain network-disabled and should run build/typecheck/test directly rather
-  than `npm ci`. Tasks that change package metadata need a future trusted
+  mismatch or an unmarked existing dependency tree is not reused. Auto Fix
+  prompts require build/typecheck/test to run directly against these projected
+  dependencies rather than `npm ci`. Tasks that change package metadata need a future trusted
   dependency-update service outside the model container.
 - The DeepSeek aggregator may read and update only the bound Draft PR through
   the `github_pr` Manager broker. `commit_workspace` derives every dirty path
