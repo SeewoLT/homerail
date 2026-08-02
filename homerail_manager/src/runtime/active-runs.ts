@@ -1308,7 +1308,7 @@ export function dispatchRecoveredRuns(dispatcher: DAGDispatcher): number {
   let dispatched = 0;
   for (const run of store.values()) {
     if (run.status !== "active") continue;
-    dispatched += dispatchReadyNodes(run.runId, dispatcher);
+    dispatched += dispatchReadyNodesUntilStable(run.runId, dispatcher);
   }
   return dispatched;
 }
@@ -3711,7 +3711,7 @@ function _startBrokerGateway(
         phase: "completed",
         port,
       });
-      dispatchReadyNodes(run.runId, dispatcher);
+      dispatchReadyNodesUntilStable(run.runId, dispatcher);
     })
     .catch((error) => {
       const current = getActiveRun(run.runId);
@@ -5646,6 +5646,30 @@ export function dispatchReadyNodes(
     _emitNodeStateChanges(run, before);
   }
   return count;
+}
+
+/**
+ * Advance every synchronously reachable READY node, stopping once execution
+ * is waiting on an agent, an asynchronous gateway, or external capacity.
+ *
+ * Broker gateways complete outside GraphExecutor.tick(). Their callback must
+ * therefore drain condition/join/while chains itself; otherwise a newly READY
+ * deterministic gateway has no subsequent event that can wake it.
+ */
+export function dispatchReadyNodesUntilStable(
+  runId: string,
+  dispatcher: DAGDispatcher,
+): number {
+  const run = store.get(runId);
+  if (!run || run.status !== "active") return 0;
+  const maxPasses = Math.max(1, run.dagRun.graph.nodes.length * 2);
+  let total = 0;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const advanced = dispatchReadyNodes(runId, dispatcher);
+    total += advanced;
+    if (advanced === 0) break;
+  }
+  return total;
 }
 
 export function markNodeDispatched(

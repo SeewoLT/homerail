@@ -121,6 +121,14 @@ describe("bounded GitHub Draft PR credential broker", () => {
     throw new Error(message);
   }
 
+  async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (predicate()) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    throw new Error(message);
+  }
+
   function createBoundRun(
     runId: string,
     writablePaths: string[] = ["src", "tests", ".github"],
@@ -692,11 +700,10 @@ spec:
       tests: ["npm test"],
     });
 
-    await tickUntil(
-      executor,
-      runId,
+    executor.tick(runId);
+    await waitUntil(
       () => dispatcher.dispatched.some((entry) => entry.nodeId === "fix"),
-      "trusted validation failure did not reach the fixer",
+      "trusted validation broker callback did not drain the gateway chain to the fixer",
     );
     const fixDispatch = dispatcher.dispatched.find((entry) => entry.nodeId === "fix")!;
     expect(fixDispatch.inputs.review[0]).toMatchObject({
@@ -715,11 +722,10 @@ spec:
       summary: "fixed trusted validation",
       tests: ["npm test"],
     });
-    await tickUntil(
-      executor,
-      runId,
+    executor.tick(runId);
+    await waitUntil(
       () => dispatcher.dispatched.some((entry) => entry.nodeId === "revision_review"),
-      "successful re-validation did not reach fresh review",
+      "successful re-validation broker callback did not drain the gateway chain to fresh review",
     );
     handoffActiveRun(runId, "revision_review", "reviewed", {
       verdict: "approve",
