@@ -320,6 +320,10 @@ const FanoutNode = Type.Object({
       commit_field: Identifier,
       workspace_field: Identifier,
       require_clean: Type.Optional(Type.Boolean()),
+      commit_mode: Type.Optional(Type.Union([
+        Type.Literal("worker"),
+        Type.Literal("manager"),
+      ])),
     }, { additionalProperties: false })),
     max_items: Type.Integer({ minimum: 1, maximum: 256 }),
     max_parallelism: Type.Integer({ minimum: 1, maximum: 256 }),

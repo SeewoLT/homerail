@@ -2321,6 +2321,13 @@ export function handoffActiveRun(
     throw new Error(`Node ${fromNode} cannot hand off from terminal state ${sourceState}`);
   }
   _assertHandoffPreconditions(run, fromNode, port, content, true);
+  const handedOffNode = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === fromNode);
+  const effectiveContent = handedOffNode
+    ? _materializeManagerOwnedFanoutCommit(run, handedOffNode, port, content)
+    : content;
+  if (effectiveContent !== content) {
+    _assertHandoffPreconditions(run, fromNode, port, effectiveContent, true);
+  }
   const mutableBefore = _snapshotMutableRun(run);
   const before = _snapshotNodeStates(run);
   const readyBefore = new Set(getReadyNodes(run.dagRun));
@@ -2357,7 +2364,7 @@ export function handoffActiveRun(
           });
         }
       }
-      transition = handoff(run.dagRun, fromNode, port, content);
+      transition = handoff(run.dagRun, fromNode, port, effectiveContent);
       _markNodeSessionStatus(
         run,
         fromNode,
@@ -2372,7 +2379,7 @@ export function handoffActiveRun(
         roundId: run.currentRound.round_id,
         fromNode,
         port,
-        content,
+        content: effectiveContent,
         timestamp: Date.now(),
       });
       if (fencedCommand) {
@@ -2394,8 +2401,7 @@ export function handoffActiveRun(
           });
         }
       }
-      const handedOffNode = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === fromNode);
-      if (handedOffNode) _recordFanoutChild(run, handedOffNode, port, content);
+      if (handedOffNode) _recordFanoutChild(run, handedOffNode, port, effectiveContent);
       writeRunMetadata(runId, serializeRunMetadata(run));
     }).immediate();
   } catch (error) {
@@ -4526,28 +4532,29 @@ function _interruptDynamicNode(run: ActiveRun, nodeId: string): void {
   }
 }
 
-function _assertFanoutGitCommitResult(
+interface FanoutGitResultContext {
+  workspace: string;
+  git: (args: string[], timeout?: number) => ReturnType<typeof spawnSync>;
+}
+
+function _fanoutGitResultContext(
   run: ActiveRun,
   parent: DAGGraphNode,
   state: FanoutRuntimeState,
   index: number,
   content: unknown,
-): void {
+): FanoutGitResultContext {
   const validation = parent.gateway_config?.result_git_commit;
-  if (!validation) return;
+  if (!validation) throw new Error("DAG_FANOUT_GIT_RESULT_INVALID result_git_commit is not configured");
   if (parent.gateway_config?.workspace_strategy !== "isolated_git_worktree") {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID result_git_commit requires isolated_git_worktree");
   }
-  const commitSha = _fieldValue(content, validation.commit_field);
   const reportedWorkspace = _fieldValue(content, validation.workspace_field);
   const expectedWorkspace = _fanoutChildWorkspacePath(parent, state, index);
   if (reportedWorkspace !== expectedWorkspace) {
     throw new Error(
       `DAG_FANOUT_GIT_RESULT_INVALID workspace '${String(reportedWorkspace ?? "")}' does not match '${expectedWorkspace}'`,
     );
-  }
-  if (typeof commitSha !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
-    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID commit SHA is missing or malformed");
   }
   const resolved = _commandGatewayCwd(run, RUN_WORKSPACE_CWD);
   if ("error" in resolved) throw new Error(`DAG_FANOUT_GIT_RESULT_INVALID ${resolved.error}`);
@@ -4589,6 +4596,23 @@ function _assertFanoutGitCommitResult(
   ) {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree Git binding is invalid");
   }
+  return { workspace, git };
+}
+
+function _assertFanoutGitCommitResult(
+  run: ActiveRun,
+  parent: DAGGraphNode,
+  state: FanoutRuntimeState,
+  index: number,
+  content: unknown,
+): void {
+  const validation = parent.gateway_config?.result_git_commit;
+  if (!validation) return;
+  const commitSha = _fieldValue(content, validation.commit_field);
+  if (typeof commitSha !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID commit SHA is missing or malformed");
+  }
+  const { git } = _fanoutGitResultContext(run, parent, state, index, content);
   const exists = git(["cat-file", "-e", `${commitSha.toLowerCase()}^{commit}`]);
   if (exists.status !== 0 || exists.error) {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID commit does not exist in the isolated worktree");
@@ -4605,6 +4629,89 @@ function _assertFanoutGitCommitResult(
   }
 }
 
+function _fanoutChildSucceeded(parent: DAGGraphNode, port: string, content: unknown): boolean {
+  const config = parent.gateway_config;
+  const selected = _fieldValue(content, config?.success_field);
+  const successValues = config?.success_values ?? [true, "pass", "passed", "success", "approved", "yes", "act"];
+  return port !== "failed" && (!config?.success_field || successValues.some((value) => value === selected));
+}
+
+function _materializeManagerOwnedFanoutCommit(
+  run: ActiveRun,
+  child: DAGGraphNode,
+  port: string,
+  content: unknown,
+): unknown {
+  const dynamic = child.extra?.dynamic_fanout;
+  if (!dynamic || typeof dynamic !== "object" || Array.isArray(dynamic)) return content;
+  const info = dynamic as Record<string, unknown>;
+  const parentId = typeof info.parent_node === "string" ? info.parent_node : "";
+  const index = typeof info.index === "number" ? info.index : -1;
+  const invocation = typeof info.invocation === "number" ? info.invocation : 1;
+  const parent = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === parentId);
+  const state = parent ? _fanoutState(parent) : undefined;
+  const validation = parent?.gateway_config?.result_git_commit;
+  if (
+    !parent || !state || invocation !== state.invocation || index < 0
+    || validation?.commit_mode !== "manager"
+    || !_fanoutChildSucceeded(parent, port, content)
+  ) {
+    return content;
+  }
+  if (!content || typeof content !== "object" || Array.isArray(content)) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID manager-owned commit requires an object result");
+  }
+
+  const enriched = structuredClone(content as Record<string, unknown>);
+  const { git } = _fanoutGitResultContext(run, parent, state, index, enriched);
+  const message = `homerail fanout ${parent.node_id}/${child.node_id}`;
+  const status = git(["status", "--porcelain"]);
+  if (status.status !== 0 || status.error) {
+    throw new Error(`DAG_FANOUT_GIT_RESULT_INVALID unable to inspect manager-owned changes: ${String(status.stderr || status.error?.message || "unknown error").trim().slice(0, 1_000)}`);
+  }
+  if (String(status.stdout).trim()) {
+    const added = git(["add", "--all", "--", "."]);
+    if (added.status !== 0 || added.error) {
+      throw new Error(`DAG_FANOUT_GIT_RESULT_INVALID Manager could not stage worker changes: ${String(added.stderr || added.error?.message || "unknown error").trim().slice(0, 1_000)}`);
+    }
+    const staged = git(["diff", "--cached", "--quiet"]);
+    if (staged.status !== 1 || staged.error) {
+      throw new Error("DAG_FANOUT_GIT_RESULT_INVALID worker produced no committable changes");
+    }
+    const committed = git([
+      "-c", "user.name=HomeRail Manager",
+      "-c", "user.email=homerail-manager@localhost",
+      "-c", "commit.gpgsign=false",
+      "commit", "--no-gpg-sign", "-m", message,
+    ], 60_000);
+    if (committed.status !== 0 || committed.error) {
+      throw new Error(`DAG_FANOUT_GIT_RESULT_INVALID Manager could not commit worker changes: ${String(committed.stderr || committed.error?.message || "unknown error").trim().slice(0, 1_000)}`);
+    }
+  } else {
+    const subject = git(["log", "-1", "--format=%s"]);
+    if (subject.status !== 0 || subject.error || String(subject.stdout).trim() !== message) {
+      throw new Error("DAG_FANOUT_GIT_RESULT_INVALID worker produced no changes for Manager to commit");
+    }
+  }
+
+  const head = git(["rev-parse", "HEAD"]);
+  const commitSha = String(head.stdout).trim().toLowerCase();
+  if (head.status !== 0 || head.error || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID Manager commit did not produce a valid HEAD");
+  }
+  enriched[validation.commit_field] = commitSha;
+  _assertFanoutGitCommitResult(run, parent, state, index, enriched);
+  emit("dag:fanout_git_commit_created", {
+    runId: run.runId,
+    nodeId: child.node_id,
+    parentNodeId: parent.node_id,
+    index,
+    commitSha,
+    owner: "manager",
+  });
+  return enriched;
+}
+
 function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, content: unknown): void {
   const dynamic = child.extra?.dynamic_fanout;
   if (!dynamic || typeof dynamic !== "object" || Array.isArray(dynamic)) return;
@@ -4617,9 +4724,7 @@ function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, c
   if (!parent || !state || invocation !== state.invocation || index < 0 || state.results.some((result) => result.node_id === child.node_id)) return;
   state.active = state.active.filter((id) => id !== child.node_id);
   const config = parent.gateway_config;
-  const selected = _fieldValue(content, config?.success_field);
-  const successValues = config?.success_values ?? [true, "pass", "passed", "success", "approved", "yes", "act"];
-  const success = port !== "failed" && (!config?.success_field || successValues.some((value) => value === selected));
+  const success = _fanoutChildSucceeded(parent, port, content);
   if (success) _assertFanoutGitCommitResult(run, parent, state, index, content);
   state.results.push({ index, node_id: child.node_id, port, content, success });
   state.results.sort((left, right) => left.index - right.index);

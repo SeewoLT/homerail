@@ -291,6 +291,7 @@ config:
     commit_field: commit_sha
     workspace_field: workspace_path
     require_clean: true
+    commit_mode: manager
 ```
 
 Its semantics are:
@@ -315,10 +316,12 @@ Its semantics are:
 - only `handoff` is available unless DAG tools are declared explicitly;
 - each child has a unique logical actor, provider session, and isolated
   worktree based on the same immutable source SHA;
-- successful child handoffs are accepted only when the reported workspace is
-  that child's exact worktree, the reported commit exists and equals its HEAD,
-  and the worktree is clean; a syntactically valid but fabricated SHA is
-  rejected before aggregation;
+- with `commit_mode: manager`, Git metadata remains read-only to the model. A
+  successful child reports its exact worktree with intended file changes;
+  Manager validates the binding, stages and commits those changes under a
+  deterministic identity, enriches the result with the new exact HEAD, and
+  verifies that the worktree is clean before aggregation. A no-op or a
+  fabricated workspace is rejected;
 - child corrections retain the same policy and cannot broaden it;
 - runtime events expose the effective policy digest for audit.
 
@@ -327,16 +330,19 @@ create write-capable or credential-bearing children through permissive defaults.
 
 ## Aggregation
 
-Implementers hand off patch artifacts; they do not merge branches or push.
-Trusted patch collection verifies each artifact against its declared base SHA,
-rejects forbidden paths and binary/symlink/submodule changes, and records the
-patch digest.
+Implementers hand off changed worktrees; they do not write Git metadata, merge
+branches, or push. HomeRail's Worker boundary first rejects changes outside the
+declared worktree policy. Manager then creates and validates one commit per
+successful worker, preserving a durable exact proposal without granting the
+model access to the shared repository's `.git` directory.
 
 The DeepSeek aggregator receives the immutable task, WorkPlan, bounded worker
-reports, patches, and conflict metadata. It applies patches in the WorkPlan's
-declared order to a separate integration worktree. It may resolve integration
-conflicts and add glue changes, but all resulting changes remain subject to the
-global path policy and deterministic patch collector.
+reports, Manager-created commits, and conflict metadata. It inspects those
+commits read-only and copies or applies their file changes in WorkPlan order to
+the integration checkout; it does not stage, commit, merge, or cherry-pick. It
+may resolve integration conflicts and add glue changes, but all resulting
+changes remain subject to the global path policy and deterministic patch
+collector.
 
 The aggregator is the first model node allowed to request a PR write. It does
 so by passing bounded file bytes and the exact expected head SHA to the Manager

@@ -195,9 +195,11 @@ tool-call budget. Do not add a fixed tool-call budget to this workflow.
 The caller may supply only one to three parallel-safe implementation items and
 must combine coupled work instead of declaring a separate
 verification/dependency worker. For every successful worker result, Manager
-verifies that `workspace_path` is
-the assigned isolated worktree, `commit_sha` exists and is that worktree's
-current HEAD, and the worktree is clean before aggregation can start.
+verifies that `workspace_path` is the assigned isolated worktree, creates the
+Git commit itself from the policy-checked file changes, injects the resulting
+`commit_sha` into the fan-out result, and verifies that the commit is the clean
+worktree HEAD before aggregation can start. Model-issued Git metadata changes
+remain disallowed.
 
 ## Start a local or stable run
 

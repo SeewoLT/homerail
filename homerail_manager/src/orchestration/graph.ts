@@ -115,6 +115,7 @@ export interface DAGGatewayConfig {
     commit_field: string;
     workspace_field: string;
     require_clean?: boolean;
+    commit_mode?: "worker" | "manager";
   };
   max_parallelism?: number;
   completion?: "all" | "any" | "n_of_m" | string;

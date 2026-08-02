@@ -101,6 +101,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
           builtin_tool_policy: "backend_native",
           workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: ["input"] },
         },
+        ...(nodeId === "implement" ? { result_git_commit: { commit_mode: "manager" } } : {}),
       });
     }
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
@@ -203,7 +204,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
           workspace_path: workspacePath,
           summary: "fabricated commit",
           tests: [],
-        })).toThrow("DAG_FANOUT_GIT_RESULT_INVALID commit does not exist");
+        })).toThrow("DAG_FANOUT_GIT_RESULT_INVALID worker produced no changes");
         expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get(nodeId)).toBe("RUNNING");
         expect(() => handoffActiveRun("autofix-v2-run", nodeId, "result", {
           status: "implemented",
@@ -214,28 +215,30 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
           tests: [],
         })).toThrow("DAG_FANOUT_GIT_RESULT_INVALID workspace");
         expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get(nodeId)).toBe("RUNNING");
-        const dirtyPath = path.join(home, "workspace", "autofix-v2-run", workspacePath, "dirty.tmp");
-        fs.writeFileSync(dirtyPath, "uncommitted");
-        expect(() => handoffActiveRun("autofix-v2-run", nodeId, "result", {
-          status: "implemented",
-          task_id: "runtime",
-          commit_sha: head,
-          workspace_path: workspacePath,
-          summary: "dirty workspace",
-          tests: [],
-        })).toThrow("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree has uncommitted changes");
-        expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get(nodeId)).toBe("RUNNING");
-        fs.rmSync(dirtyPath);
       }
+      fs.writeFileSync(path.join(worktree, `worker-${index}.txt`), `worker ${index}\n`);
       handoffActiveRun("autofix-v2-run", nodeId, "result", {
         status: "implemented",
         task_id: index === 1 ? "runtime" : "tests",
-        commit_sha: head,
         workspace_path: workspacePath,
         summary: "implemented",
         tests: ["fixture"],
       });
+      expect(git(worktree, ["rev-parse", "HEAD"])).not.toBe(head);
+      expect(git(worktree, ["status", "--porcelain"])).toBe("");
+      expect(git(worktree, ["log", "-1", "--format=%s"])).toBe(
+        `homerail fanout implement/${nodeId}`,
+      );
     }
+
+    const implementRuntime = getActiveRun("autofix-v2-run")?.dagRun.graph.nodes
+      .find((node) => node.node_id === "implement")?.extra?.fanout_runtime as {
+        results?: Array<{ content?: { commit_sha?: string } }>;
+      } | undefined;
+    expect(implementRuntime?.results?.map((result) => result.content?.commit_sha)).toEqual([
+      git(path.join(home, "workspace", "autofix-v2-run", "workers/implement/inv_0001/item_0001"), ["rev-parse", "HEAD"]),
+      git(path.join(home, "workspace", "autofix-v2-run", "workers/implement/inv_0001/item_0002"), ["rev-parse", "HEAD"]),
+    ]);
 
     expect(parsed.graph.nodes.find((node) => node.node_id === "aggregate")?.extra?.agent_runtime).toMatchObject({
       builtin_tool_policy: "backend_native",

@@ -95,7 +95,7 @@ spec:
     WorkerResult:
       type: object
       additionalProperties: false
-      required: [status, task_id, commit_sha, workspace_path, summary, tests]
+      required: [status, task_id, workspace_path, summary, tests]
       properties:
         status: { type: string, enum: [implemented, cannot_implement] }
         task_id: { type: string, minLength: 1, maxLength: 64 }
@@ -194,11 +194,13 @@ spec:
         input.workspace_path. The immutable task plan owns worker division;
         read the mounted task document for global acceptance criteria. Never
         access the PR or credentials. input.workspace_path is a real Git
-        worktree even though .git is a file. Run focused tests and commit from
-        that exact worktree. Never copy changes into /workspace/repo or another
-        worker's directory. Verify git cat-file -e HEAD^{commit} and a clean
-        git status, then hand off result with the exact HEAD SHA and workspace
-        path. If dependencies are absent, use only the repository's locked,
+        worktree even though .git is a file. Git metadata is Manager-owned and
+        read-only: do not run git add, commit, checkout, reset, or another
+        metadata-changing Git command. Run focused tests, leave only intended
+        working-tree changes in that exact worktree, and hand off result with
+        the exact workspace path; Manager validates and commits the changes.
+        Never copy changes into /workspace/repo or another worker's directory.
+        If dependencies are absent, use only the repository's locked,
         lockfile-preserving install command (for npm, use npm ci and never npm
         install). Do not modify dependency manifests or lockfiles unless the
         task item explicitly lists them; revert incidental changes before
@@ -207,9 +209,12 @@ spec:
     aggregator:
       description: DeepSeek V4 Flash candidate integrator
       system: |
-        Treat the dynamic worker results as proposals. Inspect every commit,
-        integrate compatible changes in /workspace/repo, resolve overlap, and
-        run focused tests. Use github_pr/pull_request_snapshot to obtain the
+        Treat the dynamic worker results as proposals. Inspect every
+        Manager-created commit read-only, then copy or apply its file changes
+        into /workspace/repo in declared task order, resolve overlap, and run
+        focused tests. Git metadata is Manager-owned and read-only: do not run
+        git add, commit, cherry-pick, checkout, reset, or merge. Use
+        github_pr/pull_request_snapshot to obtain the
         exact current Draft PR head. Publish changed file bytes only through
         github_pr/commit_files with expected_head_sha; never use git push or a
         raw token. Then hand off candidate with review_round 1 and the broker's
@@ -301,6 +306,7 @@ spec:
           commit_field: commit_sha
           workspace_field: workspace_path
           require_clean: true
+          commit_mode: manager
         max_items: 3
         max_parallelism: 3
         completion: all
