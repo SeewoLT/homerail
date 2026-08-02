@@ -144,6 +144,15 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     expect(parsed.meta.agents?.analyzer).toBeUndefined();
     expect(parsed.meta.agents?.implementer?.system).toContain("npm ci");
     expect(parsed.meta.agents?.implementer?.system).toMatch(/never npm\s+install/);
+    expect(parsed.meta.agents?.aggregator?.system).toContain(
+      'containing exactly {"head_sha":"<commit result head_sha>"',
+    );
+    expect(parsed.meta.agents?.aggregator?.system).toMatch(
+      /top-level summary does not satisfy the\s+Candidate content contract/,
+    );
+    expect(parsed.meta.agents?.fixer?.system).toMatch(
+      /containing exactly\s+\{"status":"fixed","previous_head_sha":"<snapshot head_sha>"/,
+    );
     for (const agentId of ["aggregator", "reviewer", "fixer"] as const) {
       expect(parsed.meta.agents?.[agentId]?.system).toMatch(/credential_ref\s+github-autofix/);
       expect(parsed.meta.agents?.[agentId]?.system).toMatch(/broker name\s+github_pr/);
@@ -368,6 +377,21 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
       action: "commit_workspace",
       result: { head_sha: head, manifest_sha256: MANIFEST_SHA256 },
     });
+    expect(() => handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
+      head_sha: head,
+      manifest_sha256: MANIFEST_SHA256,
+    })).toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
+    expect(requestNodeCorrection(
+      "autofix-v2-run",
+      "aggregate",
+      "candidate content omitted summary and tests",
+    ).status).toBe("scheduled");
+    executor.tick("autofix-v2-run");
+    const receiptCorrection = String(dispatcher.dispatched.at(-1)?.inputs.correction?.at(-1));
+    expect(receiptCorrection).toContain("Valid durable broker receipts already exist for this exact node session");
+    expect(receiptCorrection).toContain(`\"head_sha\":\"${head}\"`);
+    expect(receiptCorrection).toContain(`\"manifest_sha256\":\"${MANIFEST_SHA256}\"`);
+    expect(receiptCorrection).toContain("Do not repeat an already successful side-effecting broker action");
     handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
       head_sha: head,
       manifest_sha256: MANIFEST_SHA256,

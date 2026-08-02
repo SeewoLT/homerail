@@ -2083,6 +2083,7 @@ function _correctionPrompt(
   failurePorts: string[],
   outputContracts: Record<string, { contract: string; schema: unknown }>,
   brokerRequirements: BrokerActionRequirement[],
+  brokerReceipts: BrokerActionReceipt[],
 ): string {
   const declaredPorts = outputPorts.length > 0 ? outputPorts.join(", ") : "done";
   const contractGuidance = Object.keys(outputContracts).length > 0
@@ -2091,10 +2092,23 @@ function _correctionPrompt(
         `Exact output contracts by port (JSON Schema): ${JSON.stringify(outputContracts)}`,
       ]
     : [];
-  const brokerGuidance = brokerRequirements.length > 0
+  const brokerActions = Array.from(new Set(brokerRequirements.map(
+    (requirement) => `${requirement.credential_ref}/${requirement.broker}/${requirement.action}`,
+  )));
+  const existingReceipts = brokerReceipts.map((receipt) => ({
+    credential_ref: receipt.credential_ref,
+    broker: receipt.broker,
+    action: receipt.action,
+    ...(receipt.bound_results ? { bound_results: receipt.bound_results } : {}),
+  }));
+  const brokerGuidance = brokerActions.length > 0
     ? [
         "Correction mode permits only declared credential_broker_call verification actions and the final handoff tool call. Do not use any built-in tools or other DAG tools.",
-        `Broker verification actions available when required by the corrected output: ${brokerRequirements.map((requirement) => `${requirement.credential_ref}/${requirement.broker}/${requirement.action}`).join(", ")}.`,
+        `Broker verification actions available when required by the corrected output: ${brokerActions.join(", ")}.`,
+        ...(existingReceipts.length > 0 ? [
+          `Valid durable broker receipts already exist for this exact node session: ${JSON.stringify(existingReceipts)}.`,
+          "Reuse the receipt bound_results verbatim in the corrected handoff. Do not repeat an already successful side-effecting broker action.",
+        ] : []),
         "If the corrected output triggers one of those requirements and no valid receipt exists, call that declared broker action before the handoff. Otherwise call handoff directly.",
       ]
     : ["Correction mode permits only the handoff tool. Do not repeat investigation, file changes, or other side effects."];
@@ -2148,6 +2162,18 @@ export function requestNodeCorrection(
       ? [[port, { contract: contract.contract, schema: contract.schema }] as const]
       : [];
   }));
+  const brokerRequirements = _outputBrokerActionRequirements(run, nodeId);
+  const sessionId = run.nodeSessions.get(nodeId)?.sessionId;
+  const brokerActionKeys = new Set(brokerRequirements.map(
+    (requirement) => `${requirement.credential_ref}\u0000${requirement.broker}\u0000${requirement.action}`,
+  ));
+  const brokerReceipts = sessionId === undefined
+    ? []
+    : _brokerActionReceipts(run).filter((receipt) => (
+        receipt.node_id === nodeId
+        && receipt.session_id === sessionId
+        && brokerActionKeys.has(`${receipt.credential_ref}\u0000${receipt.broker}\u0000${receipt.action}`)
+      ));
   run.counters.corrections[nodeId] = attempt;
   const mailbox = run.dagRun.mailboxes.get(nodeId);
   if (mailbox) {
@@ -2161,7 +2187,8 @@ export function requestNodeCorrection(
       successPorts,
       failurePorts,
       outputContracts,
-      _outputBrokerActionRequirements(run, nodeId),
+      brokerRequirements,
+      brokerReceipts,
     ));
     mailbox.set("correction", values);
   }

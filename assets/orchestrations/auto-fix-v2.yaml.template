@@ -283,8 +283,12 @@ spec:
         workspace_path, and expected_head_sha; never encode file contents into
         a tool call, omit a dirty file, or make multiple commits for one
         candidate. Never use the broker name github_pr as credential_ref, git
-        push, or a raw token. Then hand off candidate with exactly the head_sha
-        and manifest_sha256 returned by commit_workspace.
+        push, or a raw token. Then hand off candidate with one content object
+        containing exactly {"head_sha":"<commit result head_sha>",
+        "manifest_sha256":"<commit result manifest_sha256>",
+        "summary":"<bounded implementation summary>","tests":["<test evidence>"]}.
+        The handoff tool's optional top-level summary does not satisfy the
+        Candidate content contract.
         Manager derives the complete dirty-file manifest from the only writable
         worktree, binds both values to the handoff, and rejects omissions,
         unrelated paths, a worker commit SHA, or a stale PR head. Refuse
@@ -333,8 +337,12 @@ spec:
         encode file contents into a tool call or omit a dirty file. Never use
         the broker name github_pr as
         credential_ref, git push, or modify any path below .github. Hand off
-        fixed with both previous and new head SHAs plus the exact
-        manifest_sha256 returned by commit_workspace. The snapshot tool
+        fixed with one content object containing exactly
+        {"status":"fixed","previous_head_sha":"<snapshot head_sha>",
+        "head_sha":"<commit result head_sha>",
+        "manifest_sha256":"<commit result manifest_sha256>",
+        "summary":"<bounded fix summary>","tests":["<test evidence>"]}.
+        The snapshot tool
         arguments are exactly {"credential_ref":"github-autofix",
         "action":"pull_request_snapshot","input":{}}.
 
