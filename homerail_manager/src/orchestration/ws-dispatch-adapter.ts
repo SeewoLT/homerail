@@ -602,6 +602,8 @@ export class WsDispatchAdapter implements DAGDispatcher {
       `provisioned-${envelope.runId}-${envelope.nodeId}-${randomUUID()}`,
     );
     const agentBackend = normalizeAgentBackend(envelope.agentConfig.agent_type);
+    const codexNestedSandbox = agentBackend === "codex_appserver"
+      && envelope.builtinToolPolicy === "backend_native";
     const workspaceInputs = dagWorkspaceInputProjections(envelope.runId);
     const provisionerOpts: ProvisionerOptions = {
       ...this.provisionerOpts,
@@ -609,6 +611,7 @@ export class WsDispatchAdapter implements DAGDispatcher {
       workspace: this.provisionerOpts?.workspace ?? envelope.workspace,
       workspaceReadOnly: Array.isArray(envelope.workspaceAccess?.writable_paths) &&
         envelope.workspaceAccess.writable_paths.length === 0,
+      codexNestedSandbox,
       ...(workspaceInputs.length > 0 ? { workspaceInputs } : {}),
       env: {
         ...(this.provisionerOpts?.env ?? {}),

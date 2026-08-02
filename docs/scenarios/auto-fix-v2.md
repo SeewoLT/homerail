@@ -23,6 +23,13 @@ predates the runtime and broker support described below.
   native sandboxed shell/patch surface, is mutually exclusive with the exact
   Claude-style `allowed_builtin_tools` field, and requires `workspace_access`.
   HomeRail still verifies that the turn changed only declared paths.
+- On Linux Docker Nodes, Manager automatically requests the fixed nested-Codex
+  sandbox profile only for that `codex_appserver + backend_native`
+  combination. It relaxes the outer container's seccomp/AppArmor profiles so
+  the inner unprivileged `bwrap` sandbox can start, but adds no capabilities
+  and does not use privileged containers. Codex still enforces
+  `workspace-write`; Docker mounts, network, cgroups, and HomeRail's post-turn
+  path verification remain active.
 - The DeepSeek aggregator may read and update only the bound Draft PR through
   the `github_pr` Manager broker.
 - GLM-5.2 reviewer nodes have `session_scope: dispatch`; every re-entry gets a

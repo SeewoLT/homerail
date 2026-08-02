@@ -92,6 +92,8 @@ export interface WorkerCreateOptions {
   workspace?: Record<string, unknown>;
   workspaceReadOnly?: boolean;
   workspaceInputs?: DagWorkspaceInputProjection[];
+  /** Allow Codex's inner bwrap sandbox to create its namespace. */
+  codexNestedSandbox?: boolean;
   timeoutMs?: number;
 }
 
@@ -113,6 +115,7 @@ export function sendWorkerCreateRequest(
       workspace: options.workspace,
       workspace_read_only: options.workspaceReadOnly === true,
       workspace_inputs: options.workspaceInputs,
+      codex_nested_sandbox: options.codexNestedSandbox === true,
     },
     { timeoutMs: options.timeoutMs },
   );

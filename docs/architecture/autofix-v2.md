@@ -466,6 +466,16 @@ names. The outer HomeRail workspace policy still verifies paths after the turn,
 and all GitHub mutation remains fenced behind the Manager broker. GLM-5.2
 review uses the Claude Agent SDK with a fresh dispatch-scoped session.
 
+On Linux Docker Nodes, Manager derives a trusted `codex_nested_sandbox` worker
+provisioning flag only from the combination of Codex app-server and
+`backend_native`; it is not a WorkflowSpec field. Node maps that boolean to the
+fixed Docker options `seccomp=unconfined` and `apparmor=unconfined`, which let
+Codex create its inner unprivileged `bwrap` namespace. These Workers are not
+privileged and receive no added Linux capabilities. Docker mount, network,
+user, cgroup, and workspace boundaries remain in force, while model-issued
+commands remain constrained by Codex's inner `workspace-write` sandbox. Other
+Worker backends and Plugin Runtime isolation are unchanged.
+
 Before a real run, the stable adapter resolves each selector to exactly one
 active LLM setting, confirms the required compatible harness and endpoint, and
 runs bounded capability smokes for tool use, structured handoff, and fresh

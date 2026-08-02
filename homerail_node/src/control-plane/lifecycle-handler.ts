@@ -125,13 +125,21 @@ async function dispatchOperation(
       if (resource_type === "worker") {
         const workspaceId = spec.workspace_id as string;
         if (!workspaceId) throw new Error("spec.workspace_id is required for worker create");
+        const codexNestedSandbox = spec.codex_nested_sandbox === true;
         const config: ContainerConfig = {
           image: (spec.image as string) || "homerail-worker:latest",
           env: (spec.env as Record<string, string>) || undefined,
           labels: {
             ...(spec.labels as Record<string, string> || {}),
             "homerail.resource_type": "worker",
+            "homerail.codex_nested_sandbox": String(codexNestedSandbox),
           },
+          // The outer container keeps its ordinary capability, mount, network,
+          // and cgroup boundaries. These two fixed relaxations only permit the
+          // Codex app-server to install its inner bwrap command sandbox.
+          securityOpts: codexNestedSandbox
+            ? ["seccomp=unconfined", "apparmor=unconfined"]
+            : undefined,
           extraHosts: Array.isArray(spec.extra_hosts)
             ? spec.extra_hosts.filter(
                 (value): value is string => typeof value === "string" && value.length > 0,

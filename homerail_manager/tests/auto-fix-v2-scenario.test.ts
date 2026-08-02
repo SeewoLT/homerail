@@ -75,8 +75,12 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     closeDb();
     if (previousHome === undefined) delete process.env.HOMERAIL_HOME;
     else process.env.HOMERAIL_HOME = previousHome;
-    const inputRoot = path.join(home, "workspace", "autofix-v2-run", "input");
-    if (fs.existsSync(inputRoot)) fs.chmodSync(inputRoot, 0o700);
+    for (const inputRoot of [
+      path.join(home, "workspace", "autofix-v2-run", "input"),
+      path.join(home, "relocated", "autofix-v2-run", "input"),
+    ]) {
+      if (fs.existsSync(inputRoot)) fs.chmodSync(inputRoot, 0o700);
+    }
     fs.rmSync(home, { recursive: true, force: true });
   });
 

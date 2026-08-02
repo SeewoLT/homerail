@@ -413,8 +413,39 @@ describe("handleLifecycleRequest", () => {
 
       const container = provider.containers.get(String(data.id));
       expect(container!.config.workdir).toBe("/workspace");
+      expect(container!.config.securityOpts).toBeUndefined();
+      expect(container!.config.labels?.["homerail.codex_nested_sandbox"]).toBe("false");
       expect(container!.config.mounts).toHaveLength(1);
       expect(container!.config.mounts![0]!.host).toBe("/home/user/.homerail/workspace/ws-1");
+    });
+
+    it("maps the trusted Codex nested-sandbox flag to a fixed Docker profile", async () => {
+      process.env["HOMERAIL_HOME"] = "/home/user/.homerail";
+      const provider = new MockProvider();
+      const responses: LifecycleResponse[] = [];
+
+      await handleLifecycleRequest(
+        makeRequest({
+          resource_type: "worker",
+          operation: "create",
+          spec: {
+            workspace_id: "ws-codex-native",
+            codex_nested_sandbox: true,
+            labels: { "homerail.codex_nested_sandbox": "spoofed" },
+          },
+        }),
+        provider,
+        (message) => responses.push(message),
+      );
+
+      expect(responses[0]!.status).toBe("success");
+      const container = provider.containers.get(String(responses[0]!.resource_data!.id));
+      expect(container!.config.securityOpts).toEqual([
+        "seccomp=unconfined",
+        "apparmor=unconfined",
+      ]);
+      expect(container!.config.labels?.["homerail.codex_nested_sandbox"]).toBe("true");
+      expect(container!.config.capDrop).toBeUndefined();
     });
 
     it("create worker preserves extra host mappings", async () => {
