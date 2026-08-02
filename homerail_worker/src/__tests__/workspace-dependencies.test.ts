@@ -11,6 +11,8 @@ const PACKAGES = [
   "homerail_plugin_sdk",
   "homerail_manager",
   "homerail_worker",
+  "homerail_node",
+  "homerail_cli",
 ] as const;
 
 const roots: string[] = [];
@@ -78,6 +80,12 @@ describe("trusted workspace dependency projection", () => {
       .toBe(fs.realpathSync(path.join(repository, "homerail_plugin_sdk")));
     expect(fs.realpathSync(path.join(repository, "agent-ui", "node_modules", "homerail-protocol")))
       .toBe(fs.realpathSync(path.join(repository, "homerail_protocol")));
+    expect(fs.realpathSync(path.join(repository, "homerail_node", "node_modules", "homerail-protocol")))
+      .toBe(fs.realpathSync(path.join(repository, "homerail_protocol")));
+    expect(fs.realpathSync(path.join(repository, "homerail_cli", "node_modules", "homerail-protocol")))
+      .toBe(fs.realpathSync(path.join(repository, "homerail_protocol")));
+    expect(fs.realpathSync(path.join(repository, "homerail_cli", "node_modules", "homerail-plugin-sdk")))
+      .toBe(fs.realpathSync(path.join(repository, "homerail_plugin_sdk")));
   });
 
   it("fails closed on changed metadata and an untrusted existing dependency tree", () => {

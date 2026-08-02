@@ -32,12 +32,18 @@ const SOURCE_INPUTS = [
   "homerail_plugin_sdk/package-lock.json",
   "homerail_manager/package.json",
   "homerail_manager/package-lock.json",
+  "homerail_node/package.json",
+  "homerail_node/package-lock.json",
+  "homerail_cli/package.json",
+  "homerail_cli/package-lock.json",
 ] as const;
 const DEPENDENCY_METADATA_PACKAGES = [
   "homerail_worker",
   "homerail_protocol",
   "homerail_plugin_sdk",
   "homerail_manager",
+  "homerail_node",
+  "homerail_cli",
 ] as const;
 const MAX_BUILD_LOG_LINES = 240;
 const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;

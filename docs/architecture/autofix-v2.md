@@ -545,9 +545,10 @@ into the selected Worker image. Worker creates an ignored per-worktree
 `node_modules` facade whose external entries point into the immutable image
 cache and whose HomeRail-local entries point at the current isolated worktree.
 The cache covers `homerail_protocol`, `homerail_plugin_sdk`,
-`homerail_manager`, and `homerail_worker`; its manifests participate in the
-Worker source fingerprint, so deployment cannot select an image with stale
-cache metadata. Read-only dispatches receive no facade. Changed manifests,
+`homerail_manager`, `homerail_worker`, `homerail_node`, and `homerail_cli`;
+its manifests participate in the Worker source fingerprint, so deployment
+cannot select an image with stale cache metadata. Read-only dispatches receive
+no facade. Changed manifests,
 changed locks, missing cache data, symlinked target package roots, and existing
 dependency trees without HomeRail's matching projection marker all fail
 closed without opening network access.

@@ -31,8 +31,8 @@ predates the runtime and broker support described below.
   Docker mounts, cgroups, the disposable-container lifecycle, and HomeRail's
   post-turn path verification remain active.
 - The Worker image contains an immutable dependency cache for Agent UI and the
-  HomeRail protocol, plugin SDK, Manager, and Worker packages. Before a writable Codex
-  dispatch, Worker compares each worktree's dependency-relevant normalized
+  HomeRail protocol, plugin SDK, Manager, Worker, Node, and CLI packages. Before
+  a writable Codex dispatch, Worker compares each worktree's dependency-relevant normalized
   `package.json` and `package-lock.json` with the image-owned copies. Matches receive an
   ignored `node_modules` facade made only of links into the image; local
   HomeRail dependencies link back to that dispatch's worktree. A metadata

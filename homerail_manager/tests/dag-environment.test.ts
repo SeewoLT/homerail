@@ -113,6 +113,38 @@ function fingerprintFixture(): string {
         "../homerail_protocol": { name: "homerail-protocol", version: "0.1.0-alpha.1" },
       },
     }),
+    "homerail_node/package.json": JSON.stringify({
+      name: "homerail-node",
+      version: "0.1.0-alpha.1",
+      dependencies: { "homerail-protocol": "file:../homerail_protocol" },
+    }),
+    "homerail_node/package-lock.json": JSON.stringify({
+      name: "homerail-node",
+      version: "0.1.0-alpha.1",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "homerail-node", version: "0.1.0-alpha.1" },
+        "../homerail_protocol": { name: "homerail-protocol", version: "0.1.0-alpha.1" },
+      },
+    }),
+    "homerail_cli/package.json": JSON.stringify({
+      name: "homerail-cli",
+      version: "0.1.0-alpha.1",
+      dependencies: {
+        "homerail-plugin-sdk": "file:../homerail_plugin_sdk",
+        "homerail-protocol": "file:../homerail_protocol",
+      },
+    }),
+    "homerail_cli/package-lock.json": JSON.stringify({
+      name: "homerail-cli",
+      version: "0.1.0-alpha.1",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "homerail-cli", version: "0.1.0-alpha.1" },
+        "../homerail_plugin_sdk": { name: "homerail-plugin-sdk", version: "0.1.0-alpha.1" },
+        "../homerail_protocol": { name: "homerail-protocol", version: "0.1.0-alpha.1" },
+      },
+    }),
   };
   for (const [relativePath, content] of Object.entries(files)) {
     const target = path.join(repoRoot, relativePath);
@@ -177,6 +209,10 @@ it("ignores release-only package metadata in the Worker source fingerprint", () 
     "homerail_plugin_sdk/package-lock.json",
     "homerail_manager/package.json",
     "homerail_manager/package-lock.json",
+    "homerail_node/package.json",
+    "homerail_node/package-lock.json",
+    "homerail_cli/package.json",
+    "homerail_cli/package-lock.json",
   ]) {
     const filePath = path.join(repoRoot, relativePath);
     const metadata = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
@@ -216,6 +252,19 @@ it("changes the Worker source fingerprint when build dependencies change", () =>
     dependencies: Record<string, string>;
   };
   metadata.dependencies.zod = "^4.0.0";
+  fs.writeFileSync(packagePath, JSON.stringify(metadata), "utf8");
+
+  expect(dagWorkerSourceFingerprint(repoRoot)).not.toBe(original);
+});
+
+it("changes the Worker source fingerprint when projected Node dependencies change", () => {
+  const repoRoot = fingerprintFixture();
+  const original = dagWorkerSourceFingerprint(repoRoot);
+  const packagePath = path.join(repoRoot, "homerail_node", "package.json");
+  const metadata = JSON.parse(fs.readFileSync(packagePath, "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+  metadata.dependencies.dockerode = "^6.0.0";
   fs.writeFileSync(packagePath, JSON.stringify(metadata), "utf8");
 
   expect(dagWorkerSourceFingerprint(repoRoot)).not.toBe(original);

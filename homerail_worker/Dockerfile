@@ -54,6 +54,10 @@ COPY homerail_plugin_sdk/package.json homerail_plugin_sdk/package-lock.json* /op
 RUN cd /opt/homerail-dependency-cache/homerail_plugin_sdk && npm ci
 COPY homerail_manager/package.json homerail_manager/package-lock.json* /opt/homerail-dependency-cache/homerail_manager/
 RUN cd /opt/homerail-dependency-cache/homerail_manager && npm ci
+COPY homerail_node/package.json homerail_node/package-lock.json* /opt/homerail-dependency-cache/homerail_node/
+RUN cd /opt/homerail-dependency-cache/homerail_node && npm ci
+COPY homerail_cli/package.json homerail_cli/package-lock.json* /opt/homerail-dependency-cache/homerail_cli/
+RUN cd /opt/homerail-dependency-cache/homerail_cli && npm ci
 COPY agent-ui/package.json agent-ui/package-lock.json* /opt/homerail-dependency-cache/agent-ui/
 RUN cd /opt/homerail-dependency-cache/agent-ui && npm ci --ignore-scripts
 

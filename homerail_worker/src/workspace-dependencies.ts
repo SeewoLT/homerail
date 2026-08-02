@@ -12,6 +12,8 @@ const TRUSTED_PACKAGES = [
   "homerail_plugin_sdk",
   "homerail_manager",
   "homerail_worker",
+  "homerail_node",
+  "homerail_cli",
 ] as const;
 
 const LOCAL_DEPENDENCIES: Partial<Record<(typeof TRUSTED_PACKAGES)[number], Record<string, string>>> = {
@@ -26,6 +28,13 @@ const LOCAL_DEPENDENCIES: Partial<Record<(typeof TRUSTED_PACKAGES)[number], Reco
     "homerail-protocol": "homerail_protocol",
   },
   homerail_worker: {
+    "homerail-protocol": "homerail_protocol",
+  },
+  homerail_node: {
+    "homerail-protocol": "homerail_protocol",
+  },
+  homerail_cli: {
+    "homerail-plugin-sdk": "homerail_plugin_sdk",
     "homerail-protocol": "homerail_protocol",
   },
 };
