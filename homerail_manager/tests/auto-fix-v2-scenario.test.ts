@@ -257,6 +257,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
       const child = getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.find((node) => node.node_id === nodeId);
       expect(child?.extra?.agent_runtime).toMatchObject({
         builtin_tool_policy: "backend_native",
+        codex_sandbox: "danger-full-access",
         workspace_access: {
           writable_paths: [workspacePath],
           readonly_paths: ["input"],
@@ -313,10 +314,12 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
 
     expect(parsed.graph.nodes.find((node) => node.node_id === "aggregate")?.extra?.agent_runtime).toMatchObject({
       builtin_tool_policy: "backend_native",
+      codex_sandbox: "danger-full-access",
     });
     executor.tick("autofix-v2-run");
     expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("aggregate");
     expect(dispatcher.dispatched.at(-1)?.builtinToolPolicy).toBe("backend_native");
+    expect(dispatcher.dispatched.at(-1)?.codexSandbox).toBe("danger-full-access");
     expect(dispatcher.dispatched.at(-1)?.allowedBuiltinTools).toBeUndefined();
     expect(dispatcher.dispatched.at(-1)?.credentialProjections).toMatchObject([{
       broker: "github_pr",
@@ -451,6 +454,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
       const fixerEnvelope = dispatcher.dispatched.find((entry) => entry.nodeId === fixerId);
       expect(fixerEnvelope).toBeDefined();
       expect(fixerEnvelope?.builtinToolPolicy).toBe("backend_native");
+      expect(fixerEnvelope?.codexSandbox).toBe("danger-full-access");
       expect(fixerEnvelope?.allowedBuiltinTools).toBeUndefined();
       expect(fixerEnvelope?.credentialProjections).toMatchObject([{
         broker: "github_pr",

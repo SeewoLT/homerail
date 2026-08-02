@@ -5261,6 +5261,15 @@ function _maxBuiltinToolCalls(run: ActiveRun, node: DAGGraphNode): number | unde
   return nodeLimit ?? workflowLimit;
 }
 
+function _codexSandbox(node: DAGGraphNode): "read-only" | "workspace-write" | "danger-full-access" | undefined {
+  const raw = _agentRuntimeConfig(node).codex_sandbox;
+  if (raw === undefined) return undefined;
+  if (raw !== "read-only" && raw !== "workspace-write" && raw !== "danger-full-access") {
+    throw new Error(`unsupported codex_sandbox '${String(raw)}'`);
+  }
+  return raw;
+}
+
 function _allowedDagTools(node: DAGGraphNode): DagAgentToolName[] | undefined {
   const raw = _agentRuntimeConfig(node).allowed_dag_tools;
   if (!Array.isArray(raw)) return undefined;
@@ -5519,6 +5528,7 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
       builtinToolPolicy: _builtinToolPolicy(node),
       allowedBuiltinTools: _allowedBuiltinTools(node),
       maxBuiltinToolCalls: _maxBuiltinToolCalls(run, node),
+      codexSandbox: _codexSandbox(node),
       allowedDagTools: _allowedDagTools(node),
       ...(effectiveCredentialProjections.length > 0
         ? { credentialProjections: effectiveCredentialProjections }

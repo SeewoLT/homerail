@@ -210,6 +210,13 @@ const AgentRuntimeFields = {
     maximum: 100_000,
     description: "Per-node hard budget for backend-provided tools. HomeRail DAG tools remain available for final handoff.",
   })),
+  codex_sandbox: Type.Optional(Type.Union([
+    Type.Literal("read-only"),
+    Type.Literal("workspace-write"),
+    Type.Literal("danger-full-access"),
+  ], {
+    description: "Codex command sandbox. danger-full-access remains inside the disposable Worker container.",
+  })),
   allowed_dag_tools: Type.Optional(Type.Array(DagAgentToolName, {
     uniqueItems: true,
     maxItems: DAG_AGENT_TOOL_NAMES.length,

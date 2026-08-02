@@ -70,8 +70,13 @@ predates the runtime and broker support described below.
   input directory are always denied even when a broader prefix is declared.
 - Before each GLM dispatch, a Manager-owned `validate_head` broker node requires
   every immutable check on the exact current PR head. Terminal check failures
-  become a structured fixer task; missing/pending checks wait until the bounded
-  operational timeout. After `approve`, a separate Manager-owned
+  become a structured fixer task. For a failed GitHub Actions check, Manager
+  also retrieves a bounded, sanitized tail of the matching job log when the
+  check app, repository, and job/check ID all match the immutable binding. Log
+  content remains repository-controlled, untrusted diagnostic text and is
+  explicitly labeled as never-instructions; the token and response headers
+  never enter the Worker. Missing/pending checks
+  wait until the bounded operational timeout. After `approve`, a separate Manager-owned
   `required_checks` node re-checks the approved `head_sha` before success.
   `github_pr` is the broker implementation name and must never be supplied as
   the credential reference.
@@ -85,8 +90,10 @@ For a pilot, a repository-scoped fine-grained PAT is acceptable. Give it only:
 - Checks: read-only
 
 If `pr_context.validation_workflow` is configured, also grant Actions:
-read/write so the broker can call `workflow_dispatch`. Omit that permission
-when trusted CI is triggered outside the DAG.
+read/write so the broker can call `workflow_dispatch` and retrieve failed job
+logs. If trusted CI is triggered outside the DAG, Actions: read-only is enough
+for the bounded job-log evidence; without it the broker safely falls back to
+the check-run output and details URL.
 
 Store it as an encrypted Manager credential; it is never placed in a Worker:
 
@@ -97,7 +104,8 @@ printf '%s' "$GITHUB_AUTOFIX_TOKEN" | hr credential set github-autofix \
 
 For production, prefer a GitHub App installed only on the target repositories.
 Use Contents read/write, Pull requests read, and Checks read. Add Actions
-read/write only when the broker dispatches validation. Store the App material
+read when failed GitHub Actions job logs should be included, or Actions
+read/write when the broker also dispatches validation. Store the App material
 as an opaque JSON credential with fields `app_id`, `installation_id`, and
 `private_key`; the broker mints a short-lived installation token for each call.
 
@@ -232,6 +240,16 @@ against its Anthropic-compatible endpoint. No coding role uses Kimi Code or
 direct chat-completions. An upstream Manager Agent may use any suitable model
 to author `task-plan.json`; that planning session is not part of the execution
 DAG.
+
+These three writable coding roles explicitly use
+`codex_sandbox: danger-full-access`. This disables Codex's inner command
+sandbox so repository tests may bind loopback listeners and use synchronous
+child processes normally. The permission is still contained by the disposable
+Worker container and is rejected for a read-only DAG workspace. Before Codex
+starts, Worker removes every HomeRail control-plane token/secret from the child
+environment; the GitHub credential is never projected and PR mutation remains
+available only through the Manager broker. Do not copy this policy to a Worker
+that receives direct credentials or broad host mounts.
 
 Auto Fix v2 intentionally does not configure any node-level or workflow-level
 tool-call budget. Do not add a fixed tool-call budget to this workflow.

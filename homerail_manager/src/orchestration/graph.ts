@@ -32,6 +32,8 @@ export interface DAGAgentConfig {
   extra?: Record<string, unknown>;
 }
 
+export type DAGCodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+
 export interface DAGOutputRoute {
   to: string | string[];
   condition?: "on_success" | "on_failure" | "always" | string;

@@ -255,6 +255,29 @@ describe("WorkflowSpec v1", () => {
     }));
   });
 
+  it("canonicalizes explicit Codex sandbox policy and rejects maximum access for read-only nodes", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.execute.builtin_tool_policy = "backend_native";
+    workflow.spec.nodes.execute.workspace_access = { writable_paths: ["repo"], readonly_paths: ["input"] };
+    workflow.spec.nodes.execute.codex_sandbox = "danger-full-access";
+
+    const valid = compileWorkflowSource(YAML.stringify(workflow));
+    expect(valid.valid, valid.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+    expect(valid.canonical?.nodes.find((node) => node.id === "execute")?.config).toMatchObject({
+      codex_sandbox: "danger-full-access",
+    });
+    expect(canonicalWorkflowToV1Document(valid.canonical!).spec.nodes.execute).toMatchObject({
+      codex_sandbox: "danger-full-access",
+    });
+
+    workflow.spec.nodes.execute.workspace_access = { writable_paths: [], readonly_paths: ["input"] };
+    const readOnly = compileWorkflowSource(YAML.stringify(workflow));
+    expect(readOnly.valid).toBe(false);
+    expect(readOnly.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_CODEX_SANDBOX_WRITABLE_WORKSPACE_REQUIRED",
+    }));
+  });
+
   it("requires output-producing agents to retain the handoff DAG tool", () => {
     const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
     workflow.spec.nodes.execute.allowed_dag_tools = ["get_graph_context"];

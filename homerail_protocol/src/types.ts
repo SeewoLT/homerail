@@ -609,6 +609,8 @@ export interface DagNodeConfig {
   model: string;
   reasoning_effort?: string;
   service_tier?: string | null;
+  /** Codex command sandbox selected by the trusted WorkflowSpec runtime policy. */
+  codex_sandbox?: "read-only" | "workspace-write" | "danger-full-access";
   outgoing_edges: Edge[];
   incoming_edges: Edge[];
   graph_nodes: string[];

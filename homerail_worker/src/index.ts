@@ -240,6 +240,11 @@ client.on("task", async (msg) => {
         max_builtin_tool_calls: typeof envelope.maxBuiltinToolCalls === "number"
           ? envelope.maxBuiltinToolCalls
           : undefined,
+        codex_sandbox: envelope.codexSandbox === "read-only"
+          || envelope.codexSandbox === "workspace-write"
+          || envelope.codexSandbox === "danger-full-access"
+          ? envelope.codexSandbox
+          : undefined,
         allowed_dag_tools: Array.isArray(envelope.allowedDagTools)
           ? envelope.allowedDagTools as DagAgentToolName[]
           : undefined,

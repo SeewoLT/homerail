@@ -1,4 +1,4 @@
-import type { DAGAgentConfig, DAGEdge } from "./graph.js";
+import type { DAGAgentConfig, DAGCodexSandboxMode, DAGEdge } from "./graph.js";
 import type {
   AgentBuiltinToolPolicy,
   AgentBuiltinToolName,
@@ -39,6 +39,8 @@ export interface DispatchEnvelope {
   builtinToolPolicy?: AgentBuiltinToolPolicy;
   allowedBuiltinTools?: AgentBuiltinToolName[];
   maxBuiltinToolCalls?: number;
+  /** Explicit trusted WorkflowSpec selection for Codex's command sandbox. */
+  codexSandbox?: DAGCodexSandboxMode;
   allowedDagTools?: DagAgentToolName[];
   /** Turn-scoped secrets or opaque Manager-broker references. Never persist this field. */
   credentialProjections?: DagCredentialProjection[];

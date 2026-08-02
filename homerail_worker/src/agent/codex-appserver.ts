@@ -206,10 +206,14 @@ function resolveCodexWorkingDirectory(context: AgentRunContext): string {
   return workspace;
 }
 
-function resolveCodexSandboxMode(context: AgentRunContext): "read-only" | "workspace-write" {
-  return context.workspaceAccess && context.workspaceAccess.writable_paths.length === 0
-    ? "read-only"
-    : "workspace-write";
+function resolveCodexSandboxMode(
+  context: AgentRunContext,
+): "read-only" | "workspace-write" | "danger-full-access" {
+  const writable = !context.workspaceAccess || context.workspaceAccess.writable_paths.length > 0;
+  if (context.codexSandbox === "danger-full-access" && !writable) {
+    throw new Error("danger-full-access Codex sandbox requires a writable DAG workspace");
+  }
+  return context.codexSandbox ?? (writable ? "workspace-write" : "read-only");
 }
 
 function projectedSkillName(value: string, fallback: string): string {

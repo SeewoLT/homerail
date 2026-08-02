@@ -441,6 +441,16 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
           "backend_native agents must declare workspace_access",
         );
       }
+      if (
+        node.codex_sandbox === "danger-full-access"
+        && (node.workspace_access?.writable_paths.length ?? 0) === 0
+      ) {
+        add(
+          `${nodePath}/codex_sandbox`,
+          "DAG_SEMANTIC_CODEX_SANDBOX_WRITABLE_WORKSPACE_REQUIRED",
+          "danger-full-access Codex agents must declare at least one writable workspace path",
+        );
+      }
       const advisorIds = new Set<string>();
       for (let index = 0; index < (node.advisors ?? []).length; index++) {
         const advisor = node.advisors![index];
@@ -628,6 +638,16 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
           `${nodePath}/config/worker_policy/workspace_access`,
           "DAG_SEMANTIC_BACKEND_NATIVE_WORKSPACE_REQUIRED",
           "backend_native fanout workers must declare workspace_access",
+        );
+      }
+      if (
+        workerPolicy?.codex_sandbox === "danger-full-access"
+        && (workerPolicy.workspace_access?.writable_paths.length ?? 0) === 0
+      ) {
+        add(
+          `${nodePath}/config/worker_policy/codex_sandbox`,
+          "DAG_SEMANTIC_CODEX_SANDBOX_WRITABLE_WORKSPACE_REQUIRED",
+          "danger-full-access Codex fanout workers must declare at least one writable workspace path",
         );
       }
       if (workerPolicy?.allowed_dag_tools !== undefined && !workerPolicy.allowed_dag_tools.includes("handoff")) {
@@ -920,6 +940,7 @@ function canonicalNode(id: string, node: WorkflowSpecV1Node): CanonicalNode {
       ...(node.max_builtin_tool_calls !== undefined
         ? { max_builtin_tool_calls: node.max_builtin_tool_calls }
         : {}),
+      ...(node.codex_sandbox !== undefined ? { codex_sandbox: node.codex_sandbox } : {}),
       ...(node.allowed_dag_tools !== undefined
         ? { allowed_dag_tools: [...node.allowed_dag_tools].sort() }
         : {}),
@@ -1635,6 +1656,9 @@ function authoringNode(node: CanonicalNode, canonical: CanonicalWorkflowIR): Rec
         : {}),
       ...(typeof node.config?.max_builtin_tool_calls === "number"
         ? { max_builtin_tool_calls: node.config.max_builtin_tool_calls }
+        : {}),
+      ...(typeof node.config?.codex_sandbox === "string"
+        ? { codex_sandbox: node.config.codex_sandbox }
         : {}),
       ...(Array.isArray(node.config?.allowed_dag_tools)
         ? { allowed_dag_tools: node.config.allowed_dag_tools }
