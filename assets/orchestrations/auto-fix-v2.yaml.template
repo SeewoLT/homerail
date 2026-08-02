@@ -310,7 +310,6 @@ spec:
           session_scope: dispatch
           allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
           allowed_dag_tools: [handoff]
-          max_builtin_tool_calls: 80
           workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
         workspace_strategy: isolated_git_worktree
         workspace_root: workers
@@ -331,7 +330,6 @@ spec:
       workspace_access: { writable_paths: [repo], readonly_paths: [input, workers] }
       allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
       allowed_dag_tools: [handoff, credential_broker_call]
-      max_builtin_tool_calls: 120
       credentials:
         - credential_ref: github-autofix
           purpose: integrate the candidate into the bound Draft PR
@@ -349,7 +347,6 @@ spec:
       workspace_access: { writable_paths: [], readonly_paths: [input, repo, workers] }
       allowed_builtin_tools: [Glob, Grep, LS, Read]
       allowed_dag_tools: [handoff, credential_broker_call]
-      max_builtin_tool_calls: 60
       credentials:
         - credential_ref: github-autofix
           purpose: review the bound Draft PR without mutation
@@ -394,7 +391,6 @@ spec:
           session_scope: dispatch
           allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
           allowed_dag_tools: [handoff, credential_broker_call]
-          max_builtin_tool_calls: 100
           workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
           credentials:
             - credential_ref: github-autofix
@@ -424,7 +420,6 @@ spec:
       workspace_access: { writable_paths: [], readonly_paths: [input, repo, fixers] }
       allowed_builtin_tools: [Glob, Grep, LS, Read]
       allowed_dag_tools: [handoff, credential_broker_call]
-      max_builtin_tool_calls: 60
       credentials:
         - credential_ref: github-autofix
           purpose: re-review the bound Draft PR without mutation
@@ -484,4 +479,3 @@ spec:
     max_handoffs: 48
     max_corrections_per_node: 2
     max_edge_traversals: 4
-    max_tool_calls_per_node: 120

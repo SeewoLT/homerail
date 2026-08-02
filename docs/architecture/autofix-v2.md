@@ -273,7 +273,6 @@ config:
     session_scope: dispatch
     allowed_builtin_tools: [Bash, Read, Write, Edit, Grep, Glob]
     allowed_dag_tools: [handoff]
-    max_builtin_tool_calls: 50
     workspace_access:
       writable_paths: ["{{fanout_workspace}}"]
       readonly_paths: [input, evidence]
@@ -287,6 +286,10 @@ Its semantics are:
 
 - the compiler validates the complete template;
 - every child receives a canonical copy of it;
+- Auto Fix v2 deliberately leaves both node-level and workflow-level tool-call
+  budget fields unset; completion is governed by handoff contracts,
+  model/runtime limits, and operator cancellation rather than a fixed
+  tool-call budget;
 - omitted tool allowlists are empty for dynamic children;
 - omitted credentials mean no credentials;
 - omitted workspace access means no writable paths;

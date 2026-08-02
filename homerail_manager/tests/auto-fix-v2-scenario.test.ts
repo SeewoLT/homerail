@@ -86,6 +86,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     expect(parsed.meta.workflow_id).toBe("auto-fix-v2");
     expect(parsed.graph.nodes).toHaveLength(8);
     expect(parsed.graph.edges.length).toBeLessThanOrEqual(28);
+    expect(source).not.toMatch(/\bmax_[a-z_]*tool_calls[a-z_]*:/);
     for (const nodeId of ["implement", "fix"]) {
       expect(parsed.graph.nodes.find((node) => node.node_id === nodeId)?.gateway_config).toMatchObject({
         workspace_strategy: "isolated_git_worktree",

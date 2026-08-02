@@ -140,6 +140,9 @@ Anthropic-compatible endpoints; no coding role uses Kimi Code or direct
 chat-completions. This keeps `allowed_builtin_tools` enforceable for every
 Auto Fix v2 Agent node.
 
+Auto Fix v2 intentionally does not configure any node-level or workflow-level
+tool-call budget. Do not add a fixed tool-call budget to this workflow.
+
 ## Start a local or stable run
 
 ```bash
