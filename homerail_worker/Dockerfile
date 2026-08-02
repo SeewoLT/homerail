@@ -1,8 +1,18 @@
 # Build from repo root: docker build -t homerail-worker:latest -f homerail_worker/Dockerfile .
+FROM node:22-slim AS secret-guard-build
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends gcc libc6-dev \
+  && rm -rf /var/lib/apt/lists/*
+COPY homerail_worker/native/codex-secret-guard.c /tmp/codex-secret-guard.c
+RUN gcc -O2 -Wall -Wextra -Werror -fPIC -shared \
+  -o /homerail-codex-secret-guard.so /tmp/codex-secret-guard.c
+
 FROM node:22-slim
 
 WORKDIR /app
 ENV PATH="/app/node_modules/.bin:${PATH}"
+ENV HOMERAIL_CODEX_PROC_GUARD="/usr/local/lib/homerail-codex-secret-guard.so"
 ARG HOMERAIL_WORKER_VERSION
 ARG HOMERAIL_WORKER_PROTOCOL_VERSION
 ARG HOMERAIL_WORKER_SOURCE_FINGERPRINT=unknown
@@ -16,6 +26,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates curl git openssh-client \
   && rm -rf /var/lib/apt/lists/*
 RUN npm install -g npm@11.6.2
+COPY --from=secret-guard-build /homerail-codex-secret-guard.so /usr/local/lib/homerail-codex-secret-guard.so
 
 # Copy homerail_protocol to /homerail_protocol (parallel to /app) so that
 # file:../homerail_protocol in homerail_worker/package.json resolves correctly.
@@ -41,4 +52,4 @@ RUN mkdir -p /workspace && chown -R node:node /workspace
 USER node
 WORKDIR /workspace
 
-ENTRYPOINT ["node", "/app/dist/index.js"]
+ENTRYPOINT ["env", "LD_PRELOAD=/usr/local/lib/homerail-codex-secret-guard.so", "node", "/app/dist/index.js"]

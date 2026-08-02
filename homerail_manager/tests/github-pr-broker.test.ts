@@ -1,9 +1,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawnSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { parseWorkflowSource } from "../src/orchestration/workflow-spec-v1.js";
+import type { DAGDispatcher, DispatchEnvelope } from "../src/orchestration/dag-dispatcher.js";
+import { GraphExecutor } from "../src/orchestration/graph-executor.js";
 import { closeDb } from "../src/persistence/db.js";
 import { createCredential } from "../src/persistence/credentials.js";
 import {
@@ -13,6 +16,7 @@ import {
 import {
   _clearActiveRuns,
   createActiveRun,
+  getActiveRun,
   getCurrentNodeSession,
   handoffActiveRun,
   markNodeDispatched,
@@ -49,14 +53,15 @@ spec:
       kind: agent
       agent: actor
       allowed_dag_tools: [handoff, credential_broker_call]
-      credentials:${binding("pull_request_snapshot, commit_files")}
+      workspace_access: { writable_paths: [repo], readonly_paths: [input] }
+      credentials:${binding("pull_request_snapshot, commit_files, commit_workspace")}
       inputs: { task: { contract: Task } }
       outputs: { done: {} }
     reviewer:
       kind: agent
       agent: actor
       allowed_dag_tools: [handoff, credential_broker_call]
-      credentials:${binding("pull_request_snapshot, checks_snapshot, required_checks")}
+      credentials:${binding("pull_request_snapshot, read_file, checks_snapshot, required_checks, validate_head")}
       inputs: { task: {} }
       outputs:
         reviewed:
@@ -87,11 +92,41 @@ describe("bounded GitHub Draft PR credential broker", () => {
   let headRepository: string;
   let checkName: string;
   let checkConclusion: string;
+  let pullFileCount: number;
+  let createdTreeSha: string;
+  let checkRunsResponses: Array<Array<Record<string, unknown>>> | undefined;
+  let workflowDispatches: Array<Record<string, unknown>>;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  class RecordingDispatcher implements DAGDispatcher {
+    readonly dispatched: DispatchEnvelope[] = [];
+
+    dispatch(envelope: DispatchEnvelope) {
+      this.dispatched.push(envelope);
+      return { status: "dispatched" as const, targetType: "fake" as const, targetId: "fake" };
+    }
+  }
+
+  async function tickUntil(
+    executor: GraphExecutor,
+    runId: string,
+    predicate: () => boolean,
+    message: string,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      executor.tick(runId);
+      if (predicate()) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    throw new Error(message);
+  }
 
   function createBoundRun(
     runId: string,
     writablePaths: string[] = ["src", "tests", ".github"],
+    initialHead = INITIAL_HEAD,
+    validationWorkflow?: { workflow_id: string; inputs: Record<string, string> },
+    workflowSource = workflow(),
   ): void {
     const taskArtifact = stageDagRunInputArtifact({
       scope_id: runId,
@@ -111,12 +146,13 @@ describe("bounded GitHub Draft PR credential broker", () => {
         clone_url: "https://github.com/acme/widget.git",
         head_ref: "autofix/issue-172",
         base_ref: "main",
-        initial_head_sha: INITIAL_HEAD,
+        initial_head_sha: initialHead,
         base_sha: BASE_HEAD,
         task_document_sha256: taskArtifact.sha256,
         require_draft: true,
         writable_paths: writablePaths,
         required_checks: ["unit"],
+        ...(validationWorkflow ? { validation_workflow: validationWorkflow } : {}),
       }),
     });
     const bindings = resolveDagRunInputBindings(runId, [
@@ -131,8 +167,8 @@ describe("bounded GitHub Draft PR credential broker", () => {
         mount_path: "input/pr-context.json",
       },
     ]);
-    const parsed = parseWorkflowSource(workflow());
-    parsed.meta.agents!.actor.agent_type = "deterministic";
+    const parsed = parseWorkflowSource(workflowSource);
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
     createActiveRun(runId, parsed, { initialPrompt: "{}", inputArtifacts: bindings });
   }
 
@@ -147,6 +183,10 @@ describe("bounded GitHub Draft PR credential broker", () => {
     headRepository = "acme/widget";
     checkName = "unit";
     checkConclusion = "success";
+    pullFileCount = 1;
+    createdTreeSha = NEXT_TREE;
+    checkRunsResponses = undefined;
+    workflowDispatches = [];
     fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(String(input));
       const method = String(init?.method ?? "GET").toUpperCase();
@@ -167,16 +207,38 @@ describe("bounded GitHub Draft PR credential broker", () => {
         });
       }
       if (method === "GET" && url.pathname === "/repos/acme/widget/pulls/7/files") {
-        return json([{ filename: "src/fix.ts", status: "modified", additions: 2, deletions: 1, changes: 3, patch: "@@ fake" }]);
+        const page = Number(url.searchParams.get("page") ?? 1);
+        const offset = (page - 1) * 100;
+        const count = Math.max(0, Math.min(100, pullFileCount - offset));
+        return json(Array.from({ length: count }, (_, index) => ({
+          filename: `src/fix-${offset + index}.ts`,
+          sha: BLOB,
+          status: "modified",
+          additions: 2,
+          deletions: 1,
+          changes: 3,
+          patch: "@@ fake",
+        })));
+      }
+      if (method === "GET" && url.pathname === "/repos/acme/widget/contents/src/fix.ts") {
+        const content = Buffer.from("export const fixed = true;\n").toString("base64");
+        return json({ type: "file", encoding: "base64", content, sha: BLOB, size: 27 });
       }
       if (method === "GET" && url.pathname.endsWith("/check-runs")) {
-        return json({ check_runs: [{ id: 1, name: checkName, status: "completed", conclusion: checkConclusion }] });
+        const queued = checkRunsResponses?.shift();
+        return json({
+          check_runs: queued ?? [{ id: 1, name: checkName, status: "completed", conclusion: checkConclusion }],
+        });
       }
-      if (method === "GET" && url.pathname === `/repos/acme/widget/git/commits/${INITIAL_HEAD}`) {
+      if (method === "POST" && url.pathname === "/repos/acme/widget/actions/workflows/autofix-validate.yml/dispatches") {
+        workflowDispatches.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(null, { status: 204 });
+      }
+      if (method === "GET" && url.pathname === `/repos/acme/widget/git/commits/${remoteHead}`) {
         return json({ tree: { sha: BASE_TREE } });
       }
       if (method === "POST" && url.pathname === "/repos/acme/widget/git/blobs") return json({ sha: BLOB }, 201);
-      if (method === "POST" && url.pathname === "/repos/acme/widget/git/trees") return json({ sha: NEXT_TREE }, 201);
+      if (method === "POST" && url.pathname === "/repos/acme/widget/git/trees") return json({ sha: createdTreeSha }, 201);
       if (method === "POST" && url.pathname === "/repos/acme/widget/git/commits") return json({ sha: NEXT_HEAD }, 201);
       if (method === "PATCH" && url.pathname === "/repos/acme/widget/git/refs/heads/autofix/issue-172") {
         remoteHead = NEXT_HEAD;
@@ -195,6 +257,7 @@ describe("bounded GitHub Draft PR credential broker", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     fetchSpy.mockRestore();
     _clearActiveRuns();
     closeDb();
@@ -229,6 +292,28 @@ describe("bounded GitHub Draft PR credential broker", () => {
     });
   }
 
+  function initializeRepository(runId: string): {
+    repository: string;
+    git: (args: string[]) => string;
+    head: string;
+  } {
+    const repository = path.join(home, "workspace", runId, "repo");
+    fs.mkdirSync(path.join(repository, "src"), { recursive: true });
+    const git = (args: string[]) => {
+      const result = spawnSync("git", ["-C", repository, ...args], { encoding: "utf8", shell: false });
+      if (result.status !== 0) throw new Error(String(result.stderr || result.error));
+      return String(result.stdout).trim();
+    };
+    git(["init", "--initial-branch=main"]);
+    git(["config", "user.name", "HomeRail Test"]);
+    git(["config", "user.email", "homerail@example.invalid"]);
+    fs.writeFileSync(path.join(repository, "src", "fix.ts"), "before\n");
+    fs.writeFileSync(path.join(repository, "src", "remove.ts"), "remove me\n");
+    git(["add", "src/fix.ts", "src/remove.ts"]);
+    git(["commit", "-m", "fixture"]);
+    return { repository, git, head: git(["rev-parse", "HEAD"]) };
+  }
+
   it("keeps the token host-side and enforces per-node action and path allowlists", async () => {
     const snapshot = await call("reviewer", "pull_request_snapshot");
     expect(snapshot).toMatchObject({
@@ -257,6 +342,48 @@ describe("bounded GitHub Draft PR credential broker", () => {
       files: [{ path: ".github/actions/pwn/action.yml", content_base64: Buffer.from("bad").toString("base64") }],
     });
     expect(deniedAction).toMatchObject({ ok: false, error: expect.stringContaining("outside the PR write allowlist") });
+  });
+
+  it("reads UTF-8 source bytes from the exact immutable PR head", async () => {
+    const result = await call("reviewer", "read_file", {
+      expected_head_sha: INITIAL_HEAD,
+      path: "src/fix.ts",
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      result: {
+        head_sha: INITIAL_HEAD,
+        path: "src/fix.ts",
+        blob_sha: BLOB,
+        content: "export const fixed = true;\n",
+      },
+    });
+    await expect(call("reviewer", "read_file", {
+      expected_head_sha: "9".repeat(40),
+      path: "src/fix.ts",
+    })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("stale") });
+  });
+
+  it("accepts exactly 100 PR files but rejects an unbounded second page", async () => {
+    pullFileCount = 100;
+    const exactBound = await call("reviewer", "pull_request_snapshot");
+    expect(exactBound).toMatchObject({ ok: true });
+    expect((exactBound as { result: { files: unknown[] } }).result.files).toHaveLength(100);
+    pullFileCount = 101;
+    await expect(call("reviewer", "pull_request_snapshot", {}, "github-broker-run", "second-page-session"))
+      .resolves.toMatchObject({ ok: false, error: expect.stringContaining("exceeds the bounded snapshot") });
+  });
+
+  it("binds workspace commits to the caller node's sole writable path", async () => {
+    const denied = await call("aggregate", "commit_workspace", {
+      expected_head_sha: INITIAL_HEAD,
+      workspace_path: "workers/other-node",
+      message: "attempt another workspace",
+    });
+    expect(denied).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("does not match the node write boundary"),
+    });
   });
 
   it("rejects repository-wide writable paths instead of treating dot as an allow-all prefix", async () => {
@@ -304,6 +431,315 @@ describe("bounded GitHub Draft PR credential broker", () => {
     expect(() => handoffActiveRun("github-broker-run", "reviewer", "reviewed", approval)).not.toThrow();
   });
 
+  it("validates an already-successful exact head without dispatching another workflow", async () => {
+    const validated = await call("reviewer", "validate_head", {
+      expected_head_sha: INITIAL_HEAD,
+      manifest_sha256: "1".repeat(64),
+      summary: "candidate",
+      tests: ["npm test"],
+    });
+    expect(validated).toMatchObject({
+      ok: true,
+      result: {
+        status: "passed",
+        verdict: "validated",
+        head_sha: INITIAL_HEAD,
+        validation: {
+          workflow_dispatched: false,
+          required_checks: [{ id: 1, name: "unit", status: "completed", conclusion: "success" }],
+        },
+        feedback: [],
+        fix_tasks: [],
+      },
+    });
+    expect(workflowDispatches).toEqual([]);
+  });
+
+  it("dispatches trusted validation and polls the exact head from pending to success", async () => {
+    createBoundRun("github-validation-poll-run", ["src"], INITIAL_HEAD, {
+      workflow_id: "autofix-validate.yml",
+      inputs: { head_sha: "$head_sha", mode: "trusted" },
+    });
+    checkRunsResponses = [
+      [{ id: 1, name: "unit", status: "completed", conclusion: "failure" }],
+      [{ id: 2, name: "unit", status: "in_progress", conclusion: null }],
+      [{ id: 2, name: "unit", status: "completed", conclusion: "success" }],
+    ];
+    vi.useFakeTimers();
+
+    const validation = call("reviewer", "validate_head", {
+      expected_head_sha: INITIAL_HEAD,
+      manifest_sha256: "2".repeat(64),
+      summary: "candidate after fixes",
+      tests: ["npm test"],
+    }, "github-validation-poll-run", "validation-session");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(workflowDispatches).toEqual([{
+      ref: "autofix/issue-172",
+      inputs: { head_sha: INITIAL_HEAD, mode: "trusted" },
+    }]);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(validation).resolves.toMatchObject({
+      ok: true,
+      result: {
+        status: "passed",
+        verdict: "validated",
+        head_sha: INITIAL_HEAD,
+        manifest_sha256: "2".repeat(64),
+        validation: {
+          workflow_dispatched: true,
+          required_checks: [{ id: 2, name: "unit", status: "completed", conclusion: "success" }],
+        },
+      },
+    });
+  });
+
+  it("turns a terminal required-check failure into one bounded fixer task", async () => {
+    checkConclusion = "failure";
+    const failed = await call("reviewer", "validate_head", {
+      expected_head_sha: INITIAL_HEAD,
+      manifest_sha256: "3".repeat(64),
+      summary: "candidate",
+      tests: ["npm test"],
+    });
+    expect(failed).toMatchObject({
+      ok: true,
+      result: {
+        status: "failed",
+        verdict: "changes_requested",
+        head_sha: INITIAL_HEAD,
+        feedback: [expect.stringContaining("unit")],
+        fix_tasks: [{ id: "trusted-validation", feedback: [expect.stringContaining("unit")] }],
+      },
+    });
+  });
+
+  it("rejects validation when the expected head no longer matches the bound PR", async () => {
+    const stale = await call("reviewer", "validate_head", {
+      expected_head_sha: "9".repeat(40),
+      manifest_sha256: "4".repeat(64),
+      summary: "stale candidate",
+      tests: [],
+    });
+    expect(stale).toMatchObject({ ok: false, error: expect.stringContaining("stale") });
+  });
+
+  it("routes trusted validation failure through a fixer before fresh review", async () => {
+    const runId = "github-validation-fix-loop";
+    createBoundRun(runId, ["src"], INITIAL_HEAD, undefined, `
+api_version: homerail.ai/v1
+kind: Workflow
+metadata: { id: validation-fix-loop, name: Validation fix loop }
+spec:
+  contracts:
+    Task: { type: object }
+  agents:
+    worker: { system: Return the declared result. }
+  nodes:
+    candidate:
+      kind: agent
+      agent: worker
+      inputs: { task: { contract: Task } }
+      outputs: { ready: {} }
+    validate_initial:
+      kind: broker
+      inputs: { candidate: {} }
+      outputs: { result: {}, error: {} }
+      config:
+        input: candidate
+        input_map:
+          expected_head_sha: head_sha
+          manifest_sha256: manifest_sha256
+          summary: summary
+          tests: tests
+        credential_ref: github-autofix
+        purpose: validate the initial exact head
+        broker: github_pr
+        action: validate_head
+        result_port: result
+        error_port: error
+    initial_gate:
+      kind: condition
+      inputs: { validation: {} }
+      outputs: { passed: {}, changes: {}, blocked: {} }
+      config:
+        field: status
+        routes: { passed: passed, failed: changes }
+        default: blocked
+    initial_review:
+      kind: agent
+      agent: worker
+      inputs: { validation: {} }
+      outputs: { reviewed: {}, failed: {} }
+    initial_decision:
+      kind: join
+      inputs: { validation: {}, review: {} }
+      outputs: { ready: {}, missing: {} }
+      config:
+        mode: any
+        field: verdict
+        success_values: [approve, changes_requested]
+        passed_port: ready
+        failed_port: missing
+    review_gate:
+      kind: while
+      inputs: { state: {} }
+      outputs: { fix: {}, approved: {}, exhausted: {} }
+      config:
+        field: values.0.verdict
+        operator: eq
+        value: approve
+        continue_port: fix
+        done_port: approved
+        exhausted_port: exhausted
+        max_iterations: 2
+    fix:
+      kind: agent
+      agent: worker
+      depends_on: [review_gate]
+      inputs: { review: {} }
+      outputs: { fixed: {}, failed: {} }
+    validate_revision:
+      kind: broker
+      inputs: { candidate: {} }
+      outputs: { result: {}, error: {} }
+      config:
+        input: candidate
+        input_map:
+          expected_head_sha: head_sha
+          manifest_sha256: manifest_sha256
+          summary: summary
+          tests: tests
+        credential_ref: github-autofix
+        purpose: validate the revised exact head
+        broker: github_pr
+        action: validate_head
+        result_port: result
+        error_port: error
+    revision_gate:
+      kind: condition
+      inputs: { validation: {} }
+      outputs: { passed: {}, changes: {}, blocked: {} }
+      config:
+        field: status
+        routes: { passed: passed, failed: changes }
+        default: blocked
+    revision_review:
+      kind: agent
+      agent: worker
+      depends_on: [review_gate]
+      inputs: { validation: {} }
+      outputs: { reviewed: {}, failed: {} }
+    revision_decision:
+      kind: join
+      inputs: { validation: {}, review: {} }
+      outputs: { ready: {}, missing: {} }
+      config:
+        mode: any
+        field: verdict
+        success_values: [approve, changes_requested]
+        passed_port: ready
+        failed_port: missing
+    done: { kind: terminal, outcome: success, inputs: { result: {} } }
+    initial_validation_error: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    initial_review_error: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    initial_missing: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    initial_blocked: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    fix_error: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    revision_validation_error: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    revision_review_error: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    revision_missing: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    revision_blocked: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    exhausted: { kind: terminal, outcome: cancelled, inputs: { result: {} } }
+  edges:
+    - { from: $run.input, to: candidate.task }
+    - { from: candidate.ready, to: validate_initial.candidate }
+    - { from: validate_initial.result, to: initial_gate.validation }
+    - { from: validate_initial.error, to: initial_validation_error.result, condition: on_failure }
+    - { from: initial_gate.passed, to: initial_review.validation }
+    - { from: initial_gate.changes, to: initial_decision.validation }
+    - { from: initial_gate.blocked, to: initial_blocked.result }
+    - { from: initial_review.reviewed, to: initial_decision.review }
+    - { from: initial_review.failed, to: initial_review_error.result, condition: on_failure }
+    - { from: initial_decision.ready, to: review_gate.state }
+    - { from: initial_decision.missing, to: initial_missing.result }
+    - { from: review_gate.fix, to: fix.review }
+    - { from: review_gate.approved, to: done.result }
+    - { from: review_gate.exhausted, to: exhausted.result }
+    - { from: fix.fixed, to: validate_revision.candidate }
+    - { from: fix.failed, to: fix_error.result, condition: on_failure }
+    - { from: validate_revision.result, to: revision_gate.validation }
+    - { from: validate_revision.error, to: revision_validation_error.result, condition: on_failure }
+    - { from: revision_gate.passed, to: revision_review.validation }
+    - { from: revision_gate.changes, to: revision_decision.validation }
+    - { from: revision_gate.blocked, to: revision_blocked.result }
+    - { from: revision_review.reviewed, to: revision_decision.review }
+    - { from: revision_review.failed, to: revision_review_error.result, condition: on_failure }
+    - { from: revision_decision.missing, to: revision_missing.result }
+    - kind: feedback
+      from: revision_decision.ready
+      to: review_gate.state
+      max_traversals: 2
+`);
+    checkConclusion = "failure";
+    const dispatcher = new RecordingDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    handoffActiveRun(runId, "candidate", "ready", {
+      head_sha: INITIAL_HEAD,
+      manifest_sha256: "5".repeat(64),
+      summary: "candidate",
+      tests: ["npm test"],
+    });
+
+    await tickUntil(
+      executor,
+      runId,
+      () => dispatcher.dispatched.some((entry) => entry.nodeId === "fix"),
+      "trusted validation failure did not reach the fixer",
+    );
+    const fixDispatch = dispatcher.dispatched.find((entry) => entry.nodeId === "fix")!;
+    expect(fixDispatch.inputs.review[0]).toMatchObject({
+      input: {
+        values: [{
+          verdict: "changes_requested",
+          fix_tasks: [{ id: "trusted-validation", feedback: [expect.stringContaining("unit")] }],
+        }],
+      },
+    });
+
+    checkConclusion = "success";
+    handoffActiveRun(runId, "fix", "fixed", {
+      head_sha: INITIAL_HEAD,
+      manifest_sha256: "6".repeat(64),
+      summary: "fixed trusted validation",
+      tests: ["npm test"],
+    });
+    await tickUntil(
+      executor,
+      runId,
+      () => dispatcher.dispatched.some((entry) => entry.nodeId === "revision_review"),
+      "successful re-validation did not reach fresh review",
+    );
+    handoffActiveRun(runId, "revision_review", "reviewed", {
+      verdict: "approve",
+      head_sha: INITIAL_HEAD,
+      summary: "approved",
+      feedback: [],
+      fix_tasks: [],
+    });
+    await tickUntil(
+      executor,
+      runId,
+      () => getActiveRun(runId)?.status === "completed",
+      "approved revised head did not complete",
+    );
+
+    expect(getActiveRun(runId)?.counters.gateway_iterations.review_gate).toBe(1);
+    expect(getActiveRun(runId)?.dagRun.nodeStates.get("initial_review")).toBe("SKIPPED");
+    expect(getActiveRun(runId)?.status).toBe("completed");
+  });
+
   it("commits through a non-force expected-head fence and restores the advanced head", async () => {
     const committed = await call("aggregate", "commit_files", {
       expected_head_sha: INITIAL_HEAD,
@@ -334,6 +770,103 @@ describe("bounded GitHub Draft PR credential broker", () => {
       files: [{ path: "src/fix.ts", content_base64: Buffer.from("stale\n").toString("base64") }],
     });
     expect(stale).toMatchObject({ ok: false, error: expect.stringContaining("expected head is stale") });
+  });
+
+  it("rejects a no-op tree instead of advancing the PR with an empty commit", async () => {
+    createdTreeSha = BASE_TREE;
+    const denied = await call("aggregate", "commit_files", {
+      expected_head_sha: INITIAL_HEAD,
+      message: "attempt empty commit",
+      files: [{ path: "src/fix.ts", content_base64: Buffer.from("unchanged\n").toString("base64") }],
+    });
+    expect(denied).toMatchObject({ ok: false, error: expect.stringContaining("would not change") });
+    expect(remoteHead).toBe(INITIAL_HEAD);
+    expect(fetchSpy.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+  });
+
+  it("atomically derives every dirty file from the node's only writable worktree", async () => {
+    const runId = "github-workspace-commit-run";
+    const { repository, head } = initializeRepository(runId);
+    remoteHead = head;
+    createBoundRun(runId, ["src"], remoteHead);
+    fs.writeFileSync(path.join(repository, "src", "fix.ts"), "after\n");
+    fs.writeFileSync(path.join(repository, "src", "also.ts"), "export const also = true;\n");
+    fs.rmSync(path.join(repository, "src", "remove.ts"));
+
+    const committed = await call("aggregate", "commit_workspace", {
+      expected_head_sha: remoteHead,
+      workspace_path: "repo",
+      message: "fix: complete workspace change",
+    }, runId);
+    expect(committed).toMatchObject({
+      ok: true,
+      result: {
+        previous_head_sha: expect.stringMatching(/^[0-9a-f]{40}$/),
+        head_sha: NEXT_HEAD,
+        workspace_path: "repo",
+        manifest_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        committed_files: ["src/also.ts", "src/fix.ts", "src/remove.ts"],
+      },
+    });
+    const blobBodies = fetchSpy.mock.calls
+      .filter(([input, init]) => new URL(String(input)).pathname === "/repos/acme/widget/git/blobs" && init?.method === "POST")
+      .map(([, init]) => JSON.parse(String(init?.body)) as { content: string });
+    expect(blobBodies.map((body) => Buffer.from(body.content, "base64").toString("utf8")))
+      .toEqual(["export const also = true;\n", "after\n"]);
+    const treeBody = fetchSpy.mock.calls
+      .filter(([input, init]) => new URL(String(input)).pathname === "/repos/acme/widget/git/trees" && init?.method === "POST")
+      .map(([, init]) => JSON.parse(String(init?.body)) as { tree: Array<{ path: string; sha: string | null }> })[0];
+    expect(treeBody?.tree.map((entry) => entry.path)).toEqual(["src/also.ts", "src/fix.ts", "src/remove.ts"]);
+    expect(treeBody?.tree.find((entry) => entry.path === "src/remove.ts")?.sha).toBeNull();
+  });
+
+  it("rejects dirty workspace paths outside the PR allowlist", async () => {
+    const runId = "github-workspace-outside-run";
+    const { repository, head } = initializeRepository(runId);
+    remoteHead = head;
+    createBoundRun(runId, ["src"], head);
+    fs.writeFileSync(path.join(repository, "README.md"), "not allowed\n");
+
+    const denied = await call("aggregate", "commit_workspace", {
+      expected_head_sha: head,
+      workspace_path: "repo",
+      message: "attempt unrelated file",
+    }, runId, "outside-session");
+    expect(denied).toMatchObject({ ok: false, error: expect.stringContaining("outside the PR write allowlist") });
+  });
+
+  it("rejects symlinks in a derived workspace commit", async () => {
+    const runId = "github-workspace-symlink-run";
+    const { repository, head } = initializeRepository(runId);
+    remoteHead = head;
+    createBoundRun(runId, ["src"], head);
+    fs.symlinkSync("fix.ts", path.join(repository, "src", "alias.ts"));
+
+    const denied = await call("aggregate", "commit_workspace", {
+      expected_head_sha: head,
+      workspace_path: "repo",
+      message: "attempt symlink",
+    }, runId, "symlink-session");
+    expect(denied).toMatchObject({ ok: false, error: expect.stringContaining("rejects symlink") });
+  });
+
+  it("rejects deleting a tracked symlink through a derived workspace commit", async () => {
+    const runId = "github-workspace-delete-symlink-run";
+    const { repository, git } = initializeRepository(runId);
+    fs.symlinkSync("fix.ts", path.join(repository, "src", "tracked-link.ts"));
+    git(["add", "src/tracked-link.ts"]);
+    git(["commit", "-m", "add tracked symlink"]);
+    const head = git(["rev-parse", "HEAD"]);
+    remoteHead = head;
+    createBoundRun(runId, ["src"], head);
+    fs.rmSync(path.join(repository, "src", "tracked-link.ts"));
+
+    const denied = await call("aggregate", "commit_workspace", {
+      expected_head_sha: head,
+      workspace_path: "repo",
+      message: "attempt tracked symlink deletion",
+    }, runId, "delete-symlink-session");
+    expect(denied).toMatchObject({ ok: false, error: expect.stringContaining("non-regular tracked path mode 120000") });
   });
 
   it("accepts commit payloads above the generic broker input limit within the 1 MiB file bound", async () => {

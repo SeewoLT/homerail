@@ -48,6 +48,7 @@ import {
   type DagAgentToolName,
   type DagWorkspaceAccess,
   type DagCredentialProjection,
+  type DagCredentialBrokerCallRequest,
   type DagRunInputBinding,
 } from "homerail-protocol";
 import { resolveAgentRuntimeConfig } from "./agent-runtime-resolver.js";
@@ -1052,7 +1053,11 @@ function _applyOrphanedNodeDemotion(run: ActiveRun): string[] {
     emit("dag:node_ready", { runId: run.runId, nodeId });
   }
   const demotedFromRunning = Array.from(run.dagRun.nodeStates.entries())
-    .filter(([nodeId, state]) => state === "RUNNING" && !interventionProtectedNodeIds.has(nodeId))
+    .filter(([nodeId, state]) => (
+      state === "RUNNING"
+      && !run.dagRun.loopSources.has(nodeId)
+      && !interventionProtectedNodeIds.has(nodeId)
+    ))
     .map(([nodeId]) => nodeId);
 
   // Apply RUNNING→FAILED demotion: mark sessions and emit the standard
@@ -2852,6 +2857,7 @@ function _afterDepEdges(node: DAGGraphNode): DAGEdge[] {
 }
 
 function _isBackwardEdge(run: ActiveRun, edge: DAGEdge): boolean {
+  if (edge.label === "feedback") return true;
   const target = run.dagRun.graph.nodes.find((node) => node.node_id === edge.to_node);
   if (target?.node_type === "loop_gateway" || target?.node_type === "while_gateway") {
     const source = run.dagRun.graph.nodes.find((node) => node.node_id === edge.from_node);
@@ -3596,10 +3602,103 @@ function _isGatewayNode(node: DAGGraphNode): boolean {
     node.node_type === "join_gateway" ||
     node.node_type === "while_gateway" ||
     node.node_type === "command_gateway" ||
+    node.node_type === "broker_gateway" ||
     node.node_type === "approval_gateway" ||
     node.node_type === "state_gateway" ||
     node.node_type === "fanout_gateway" ||
     node.node_type === "await_command_gateway";
+}
+
+const inFlightBrokerGateways = new Set<string>();
+
+function _brokerGatewayInput(run: ActiveRun, node: DAGGraphNode): Record<string, unknown> {
+  const config = node.gateway_config;
+  const inputs = _nodeInputs(run.dagRun, node.node_id);
+  const selectedValues = config?.input ? inputs[config.input] : undefined;
+  const selected = selectedValues && selectedValues.length > 0
+    ? selectedValues[selectedValues.length - 1]
+    : _firstInputValue(inputs);
+  const mapped: Record<string, unknown> = {};
+  if (config?.input_map) {
+    for (const [key, field] of Object.entries(config.input_map)) {
+      mapped[key] = _fieldValue(selected, field);
+    }
+  } else {
+    const value = _fieldValue(selected, config?.input_field);
+    if (value !== undefined) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("broker gateway selected input must be an object");
+      }
+      Object.assign(mapped, value as Record<string, unknown>);
+    }
+  }
+  if (config?.static_input) Object.assign(mapped, structuredClone(config.static_input));
+  return mapped;
+}
+
+function _startBrokerGateway(
+  run: ActiveRun,
+  node: DAGGraphNode,
+  dispatcher: DAGDispatcher,
+): boolean {
+  const key = `${run.runId}:${node.node_id}`;
+  if (inFlightBrokerGateways.has(key)) return false;
+  const config = node.gateway_config;
+  if (!config?.credential_ref || !config.broker || !config.action) {
+    throw new Error("broker gateway configuration is incomplete");
+  }
+  const input = _brokerGatewayInput(run, node);
+  const request: DagCredentialBrokerCallRequest = {
+    request_id: randomUUID(),
+    run_id: run.runId,
+    node_id: node.node_id,
+    session_id: `manager-broker-${node.node_id}-${randomUUID()}`,
+    credential_ref: config.credential_ref,
+    broker: config.broker,
+    action: config.action,
+    input,
+  };
+  startNode(run.dagRun, node.node_id);
+  inFlightBrokerGateways.add(key);
+  writeRunMetadata(run.runId, serializeRunMetadata(run));
+  emit("dag:gateway_executed", {
+    runId: run.runId,
+    nodeId: node.node_id,
+    gatewayType: node.node_type,
+    phase: "started",
+    broker: config.broker,
+    action: config.action,
+  });
+  void import("./credential-broker.js")
+    .then(({ executeManagerCredentialBrokerCall }) => executeManagerCredentialBrokerCall(request))
+    .then((result) => {
+      const current = getActiveRun(run.runId);
+      if (!current || current.status !== "active" || current.dagRun.nodeStates.get(node.node_id) !== "RUNNING") return;
+      const port = result.ok ? config.result_port || "result" : config.error_port || "error";
+      const payload = result.ok ? result.result : { ok: false, error: result.error };
+      handoffActiveRun(run.runId, node.node_id, port, payload);
+      emit("dag:gateway_executed", {
+        runId: run.runId,
+        nodeId: node.node_id,
+        gatewayType: node.node_type,
+        phase: "completed",
+        port,
+      });
+      dispatchReadyNodes(run.runId, dispatcher);
+    })
+    .catch((error) => {
+      const current = getActiveRun(run.runId);
+      if (!current || current.status !== "active" || current.dagRun.nodeStates.get(node.node_id) !== "RUNNING") return;
+      failActiveRun(
+        run.runId,
+        node.node_id,
+        `broker gateway execution failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    })
+    .finally(() => {
+      inFlightBrokerGateways.delete(key);
+    });
+  return true;
 }
 
 function _roundResetNodeIds(
@@ -4841,7 +4940,12 @@ function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, c
   handoffActiveRun(run.runId, parentId, passed ? config?.result_port || "done" : config?.failed_port || "failed", payload);
 }
 
-function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode): boolean {
+function _executeGatewayNode(
+  runId: string,
+  run: ActiveRun,
+  node: DAGGraphNode,
+  dispatcher: DAGDispatcher,
+): boolean {
   if (node.node_type === "await_command_gateway") {
     if (!_startAwaitCommand(run, node)) return false;
     emit("dag:gateway_executed", {
@@ -4865,6 +4969,10 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
   if (node.node_type === "command_gateway") {
     const result = _commandGatewayResult(run, node);
     return Boolean(handoffActiveRun(runId, node.node_id, result.port, result.payload));
+  }
+
+  if (node.node_type === "broker_gateway") {
+    return _startBrokerGateway(run, node, dispatcher);
   }
 
   if (node.node_type === "state_gateway") {
@@ -5444,7 +5552,7 @@ export function dispatchReadyNodes(
     if (!node) continue;
     if (_isGatewayNode(node)) {
       try {
-        if (_executeGatewayNode(runId, run, node)) count++;
+        if (_executeGatewayNode(runId, run, node, dispatcher)) count++;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         failActiveRun(runId, nodeId, `gateway execution failed: ${message}`);

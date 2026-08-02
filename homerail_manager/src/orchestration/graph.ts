@@ -47,8 +47,8 @@ export interface DAGNodeRequirements {
 }
 
 export interface DAGGatewayConfig {
-  type?: "loop" | "condition" | "join" | "while" | "command" | "approval" | "state" | "fanout" | "await_command" | string;
-  kind?: "loop" | "condition" | "join" | "while" | "command" | "approval" | "state" | "fanout" | "await_command" | string;
+  type?: "loop" | "condition" | "join" | "while" | "command" | "broker" | "approval" | "state" | "fanout" | "await_command" | string;
+  kind?: "loop" | "condition" | "join" | "while" | "command" | "broker" | "approval" | "state" | "fanout" | "await_command" | string;
   mode?: "all" | "any" | "n_of_m" | string;
   field?: string;
   routes?: Record<string, string>;
@@ -80,6 +80,14 @@ export interface DAGGatewayConfig {
   capture_limit?: number;
   parse_stdout?: "text" | "json" | "number";
   result_payload?: "envelope" | "value";
+  credential_ref?: string;
+  purpose?: string;
+  broker?: string;
+  action?: string;
+  input_field?: string;
+  input_map?: Record<string, string>;
+  static_input?: Record<string, unknown>;
+  error_port?: string;
   approval_id?: string;
   proposal_field?: string;
   proposer_actor?: string;

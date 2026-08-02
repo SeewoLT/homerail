@@ -54,11 +54,24 @@ it does not vendor a stale copy of the native prompt. The metadata shape is
 anchored to DeepSeek's official
 [Codex setup catalog](https://cdn.deepseek.com/api-docs/codex-deepseek-setup.sh).
 
-Provider-backed credentials are supplied only through
-`HOMERAIL_CODEX_API_KEY`. The variable is excluded from Codex-spawned shell
-environments, is not written to configuration, and is not included in command
-arguments. Provider-backed Codex also disables ambient apps, plugins, remote
-plugin sharing, Skill search/install, and native multi-agent features.
+The real provider credential remains in the Worker. For each provider-backed
+dispatch the Worker starts a loopback-only relay restricted to `POST` on that
+provider's `/responses` path, then gives Codex a random dispatch-scoped relay
+key and relay URL through `HOMERAIL_CODEX_API_KEY`. The relay replaces that
+authorization value with the real provider credential while streaming the
+request and response. It closes with the adapter, so reading a Codex parent
+process's environment cannot reveal a reusable external credential.
+
+The scoped variable is excluded from Codex-spawned shell environments, is not
+written to configuration, and is not included in command arguments. As defense
+in depth, the production Worker image preloads
+`homerail-codex-secret-guard.so` into the Worker and dynamically linked Codex
+launcher processes. Its constructor marks those processes non-dumpable after
+`exec` (ordinary `exec` resets this Linux flag), protecting the Worker's relay
+closure as well as launcher environments. Linux provider dispatch fails closed
+when the configured guard is absent or cannot be loaded. Provider-backed Codex
+also disables ambient apps, plugins, remote plugin sharing, Skill search/install,
+and native multi-agent features.
 
 Direct, secret-safe probes returned HTTP 200 for all four reasoning efforts.
 DeepSeek Responses is stateless and does not support OpenAI conversation/store

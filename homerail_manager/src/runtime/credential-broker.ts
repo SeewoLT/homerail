@@ -14,8 +14,11 @@ import {
 import {
   githubChecksSnapshot,
   githubCommitFiles,
+  githubCommitWorkspace,
   githubPullRequestSnapshot,
+  githubReadFile,
   githubRequiredChecks,
+  githubValidateHead,
 } from "./github-pr-broker.js";
 
 export interface CredentialBrokerContext {
@@ -152,8 +155,8 @@ function managerBrokerBinding(
   throw new Error("Credential broker reference is not declared on this node");
 }
 
-export async function executeCredentialBrokerCall(
-  workerId: string,
+async function executeDeclaredCredentialBrokerCall(
+  actor: string,
   request: DagCredentialBrokerCallRequest,
 ): Promise<DagCredentialBrokerCallResult> {
   const fail = (error: string): DagCredentialBrokerCallResult => ({
@@ -175,7 +178,7 @@ export async function executeCredentialBrokerCall(
       throw new Error("Credential broker action is not permitted by the WorkflowSpec");
     }
     const useContext = {
-      actor: `credential-broker:worker:${workerId}`,
+      actor,
       run_id: request.run_id,
       node_id: request.node_id,
       purpose: binding.purpose,
@@ -215,7 +218,7 @@ export async function executeCredentialBrokerCall(
     if (request.credential_ref) {
       try {
         recordCredentialUseFailure(request.credential_ref, {
-          actor: `credential-broker:worker:${workerId}`,
+          actor,
           run_id: request.run_id,
           node_id: request.node_id,
           purpose: binding?.purpose,
@@ -228,6 +231,22 @@ export async function executeCredentialBrokerCall(
     }
     return fail(message);
   }
+}
+
+export async function executeCredentialBrokerCall(
+  workerId: string,
+  request: DagCredentialBrokerCallRequest,
+): Promise<DagCredentialBrokerCallResult> {
+  return await executeDeclaredCredentialBrokerCall(`credential-broker:worker:${workerId}`, request);
+}
+
+export async function executeManagerCredentialBrokerCall(
+  request: DagCredentialBrokerCallRequest,
+): Promise<DagCredentialBrokerCallResult> {
+  return await executeDeclaredCredentialBrokerCall(
+    `credential-broker:manager:${request.node_id}`,
+    request,
+  );
 }
 
 registerCredentialBroker("lark_bot", "bot_info", async ({ credential, secret }) => {
@@ -270,8 +289,11 @@ registerCredentialBroker("lark_bot", "bot_info", async ({ credential, secret }) 
 });
 
 registerCredentialBroker("github_pr", "pull_request_snapshot", githubPullRequestSnapshot);
+registerCredentialBroker("github_pr", "read_file", githubReadFile);
 registerCredentialBroker("github_pr", "checks_snapshot", githubChecksSnapshot);
 registerCredentialBroker("github_pr", "required_checks", githubRequiredChecks);
+registerCredentialBroker("github_pr", "validate_head", githubValidateHead);
+registerCredentialBroker("github_pr", "commit_workspace", githubCommitWorkspace);
 registerCredentialBroker("github_pr", "commit_files", githubCommitFiles, {
   // A 1 MiB decoded commit expands to roughly 1.4 MiB as base64 plus bounded
   // JSON/path overhead. Other broker actions retain the 64 KiB default.

@@ -7,7 +7,11 @@
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
+import { createServer, request as httpRequest, type Server } from "node:http";
+import { request as httpsRequest } from "node:https";
+import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
@@ -17,6 +21,7 @@ import {
   buildCodexProviderModelCatalogFromBundled,
   codexResponsesAppServerArgs,
   codexResponsesProviderEnvironment,
+  normalizeCodexResponsesBaseUrl,
   resolveCodexResponsesProviderProfile,
 } from "homerail-protocol";
 import type { AgentClient, AgentEvent, AgentRunContext, DagToolDefinition } from "./types.js";
@@ -74,6 +79,103 @@ interface CodexAssistantMessageState {
   phase?: CodexAssistantMessagePhase;
   deltas: string[];
 }
+
+interface CodexProviderRelay {
+  apiKey: string;
+  baseUrl: string;
+  server: Server;
+}
+
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+function relayHeaders(
+  headers: Readonly<Record<string, string | string[] | undefined>>,
+): Record<string, string | string[]> {
+  const safe: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined || HOP_BY_HOP_HEADERS.has(name.toLowerCase())) continue;
+    safe[name] = value;
+  }
+  return safe;
+}
+
+async function startCodexProviderRelay(baseUrl: string, providerApiKey: string): Promise<CodexProviderRelay> {
+  const upstream = new URL(normalizeCodexResponsesBaseUrl(baseUrl));
+  if (!providerApiKey.trim() || !["http:", "https:"].includes(upstream.protocol)) {
+    throw new Error("Codex provider relay configuration is invalid");
+  }
+  if (upstream.username || upstream.password || upstream.search || upstream.hash) {
+    throw new Error("Codex provider relay base URL must not contain credentials, query, or fragment");
+  }
+  const basePath = upstream.pathname.replace(/\/+$/, "");
+  const responsesPath = `${basePath}/responses`.replace(/^\/{2,}/, "/");
+  const relayApiKey = `homerail-dispatch-${randomBytes(32).toString("hex")}`;
+  const server = createServer((request, response) => {
+    const reject = (status: number, message: string) => {
+      response.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
+      response.end(message);
+    };
+    const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (request.method !== "POST" || requestUrl.pathname !== responsesPath) {
+      reject(404, "Not found");
+      return;
+    }
+    if (request.headers.authorization !== `Bearer ${relayApiKey}`) {
+      reject(403, "Forbidden");
+      return;
+    }
+    const target = new URL(`${requestUrl.pathname}${requestUrl.search}`, upstream.origin);
+    const headers = relayHeaders(request.headers);
+    headers.host = target.host;
+    headers.authorization = `Bearer ${providerApiKey}`;
+    const send = target.protocol === "https:" ? httpsRequest : httpRequest;
+    const upstreamRequest = send(target, { method: "POST", headers }, (upstreamResponse) => {
+      response.writeHead(upstreamResponse.statusCode ?? 502, relayHeaders(upstreamResponse.headers));
+      upstreamResponse.pipe(response);
+    });
+    upstreamRequest.on("error", () => {
+      if (!response.headersSent) reject(502, "Provider relay failed");
+      else response.destroy();
+    });
+    request.on("aborted", () => upstreamRequest.destroy());
+    request.pipe(upstreamRequest);
+  });
+  server.on("clientError", (_error, socket) => socket.destroy());
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(0, "127.0.0.1");
+  });
+  const address = server.address() as AddressInfo | null;
+  if (!address) {
+    server.close();
+    throw new Error("Codex provider relay did not bind a local address");
+  }
+  return {
+    apiKey: relayApiKey,
+    baseUrl: `http://127.0.0.1:${address.port}${basePath}`,
+    server,
+  };
+}
+
+export const _startCodexProviderRelayForTest = startCodexProviderRelay;
 
 function isInsideWorkspace(workspace: string, candidate: string): boolean {
   const relative = path.relative(workspace, candidate);
@@ -184,11 +286,31 @@ function prepareCodexSkillProjection(context: AgentRunContext, tempDir: string):
 
 export const _prepareCodexSkillProjectionForTest = prepareCodexSkillProjection;
 
+function guardedSpawnCommand(
+  bin: string,
+  args: string[],
+  env: Readonly<Record<string, string | undefined>>,
+  configuredGuard = process.env.HOMERAIL_CODEX_PROC_GUARD,
+  platform = process.platform,
+): { bin: string; args: string[]; env: Record<string, string | undefined> } {
+  const spawnEnv = { ...env };
+  if (!env.HOMERAIL_CODEX_API_KEY || platform !== "linux") return { bin, args, env: spawnEnv };
+  const guard = configuredGuard?.trim();
+  if (!guard) throw new Error("Codex provider secret guard is required on Linux");
+  const resolved = findExistingBinary(guard);
+  if (!resolved) throw new Error(`Configured Codex secret guard not found: ${guard}`);
+  spawnEnv.LD_PRELOAD = resolved;
+  return { bin, args, env: spawnEnv };
+}
+
+export const _guardedCodexSpawnCommandForTest = guardedSpawnCommand;
+
 /** Spawn a process with stdin/stdout/stderr piped. */
 function spawnProcess(bin: string, args: string[], env: Record<string, string | undefined>): ChildProcess {
-  return spawn(bin, args, {
+  const command = guardedSpawnCommand(bin, args, env);
+  return spawn(command.bin, command.args, {
     stdio: ["pipe", "pipe", "pipe"],
-    env,
+    env: command.env,
     shell: windowsCommandNeedsShell(bin),
     windowsHide: true,
   });
@@ -227,6 +349,7 @@ export class CodexAppServerAdapter implements AgentClient {
   private notificationFailure: Error | null = null;
   private codexBin: string;
   private notificationHeartbeatIntervalMs: number;
+  private providerRelay: CodexProviderRelay | null = null;
   private tempDir: string | null = null;
   private agentMessages = new Map<string, CodexAssistantMessageState>();
 
@@ -267,15 +390,18 @@ export class CodexAppServerAdapter implements AgentClient {
     let modelCatalogPath: string | undefined;
     try {
       this.tempDir = this.createTempDir();
+      this.providerRelay = context.protocol === CODEX_RESPONSES_PROTOCOL && context.apiKey
+        ? await startCodexProviderRelay(context.baseUrl ?? "", context.apiKey)
+        : null;
       modelCatalogPath = context.protocol === CODEX_RESPONSES_PROTOCOL
         ? this.materializeProviderModelCatalog(context)
         : undefined;
-      const env = this.buildEnv(context);
+      const env = this.buildEnv(context, this.providerRelay?.apiKey);
       const args = context.protocol === CODEX_RESPONSES_PROTOCOL
         ? codexResponsesAppServerArgs({
             providerName: context.provider,
-            baseUrl: context.baseUrl,
-            apiKey: context.apiKey,
+            baseUrl: this.providerRelay?.baseUrl ?? context.baseUrl,
+            apiKey: this.providerRelay?.apiKey ?? context.apiKey,
             modelCatalogPath,
           })
         : ["app-server"];
@@ -284,6 +410,7 @@ export class CodexAppServerAdapter implements AgentClient {
       this.notificationFailure = null;
       this.setupReadline();
     } catch (err) {
+      this.shutdown();
       yield { type: "error", message: `Failed to start codex app-server: ${err}` };
       yield { type: "done" };
       return;
@@ -660,6 +787,9 @@ export class CodexAppServerAdapter implements AgentClient {
       // ignore
     }
     this.process = null;
+    this.providerRelay?.server.close();
+    this.providerRelay?.server.closeAllConnections();
+    this.providerRelay = null;
     this.rejectAllPending("Adapter shutting down");
     this.rejectNotificationWaiters("Adapter shutting down");
     this.cleanupTempDir();
@@ -835,7 +965,7 @@ export class CodexAppServerAdapter implements AgentClient {
       .replace(/sk-[A-Za-z0-9]{20,}/g, "[REDACTED]");
   }
 
-  private buildEnv(context: AgentRunContext): Record<string, string | undefined> {
+  private buildEnv(context: AgentRunContext, providerApiKey = context.apiKey): Record<string, string | undefined> {
     const env = sanitizedAgentChildEnv();
     Object.assign(env, context.environmentVariables ?? {});
 
@@ -843,7 +973,7 @@ export class CodexAppServerAdapter implements AgentClient {
       Object.assign(env, codexResponsesProviderEnvironment({
         providerName: context.provider,
         baseUrl: context.baseUrl,
-        apiKey: context.apiKey,
+        apiKey: providerApiKey,
       }));
     }
 

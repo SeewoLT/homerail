@@ -14,9 +14,10 @@ history is never required to recover the task.
 
 The current MVP enforces immutable inputs, secure dynamic fan-out, fresh review
 sessions, fenced PR reads/writes, and a Manager-side required-checks approval
-gate. The gate binds an immutable list of exact GitHub check names to the
-current PR head and the current fresh reviewer dispatch. A real Draft-PR pilot
-remains necessary before production adoption.
+gate. Deterministic Manager broker nodes bind an immutable list of exact GitHub
+check names to each current PR head before review and re-check the approved
+head before success. A real Draft-PR pilot remains necessary before production
+adoption.
 
 ## Problem Statement
 
@@ -83,8 +84,9 @@ to stand in for durable task state and deterministic evidence.
    transcript.
 8. Missing evidence, head drift, invalid contracts, exhausted rounds, and
    incomplete validation produce explicit non-success outcomes.
-9. A handoff whose verdict is `approve` requires a successful receipt for all
-   immutable required checks from that same reviewer dispatch.
+9. Every candidate head reaches a reviewer only after a Manager-owned
+   `validate_head` broker node succeeds, and final success re-checks the exact
+   approved head independently of model output.
 10. The final successful outcome is `ready_for_human`, not merge approval.
 
 ## Proposed Flow
@@ -98,9 +100,11 @@ caller creates immutable task + task-plan inputs and identifies an existing Draf
   -> DeepSeek aggregator integrates patches in declared order
        -> broker fast-forward pushes candidate round 1 to Draft PR
   -> candidate round 1
-       -> trusted required checks are evaluated on the exact pushed head
+       -> Manager `validate_head` dispatches or observes trusted required checks
+          on the exact pushed head
+       -> failed checks: fresh DeepSeek fixer -> broker pushes next candidate
        -> fresh GLM review of task + current diff + validation evidence
-       -> approve: Manager verifies the current-dispatch checks receipt
+       -> approve: Manager re-checks required checks on the exact approved head
                    -> final evidence publication -> ready_for_human
        -> reject: fresh DeepSeek fixer -> broker pushes next candidate round
   -> candidate round 5 rejection: needs_human
@@ -207,7 +211,11 @@ run binds this immutable context:
   "task_document_sha256": "...",
   "require_draft": true,
   "writable_paths": ["src", "tests"],
-  "required_checks": ["Core (Linux, Node 24)"]
+  "required_checks": ["Core (Linux, Node 24)"],
+  "validation_workflow": {
+    "workflow_id": "core.yml",
+    "inputs": { "head_sha": "$head_sha" }
+  }
 }
 ```
 
@@ -344,9 +352,12 @@ may resolve integration conflicts and add glue changes, but all resulting
 changes remain subject to the global path policy and deterministic patch
 collector.
 
-The aggregator is the first model node allowed to request a PR write. It does
-so by passing bounded file bytes and the exact expected head SHA to the Manager
-broker. It never receives the underlying credential.
+The aggregator is the first model node allowed to request a PR write. It passes
+only its exact Manager-declared writable worktree, a bounded commit message,
+and the expected head SHA to `commit_workspace`. Manager independently derives
+the complete dirty-file manifest, reads the bytes, and publishes one atomic
+candidate commit. The model neither serializes large base64 payloads nor
+chooses a partial file list, and it never receives the underlying credential.
 
 ## Trusted Required-Checks Approval Gate
 
@@ -355,22 +366,27 @@ or fixer pushes a candidate, trusted repository validation publishes GitHub
 check runs on that exact head. The immutable `PRContext.required_checks` list is
 selected by the caller, not by a model.
 
-- `checks_snapshot` provides bounded evidence to GLM but cannot authorize an
+- A generic Manager-owned `broker` DAG node calls `validate_head`; no model
+  holds the credential or decides whether the gate ran.
+- `validate_head` binds `expected_head_sha` and the Manager-produced
+  `manifest_sha256`. If the exact required checks already succeeded, it uses
+  them. Otherwise it may dispatch the immutable `PRContext.validation_workflow`
+  and waits only for newer check runs on that same head.
+- Missing or pending checks remain blocked; terminal failures become a bounded
+  `changes_requested` result and one trusted-validation fixer task.
+- `checks_snapshot` remains bounded reviewer evidence but cannot authorize an
   approval.
-- Before handing off `verdict: approve`, the fresh reviewer dispatch must call
-  `required_checks` through its read-only Manager broker capability.
-- The broker requires the newest run for every exact configured check name to
-  be `completed` with conclusion `success` on the bound current head.
-- Runtime records only a bounded action receipt, never the credential or
-  provider body, and accepts it only for the same node provider session.
-- The handoff requirement is conditional on the structured verdict, so changing
-  an output port cannot bypass the approval fence.
+- After GLM returns `approve`, a second Manager broker node calls
+  `required_checks` with the approved `head_sha`. This independently rejects
+  head drift or a no-longer-successful check before terminal success.
+- Runtime records only bounded broker receipts, never the credential or
+  provider response body.
 
 The Draft PR may temporarily contain a candidate that fails validation; it is a
-WIP delivery surface. Missing, pending, cancelled, or failed checks block only
-approval, so GLM can still request a bounded fix. In this repository Draft PR
-CI is skipped by default, so the operator must manually dispatch trusted CI on
-the exact automation head branch before an approval can complete.
+WIP delivery surface. Failed checks route directly to a bounded fixer before
+GLM. Missing or pending checks keep the Manager validation node waiting until
+its operational timeout. If no `validation_workflow` is configured, trusted
+outer automation must create the required check runs on the exact head.
 
 ## Fresh-Context Review And Fix Rounds
 
@@ -388,17 +404,19 @@ workers. `session_scope: dispatch` means:
   model input.
 
 GLM receives only the immutable task, current PR context and diff, current
-validation result, and bounded repository evidence. A new DeepSeek fixer
+validation result, and exact-head repository bytes returned by the read-only
+`read_file` broker action. It has no local repository mount, so an uncommitted
+integration or fixer worktree cannot be mistaken for the Draft PR. A new DeepSeek fixer
 receives those inputs plus the current structured findings. Neither receives
 previous review prose that is absent from the current contract.
 
-An approval receipt from one completed dispatch is not valid in a later review
-round, even when it is the same logical review node after recovery or a loop
-iteration. A correction of that dispatch may reuse its already-recorded
+Read-evidence receipts from one completed dispatch are not valid in a later
+review round, even when it is the same logical review node after recovery or a
+loop iteration. A correction of that dispatch may reuse its already-recorded
 receipts or repeat only the broker actions declared as hard output evidence for
 that port in the same session before handing off. This preserves prerequisite
 reads such as `pull_request_snapshot` and `checks_snapshot` alongside the final
-`required_checks` or `commit_files` call; correction still cannot use built-in
+review handoff or `commit_workspace` call; correction still cannot use built-in
 tools, mutate beyond the original capability, or broaden the permitted broker
 actions.
 
@@ -412,11 +430,27 @@ The Manager-side `github_pr` broker implements these first-version actions:
 | Action | Purpose |
 | --- | --- |
 | `pull_request_snapshot` | Return bounded immutable PR metadata and diff identity |
+| `read_file` | Return bounded UTF-8 file bytes from the exact current head SHA |
 | `checks_snapshot` | Return bounded checks for the current exact head SHA |
 | `required_checks` | Fail unless every immutable required check succeeds on that head |
+| `validate_head` | Optionally dispatch trusted validation and wait for required checks on one exact head |
+| `commit_workspace` | Derive every dirty file from the node's unique writable worktree and publish one commit |
 | `commit_files` | Create bounded blobs/tree/commit and fast-forward the bound head branch |
 
-`commit_files` enforces:
+`commit_workspace` and the lower-level compatibility action `commit_files`
+share the GitHub mutation fence. Auto Fix v2 uses only `commit_workspace`,
+which additionally enforces:
+
+- the caller-supplied `workspace_path` equals the node's one declared writable
+  path;
+- the worktree HEAD equals `expected_head_sha`, its top-level and Git metadata
+  remain inside the run workspace, and changed paths contain no symlink;
+- every tracked or non-ignored untracked dirty path is included in one sorted
+  manifest;
+- the returned `manifest_sha256` and `head_sha` both match the structured
+  candidate/fix handoff.
+
+The shared mutation fence enforces:
 
 - the run's exact repository, PR, base branch, and head branch binding;
 - `expected_head_sha` equals the remote PR head immediately before push;
@@ -424,8 +458,9 @@ The Manager-side `github_pr` broker implements these first-version actions:
 - explicit writable prefixes (`"."` is invalid) and an unconditional deny for
   `.github/**`, `.git/**`, and mounted input paths;
 - at most 64 unique regular-file paths and 1 MiB total decoded bytes;
-- regular or executable blob modes only, with no delete, symlink, or submodule
-  operation;
+- regular or executable blob modes only, with no symlink or submodule
+  operation; `commit_workspace` may delete only a tracked path that trusted Git
+  inspection reports deleted in the bound worktree;
 - a bounded single-line commit message;
 - durable current/pending-head reconciliation across Manager recovery.
 
@@ -435,8 +470,9 @@ advance the PR head. File/byte bounds, expected-head recovery, and operator
 rate-limit discipline keep this failure mode bounded.
 
 The broker must never expose token values or provider error bodies containing
-secrets. It must reject calls from nodes that lack both the
-`credential_broker_call` DAG tool and the exact declared action.
+secrets. A Worker call requires `credential_broker_call` plus the exact
+declared action; a Manager `broker` node receives exactly one projected action
+and has no Worker tool surface.
 The tool schema enumerates the credential references and action names actually
 projected into that dispatch, and its description lists the valid
 credential/action pairs. Trusted runtime validation remains authoritative for
@@ -449,10 +485,11 @@ the pair and its action-specific input.
 | Binder | trusted command | fixed command only | `pull_request_snapshot` |
 | Caller plan validator | trusted command | fixed command only | none |
 | DeepSeek implementer | isolated worktree | bounded read/write/shell | none |
-| DeepSeek aggregator | integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_files` |
-| GLM reviewer | read-only snapshot/evidence | Read/Grep/Glob | `pull_request_snapshot`, `checks_snapshot`, `required_checks` |
-| DeepSeek fixer | fresh integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_files` |
-| Finalizer | trusted command | fixed command only | `pull_request_snapshot`, `required_checks` |
+| DeepSeek aggregator | integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
+| Exact-head validator | none | Manager runtime only | `validate_head` |
+| GLM reviewer | immutable input only; exact files via broker | Read/Grep/Glob | `pull_request_snapshot`, `read_file`, `checks_snapshot` |
+| DeepSeek fixer | fresh integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
+| Finalizer | none | Manager runtime only | `required_checks` |
 
 Reviewer mutation is intentionally excluded. If operator-visible comments are
 required later, add only `post_comment`; never grant review approval or merge

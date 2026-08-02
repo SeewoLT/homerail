@@ -22,13 +22,29 @@ export function createCredentialBrokerCallTool(
   const availablePairs = bindings
     .map((binding) => `${binding.credential_ref}: ${binding.allowed_actions.join(", ")}`)
     .join("; ");
+  const actionHints = actions.flatMap((action) => {
+    if (["pull_request_snapshot", "checks_snapshot", "required_checks"].includes(action)) {
+      return [`${action} input={}`];
+    }
+    if (action === "read_file") {
+      return [`read_file input={"expected_head_sha":"<sha>","path":"<repository path>"}`];
+    }
+    if (action === "commit_workspace") {
+      return [`commit_workspace input={"expected_head_sha":"<sha>","message":"<single line>","workspace_path":"<declared writable path>"}`];
+    }
+    if (action === "commit_files") {
+      return [`commit_files input={"expected_head_sha":"<sha>","message":"<single line>","files":[{"path":"<path>","content_base64":"<canonical base64>"}]}`];
+    }
+    return [];
+  }).join("; ");
   return {
     name: "credential_broker_call",
     description:
       "Ask the Manager to perform one declared credential-backed action. "
       + "The credential stays in the Manager; only the action result is returned. "
       + `Available credential/action pairs: ${availablePairs}. `
-      + "Put action arguments only inside input; pass input: {} for an action with no arguments.",
+      + "Put action arguments only inside input; pass input: {} for an action with no arguments. "
+      + (actionHints ? `Exact action payloads: ${actionHints}.` : ""),
     input_schema: {
       type: "object",
       properties: {

@@ -101,6 +101,63 @@ function awaitCommandWorkflow(): any {
 }
 
 describe("WorkflowSpec v1", () => {
+  it("compiles a Manager-only broker gateway with one exact declared action", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.validate = {
+      kind: "broker",
+      inputs: { candidate: {} },
+      outputs: { result: {}, error: {} },
+      config: {
+        input: "candidate",
+        input_map: { expected_head_sha: "head_sha" },
+        static_input: { mode: "trusted" },
+        credential_ref: "github-autofix",
+        purpose: "validate one immutable PR head",
+        broker: "github_pr",
+        action: "validate_head",
+        result_port: "result",
+        error_port: "error",
+      },
+    };
+    workflow.spec.nodes.failed = {
+      kind: "terminal",
+      outcome: "failure",
+      inputs: { result: {} },
+    };
+    workflow.spec.edges = [
+      { from: "$run.input", to: "execute.task" },
+      { from: "execute.result", to: "validate.candidate" },
+      { from: "validate.result", to: "done.result" },
+      { from: "validate.error", to: "failed.result", condition: "on_failure" },
+    ];
+
+    const result = compileWorkflowSource(YAML.stringify(workflow));
+
+    expect(result.valid, result.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+    const runtime = projectCanonicalWorkflowToParsedDAG(result.canonical!);
+    expect(runtime.graph.nodes.find((node) => node.node_id === "validate")).toMatchObject({
+      node_type: "broker_gateway",
+      gateway_config: {
+        input: "candidate",
+        input_map: { expected_head_sha: "head_sha" },
+        static_input: { mode: "trusted" },
+        credential_ref: "github-autofix",
+        broker: "github_pr",
+        action: "validate_head",
+        result_port: "result",
+        error_port: "error",
+      },
+      extra: {
+        agent_runtime: {
+          credentials: [{
+            credential_ref: "github-autofix",
+            inject: { mode: "manager_broker", broker: "github_pr", allowed_actions: ["validate_head"] },
+          }],
+        },
+      },
+    });
+  });
+
   it("canonicalizes exact per-agent pinned Surface view allowlists", () => {
     const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
     workflow.spec.agents.worker.allowed_surface_views = ["review:summary", "summary"];
@@ -390,7 +447,7 @@ describe("WorkflowSpec v1", () => {
     const result = compileWorkflowSource(YAML.stringify(workflow));
 
     expect(result.valid, result.diagnostics.map((item) => item.message).join("\n")).toBe(true);
-    expect(result.canonical?.compiler_version).toBe("5");
+    expect(result.canonical?.compiler_version).toBe("6");
     expect(result.canonical?.artifacts).toEqual([
       {
         name: "evidence.tar.gz",
@@ -650,7 +707,7 @@ spec:
 
     expect(result.valid, result.diagnostics.map((item) => item.message).join("\n")).toBe(true);
     expect(result.diagnostics.map((item) => item.code)).not.toContain("DAG_SEMANTIC_NO_TERMINAL_PATH");
-    expect(result.canonical?.compiler_version).toBe("5");
+    expect(result.canonical?.compiler_version).toBe("6");
     expect(result.canonical?.feedback_edges).toEqual([]);
     expect(result.canonical?.nodes.find((node) => node.id === "suspend")).toMatchObject({
       kind: "await_command",

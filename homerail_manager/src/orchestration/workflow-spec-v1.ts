@@ -51,7 +51,7 @@ export interface CanonicalPort {
 
 export interface CanonicalNode {
   id: string;
-  kind: "agent" | "command" | "approval" | "state" | "fanout" | "await_command" | "condition" | "join" | "foreach" | "while" | "terminal";
+  kind: "agent" | "command" | "broker" | "approval" | "state" | "fanout" | "await_command" | "condition" | "join" | "foreach" | "while" | "terminal";
   description?: string;
   agent?: string;
   depends_on: string[];
@@ -526,6 +526,31 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       for (const key of ["success_port", "failure_port"] as const) {
         const port = node.config[key];
         if (!outputs[port]) add(`${nodePath}/config/${key}`, "DAG_SEMANTIC_UNKNOWN_PORT", `unknown output port '${port}'`);
+      }
+    }
+    if (node.kind === "broker") {
+      const inputs = nodePorts(node, "inputs");
+      if (node.config.input && !inputs[node.config.input]) {
+        add(`${nodePath}/config/input`, "DAG_SEMANTIC_UNKNOWN_PORT", `unknown input port '${node.config.input}'`);
+      }
+      if (node.config.input_field && node.config.input_map) {
+        add(
+          `${nodePath}/config`,
+          "DAG_SEMANTIC_AMBIGUOUS_BROKER_INPUT",
+          "broker input_field and input_map are mutually exclusive",
+        );
+      }
+      const outputs = nodePorts(node, "outputs");
+      for (const key of ["result_port", "error_port"] as const) {
+        const port = node.config[key];
+        if (!outputs[port]) add(`${nodePath}/config/${key}`, "DAG_SEMANTIC_UNKNOWN_PORT", `unknown output port '${port}'`);
+      }
+      if (node.config.result_port === node.config.error_port) {
+        add(
+          `${nodePath}/config/error_port`,
+          "DAG_SEMANTIC_BROKER_PORT_CONFLICT",
+          "broker result_port and error_port must differ",
+        );
       }
     }
     if (node.kind === "approval") {
@@ -1355,6 +1380,7 @@ export function workflowSchemaResponse(): {
 function runtimeNodeType(kind: CanonicalNode["kind"]): string {
   if (kind === "await_command") return "await_command_gateway";
   if (kind === "command") return "command_gateway";
+  if (kind === "broker") return "broker_gateway";
   if (kind === "approval") return "approval_gateway";
   if (kind === "state") return "state_gateway";
   if (kind === "fanout") return "fanout_gateway";
@@ -1379,7 +1405,7 @@ function runtimeGatewayConfig(node: CanonicalNode): Record<string, unknown> | un
   if (node.kind === "join") return { type: "join", ...node.config };
   if (node.kind === "foreach") return { type: "loop", ...node.config };
   if (node.kind === "while") return { type: "while", ...node.config };
-  if (node.kind === "command" || node.kind === "approval" || node.kind === "state" || node.kind === "fanout" || node.kind === "await_command") {
+  if (node.kind === "command" || node.kind === "broker" || node.kind === "approval" || node.kind === "state" || node.kind === "fanout" || node.kind === "await_command") {
     return { type: node.kind, ...node.config };
   }
   return undefined;
@@ -1448,6 +1474,7 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
       to_node: terminal ? "" : edge.to.node,
       to_port: terminal ? "" : edge.to.port,
       condition: edge.condition,
+      ...(edge.kind === "feedback" ? { label: "feedback" } : {}),
       ...(edge.kind === "feedback"
         ? { retry_policy: { max_retries: edge.max_traversals ?? 1 } }
         : edge.retry.max_retries > 0
@@ -1499,6 +1526,19 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
           output_broker_requirements: outputBrokerRequirements,
         },
         ...(node.kind === "agent" && node.config ? { agent_runtime: node.config } : {}),
+        ...(node.kind === "broker" && node.config ? {
+          agent_runtime: {
+            credentials: [{
+              credential_ref: node.config.credential_ref,
+              purpose: node.config.purpose,
+              inject: {
+                mode: "manager_broker",
+                broker: node.config.broker,
+                allowed_actions: [node.config.action],
+              },
+            }],
+          },
+        } : {}),
       },
     };
   });
@@ -1634,7 +1674,7 @@ function authoringNode(node: CanonicalNode, canonical: CanonicalWorkflowIR): Rec
       },
     };
   }
-  if (node.kind === "command" || node.kind === "approval" || node.kind === "state" || node.kind === "fanout" || node.kind === "await_command") {
+  if (node.kind === "command" || node.kind === "broker" || node.kind === "approval" || node.kind === "state" || node.kind === "fanout" || node.kind === "await_command") {
     return { ...base, config };
   }
   if (node.kind === "foreach") {

@@ -5,8 +5,8 @@ the existing `auto-fix` trigger.
 
 Local deterministic coverage is green. Before a live pilot, deploy a Manager
 release containing this workflow, sync its mixed-model profile, install the
-`github-autofix` encrypted credential, and create a dedicated Draft PR for
-Issue #172. Do not sync the v2 workflow into an older Manager release that
+`github-autofix` encrypted credential, and create a dedicated Draft PR for a
+new low-risk pilot Issue. Do not reuse a failure-evidence PR or sync the v2 workflow into an older Manager release that
 predates the runtime and broker support described below.
 
 ## What is enforced
@@ -31,10 +31,11 @@ predates the runtime and broker support described below.
   `workspace-write`; Docker mounts, network, cgroups, and HomeRail's post-turn
   path verification remain active.
 - The DeepSeek aggregator may read and update only the bound Draft PR through
-  the `github_pr` Manager broker. Manager records the final successful
-  `commit_files` result and rejects the Candidate unless its `head_sha` is the
-  exact returned PR head. Dynamic fixers have the same result-to-handoff
-  binding when they report `fixed`.
+  the `github_pr` Manager broker. `commit_workspace` derives every dirty path
+  and byte from the node's single declared writable worktree and publishes one
+  commit, so the model cannot omit a file or spend output context on base64.
+  Manager rejects the Candidate/FixResult unless both `head_sha` and
+  `manifest_sha256` match that exact broker result.
 - GLM-5.2 reviewer nodes have `session_scope: dispatch`; every re-entry gets a
   new provider session and no portable checkpoint/transcript. A rejected
   handoff-contract correction stays in that same logical dispatch so valid
@@ -42,23 +43,28 @@ predates the runtime and broker support described below.
   hard broker evidence declared for that output port, including prerequisite
   `pull_request_snapshot` and `checks_snapshot` reads; it cannot broaden the
   original capability.
+- GLM receives no repository/workers/fixers mount. It reads changed or related
+  UTF-8 source only through `read_file` bound to the exact current PR head, so
+  local dirty integration state cannot influence the verdict.
 - Read-only reviewer containers keep `/workspace` read-only and receive one
   nested writable mount only at `/workspace/.homerail-runtime` for trusted
   Worker audit/session telemetry. This prevents audit writer startup from
   crashing a read-only Worker without granting repository writes.
-- Each rejected review creates one fresh dynamic DeepSeek fixer. Four fix
-  rounds plus the initial review give exactly five total review rounds.
+- Each rejected validation or review creates one fresh dynamic DeepSeek fixer.
+  The loop permits at most five candidate evaluations and four fixes. A
+  validation failure consumes an evaluation, so the number of GLM dispatches
+  may be lower than five.
 - GitHub writes are expected-head, fast-forward-only, non-force, bounded to 64
   files/1 MiB, and restricted by explicit `pr_context.writable_paths` prefixes.
   `writable_paths: ["."]` is invalid; `.github/**`, `.git/**`, and the mounted
   input directory are always denied even when a broader prefix is declared.
-- An `approve` handoff is rejected by Manager unless the same fresh reviewer
-  dispatch successfully called `credential_broker_call` with
-  `credential_ref: github-autofix` and action `required_checks`, and every
-  immutable required check passed on the exact current PR head. The returned
-  check `head_sha` must also equal the review handoff's `head_sha`. `github_pr`
-  is the broker implementation name and must never be supplied as the
-  credential reference.
+- Before each GLM dispatch, a Manager-owned `validate_head` broker node requires
+  every immutable check on the exact current PR head. Terminal check failures
+  become a structured fixer task; missing/pending checks wait until the bounded
+  operational timeout. After `approve`, a separate Manager-owned
+  `required_checks` node re-checks the approved `head_sha` before success.
+  `github_pr` is the broker implementation name and must never be supplied as
+  the credential reference.
 
 ## GitHub credential
 
@@ -68,6 +74,10 @@ For a pilot, a repository-scoped fine-grained PAT is acceptable. Give it only:
 - Pull requests: read-only
 - Checks: read-only
 
+If `pr_context.validation_workflow` is configured, also grant Actions:
+read/write so the broker can call `workflow_dispatch`. Omit that permission
+when trusted CI is triggered outside the DAG.
+
 Store it as an encrypted Manager credential; it is never placed in a Worker:
 
 ```bash
@@ -76,10 +86,10 @@ printf '%s' "$GITHUB_AUTOFIX_TOKEN" | hr credential set github-autofix \
 ```
 
 For production, prefer a GitHub App installed only on the target repositories.
-Use Contents read/write, Pull requests read, and Checks read. Store the App
-material as an opaque JSON credential with fields `app_id`, `installation_id`,
-and `private_key`; the broker mints a short-lived installation token for each
-call.
+Use Contents read/write, Pull requests read, and Checks read. Add Actions
+read/write only when the broker dispatches validation. Store the App material
+as an opaque JSON credential with fields `app_id`, `installation_id`, and
+`private_key`; the broker mints a short-lived installation token for each call.
 
 ```bash
 printf '%s' "$GITHUB_AUTOFIX_APP_JSON" | hr credential set github-autofix \
@@ -114,7 +124,11 @@ the actually staged `task_document` before any PR action.
   "task_document_sha256": "64-character-sha256-of-task.md",
   "require_draft": true,
   "writable_paths": ["homerail_manager/src", "homerail_manager/tests"],
-  "required_checks": ["Core (Linux, Node 24)"]
+  "required_checks": ["Core (Linux, Node 24)"],
+  "validation_workflow": {
+    "workflow_id": "core.yml",
+    "inputs": { "head_sha": "$head_sha" }
+  }
 }
 ```
 
@@ -123,7 +137,10 @@ head update, a fork/cross-repository PR, a task-document digest mismatch, or a
 write outside the path allowlist. `required_checks` contains one to 32 unique,
 exact GitHub check-run names. It is immutable for the run; the broker selects
 the newest run with each exact name and requires `completed`/`success` on the
-current head.
+current head. `validation_workflow` is optional. When present, `workflow_id`
+is a bounded workflow file/id and `$head_sha` input values are replaced with
+the exact candidate SHA; only check runs newer than the pre-dispatch baseline
+can satisfy that validation attempt.
 
 CLI input bindings declare their media type through the immutable mount suffix:
 `.md` is Markdown, `.json` is validated JSON, and `.txt` is plain text. The CLI
@@ -131,19 +148,19 @@ rejects other suffixes, invalid UTF-8, and invalid JSON before staging.
 
 The broker's token permissions are necessary but not the only boundary. The
 WorkflowSpec also limits which nodes can call which broker actions, the Worker
-transport is fenced to the current lease/session/generation, and `commit_files`
-enforces the immutable PR identity, expected head, writable path allowlist,
-file/byte limits, and `force: false`.
+transport is fenced to the current lease/session/generation, and
+`commit_workspace` enforces the immutable PR identity, exact worktree/head,
+complete dirty-file manifest, writable path allowlist, file/byte limits, and
+`force: false`.
 
 This repository's pull-request CI intentionally skips Draft PRs and does not
-run on Draft `synchronize` events. Before a reviewer can approve, an operator
-or trusted outer automation must manually dispatch CI with the Draft head
-branch selected as the workflow ref, then verify that the configured exact
-check name appears on that head SHA. The DAG credential remains Checks
-read-only and cannot manufacture or override check results.
+run on Draft `synchronize` events. Configure `validation_workflow` so Manager
+can dispatch trusted CI with the Draft head branch and exact SHA input, or have
+trusted outer automation create the configured check on that SHA. The broker
+can observe results but cannot manufacture or override check conclusions.
 
-`commit_files` uses GitHub's bounded Git Data API sequence (blob, tree, commit,
-then non-force ref update). A failure before the ref update can leave
+`commit_workspace` uses GitHub's bounded Git Data API sequence (blob, tree,
+commit, then non-force ref update). A failure before the ref update can leave
 unreachable Git objects, but cannot advance the PR. Operators should respect
 GitHub rate limits and retry only after re-reading the bound PR head; the broker
 reconciles a pending update during recovery.
@@ -240,6 +257,8 @@ npm --prefix homerail_protocol run build
 npm --prefix homerail_manager exec vitest run \
   tests/auto-fix-v2-scenario.test.ts \
   tests/github-pr-broker.test.ts \
+  tests/dag-gateway.test.ts \
+  tests/cold-recovery.test.ts \
   tests/run-input-artifacts.test.ts \
   tests/dag-runtime-primitives.test.ts
 npm --prefix homerail_node exec vitest run \
@@ -253,12 +272,13 @@ npm --prefix homerail_cli exec vitest run tests/run-inputs.test.ts
 node scripts/auto-fix-v2-runtime-profile.test.mjs
 ```
 
-The fake-remote scenario proves two dynamic implementers, four dynamically
-generated fixers, five total reviews with distinct sessions, cold recovery,
-read-only input projection, per-node GitHub actions, non-force head fencing,
-path denial (including `.github/actions/**`), task/PR identity binding,
-fork/closed-PR denial, external-head-drift rejection, and a Manager-enforced
-required-checks approval fence that cannot reuse a prior dispatch receipt.
+The fake-remote coverage proves two dynamic implementers, four dynamically
+generated fixers, five total reviews with distinct sessions, fifth-round
+exhaustion, dormant-loop cold recovery, read-only input projection, Manager
+broker action projection, exact-head validation pending-to-success, failed
+validation-to-fixer routing, non-force head fencing, path denial (including
+`.github/actions/**`), task/PR identity binding, fork/closed-PR denial,
+external-head-drift rejection, and an independent final required-checks fence.
 
 This proof does not spend model tokens or mutate GitHub. A real Draft-PR pilot,
 including creation of the configured check run on the exact Draft head, remains

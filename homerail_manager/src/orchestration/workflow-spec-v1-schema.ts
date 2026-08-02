@@ -3,7 +3,7 @@ import { AGENT_BUILTIN_TOOL_NAMES, DAG_AGENT_TOOL_NAMES } from "homerail-protoco
 
 export const WORKFLOW_API_VERSION = "homerail.ai/v1" as const;
 export const WORKFLOW_KIND = "Workflow" as const;
-export const WORKFLOW_COMPILER_VERSION = "5" as const;
+export const WORKFLOW_COMPILER_VERSION = "6" as const;
 
 const IDENTIFIER_PATTERN = "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$";
 const PORT_REFERENCE_PATTERN = "^(?:\\$run\\.input|[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*)$";
@@ -265,6 +265,35 @@ const CommandNode = Type.Object({
   }, { additionalProperties: false }),
 }, { additionalProperties: false });
 
+const BrokerNode = Type.Object({
+  kind: Type.Literal("broker"),
+  ...NodeBase,
+  config: Type.Object({
+    input: Type.Optional(Identifier),
+    input_field: Type.Optional(Type.String({
+      minLength: 1,
+      maxLength: 256,
+      description: "Selected-input field or $ for its root.",
+    })),
+    input_map: Type.Optional(Type.Record(
+      Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z_][A-Za-z0-9_-]*$" }),
+      Type.String({ minLength: 1, maxLength: 256 }),
+      { minProperties: 1, maxProperties: 64 },
+    )),
+    static_input: Type.Optional(Type.Record(
+      Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z_][A-Za-z0-9_-]*$" }),
+      JsonValue,
+      { maxProperties: 64 },
+    )),
+    credential_ref: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
+    purpose: Type.String({ minLength: 1, maxLength: 256 }),
+    broker: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
+    action: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
+    result_port: Identifier,
+    error_port: Identifier,
+  }, { additionalProperties: false }),
+}, { additionalProperties: false });
+
 const ApprovalNode = Type.Object({
   kind: Type.Literal("approval"),
   ...NodeBase,
@@ -455,6 +484,7 @@ const TerminalNode = Type.Object({
 const WorkflowNode = Type.Union([
   AgentNode,
   CommandNode,
+  BrokerNode,
   ApprovalNode,
   StateNode,
   FanoutNode,

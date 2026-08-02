@@ -1,15 +1,19 @@
-import { sign } from "node:crypto";
+import { createHash, sign } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
 
 import {
   dagRunInputPath,
   listDagRunInputs,
 } from "../persistence/run-input-artifacts.js";
 import {
+  getActiveRun,
   getActiveRunBrokerState,
   setActiveRunBrokerState,
 } from "./active-runs.js";
 import type { CredentialBrokerContext } from "./credential-broker.js";
+import { runWorkspacePath } from "./workspace-retention.js";
 
 interface GithubPullRequestContext {
   version: 1;
@@ -25,6 +29,10 @@ interface GithubPullRequestContext {
   require_draft: boolean;
   writable_paths: string[];
   required_checks: string[];
+  validation_workflow?: {
+    workflow_id: string;
+    inputs: Record<string, string>;
+  };
 }
 
 interface GithubPullRequestState {
@@ -50,7 +58,11 @@ const OWNER_REPO = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?$/;
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9._-]+$/;
 const MAX_COMMIT_FILES = 64;
 const MAX_COMMIT_BYTES = 1024 * 1024;
+const MAX_READ_FILE_BYTES = 192 * 1024;
+const MAX_READ_FILE_JSON_BYTES = 224 * 1024;
 const MAX_PATCH_CHARS = 8_000;
+const VALIDATION_POLL_INTERVAL_MS = 5_000;
+const VALIDATION_TIMEOUT_MS = 45 * 60_000;
 
 function base64Url(value: string | Buffer): string {
   return Buffer.from(value).toString("base64url");
@@ -128,6 +140,26 @@ function parsePullRequestContext(runId: string): GithubPullRequestContext {
   if (new Set(requiredChecks).size !== requiredChecks.length) {
     throw new Error("pr_context required_checks must be unique");
   }
+  let validationWorkflow: GithubPullRequestContext["validation_workflow"];
+  if (raw.validation_workflow !== undefined) {
+    const configured = jsonRecord(raw.validation_workflow, "pr_context validation_workflow");
+    const workflowId = String(configured.workflow_id ?? "");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workflowId)) {
+      throw new Error("pr_context validation_workflow workflow_id is invalid");
+    }
+    const configuredInputs = jsonRecord(configured.inputs ?? {}, "pr_context validation_workflow inputs");
+    if (Object.keys(configuredInputs).length > 32) {
+      throw new Error("pr_context validation_workflow inputs exceed the bounded limit");
+    }
+    const inputs: Record<string, string> = {};
+    for (const [key, value] of Object.entries(configuredInputs).sort(([left], [right]) => left.localeCompare(right))) {
+      if (!/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(key) || typeof value !== "string" || value.length > 1_024) {
+        throw new Error("pr_context validation_workflow input is invalid");
+      }
+      inputs[key] = value;
+    }
+    validationWorkflow = { workflow_id: workflowId, inputs };
+  }
   return {
     version: 1,
     owner,
@@ -142,6 +174,7 @@ function parsePullRequestContext(runId: string): GithubPullRequestContext {
     require_draft: raw.require_draft !== false,
     writable_paths: Array.from(new Set(writablePaths)).sort(),
     required_checks: [...requiredChecks].sort(),
+    ...(validationWorkflow ? { validation_workflow: validationWorkflow } : {}),
   };
 }
 
@@ -189,7 +222,111 @@ async function githubApi<T>(token: string, pathname: string, init: RequestInit =
     signal: init.signal ?? AbortSignal.timeout(20_000),
   });
   if (!response.ok) throw new Error(`GitHub API request failed (${response.status})`);
+  if (response.status === 204) return undefined as T;
   return await response.json() as T;
+}
+
+interface NormalizedCheckRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  details_url: string;
+  output: {
+    title: string;
+    summary: string;
+    text: string;
+  };
+}
+
+function normalizeCheckRun(check: Record<string, unknown>): NormalizedCheckRun {
+  const output = check.output && typeof check.output === "object" && !Array.isArray(check.output)
+    ? check.output as Record<string, unknown>
+    : {};
+  const numericId = Number(check.id ?? 0);
+  return {
+    id: Number.isSafeInteger(numericId) && numericId >= 0 ? numericId : 0,
+    name: String(check.name ?? "").slice(0, 256),
+    status: String(check.status ?? "").slice(0, 64),
+    conclusion: check.conclusion === null ? null : String(check.conclusion ?? "").slice(0, 64),
+    details_url: String(check.details_url ?? "").slice(0, 2_000),
+    output: {
+      title: String(output.title ?? "").slice(0, 1_000),
+      summary: String(output.summary ?? "").slice(0, 8_000),
+      text: String(output.text ?? "").slice(0, 8_000),
+    },
+  };
+}
+
+async function githubCheckRuns(token: string, binding: GithubPullRequestContext, headSha: string): Promise<NormalizedCheckRun[]> {
+  const first = await githubApi<{ check_runs?: Array<Record<string, unknown>> }>(
+    token,
+    `${repoPath(binding)}/commits/${headSha}/check-runs?per_page=100&page=1`,
+  );
+  const checks = [...(first.check_runs ?? [])];
+  if (checks.length === 100) {
+    const second = await githubApi<{ check_runs?: Array<Record<string, unknown>> }>(
+      token,
+      `${repoPath(binding)}/commits/${headSha}/check-runs?per_page=100&page=2`,
+    );
+    checks.push(...(second.check_runs ?? []));
+    if ((second.check_runs ?? []).length === 100) {
+      const overflow = await githubApi<{ check_runs?: Array<Record<string, unknown>> }>(
+        token,
+        `${repoPath(binding)}/commits/${headSha}/check-runs?per_page=100&page=3`,
+      );
+      if ((overflow.check_runs ?? []).length > 0) {
+        throw new Error("GitHub check run list exceeds the bounded snapshot");
+      }
+    }
+  }
+  return checks.map(normalizeCheckRun);
+}
+
+function latestRequiredChecks(
+  checks: NormalizedCheckRun[],
+  requiredNames: string[],
+  minimumIds?: ReadonlyMap<string, number>,
+): NormalizedCheckRun[] {
+  return requiredNames.map((name) => checks
+    .filter((check) => check.name === name && check.id > (minimumIds?.get(name) ?? -1))
+    .sort((left, right) => right.id - left.id)[0] ?? {
+      id: 0,
+      name,
+      status: "missing",
+      conclusion: null,
+      details_url: "",
+      output: { title: "", summary: "", text: "" },
+    });
+}
+
+function checksPassed(checks: NormalizedCheckRun[]): boolean {
+  return checks.every((check) => check.status === "completed" && check.conclusion === "success");
+}
+
+function checksTerminal(checks: NormalizedCheckRun[]): boolean {
+  return checks.every((check) => check.status === "completed" && check.conclusion !== null);
+}
+
+function validationMetadata(input: Readonly<Record<string, unknown>>, headSha: string): {
+  head_sha: string;
+  manifest_sha256: string;
+  summary: string;
+  tests: string[];
+} {
+  const manifest = String(input.manifest_sha256 ?? "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(manifest)) throw new Error("validate_head manifest_sha256 is invalid");
+  if (typeof input.summary !== "string" || input.summary.length > 12_000) {
+    throw new Error("validate_head summary is invalid");
+  }
+  const summary = input.summary.trim();
+  if (!Array.isArray(input.tests) || input.tests.length > 50 || input.tests.some((entry) => (
+    typeof entry !== "string" || entry.length > 2_000
+  ))) {
+    throw new Error("validate_head tests are invalid");
+  }
+  const tests = [...input.tests] as string[];
+  return { head_sha: headSha, manifest_sha256: manifest, summary, tests };
 }
 
 function repoPath(context: GithubPullRequestContext): string {
@@ -279,8 +416,15 @@ export async function githubPullRequestSnapshot(context: CredentialBrokerContext
   const { token, binding, pull, state } = await boundPull(context);
   const files = await githubApi<Array<Record<string, unknown>>>(
     token,
-    `${repoPath(binding)}/pulls/${binding.pull_number}/files?per_page=100`,
+    `${repoPath(binding)}/pulls/${binding.pull_number}/files?per_page=100&page=1`,
   );
+  if (files.length === 100) {
+    const overflow = await githubApi<Array<Record<string, unknown>>>(
+      token,
+      `${repoPath(binding)}/pulls/${binding.pull_number}/files?per_page=100&page=2`,
+    );
+    if (overflow.length > 0) throw new Error("GitHub pull request file list exceeds the bounded snapshot");
+  }
   return {
     repository: `${binding.owner}/${binding.repo}`,
     pull_number: binding.pull_number,
@@ -294,6 +438,7 @@ export async function githubPullRequestSnapshot(context: CredentialBrokerContext
     base_sha: binding.base_sha,
     files: files.slice(0, 100).map((file) => ({
       filename: String(file.filename ?? ""),
+      sha: String(file.sha ?? "").toLowerCase(),
       status: String(file.status ?? ""),
       additions: Number(file.additions ?? 0),
       deletions: Number(file.deletions ?? 0),
@@ -303,46 +448,66 @@ export async function githubPullRequestSnapshot(context: CredentialBrokerContext
   };
 }
 
-export async function githubChecksSnapshot(context: CredentialBrokerContext): Promise<unknown> {
+export async function githubReadFile(context: CredentialBrokerContext): Promise<unknown> {
   const { token, binding, state } = await boundPull(context);
-  const body = await githubApi<{ check_runs?: Array<Record<string, unknown>> }>(
+  const expectedHead = String(context.input.expected_head_sha ?? "").toLowerCase();
+  if (!SHA.test(expectedHead)) throw new Error("read_file expected_head_sha is invalid");
+  if (expectedHead !== state.current_head_sha) throw new Error("read_file expected head is stale");
+  const pathname = safeRelativePath(context.input.path, "read_file path");
+  const encodedPath = pathname.split("/").map(encodeURIComponent).join("/");
+  const file = await githubApi<Record<string, unknown>>(
     token,
-    `${repoPath(binding)}/commits/${state.current_head_sha}/check-runs?per_page=100`,
+    `${repoPath(binding)}/contents/${encodedPath}?ref=${encodeURIComponent(expectedHead)}`,
   );
+  if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string") {
+    throw new Error("read_file path is not a regular GitHub file");
+  }
+  const encoded = file.content.replace(/\s+/g, "");
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.toString("base64") !== encoded) throw new Error("read_file GitHub content is not canonical base64");
+  if (bytes.byteLength > MAX_READ_FILE_BYTES) {
+    throw new Error(`read_file exceeds ${MAX_READ_FILE_BYTES} bytes`);
+  }
+  const text = bytes.toString("utf8");
+  if (Buffer.from(text, "utf8").compare(bytes) !== 0 || text.includes("\0")) {
+    throw new Error("read_file supports UTF-8 text files only");
+  }
+  const blobSha = String(file.sha ?? "").toLowerCase();
+  if (!SHA.test(blobSha)) throw new Error("read_file GitHub blob SHA is invalid");
+  if (Buffer.byteLength(JSON.stringify(text), "utf8") > MAX_READ_FILE_JSON_BYTES) {
+    throw new Error("read_file escaped text exceeds the bounded broker result");
+  }
   return {
     head_sha: state.current_head_sha,
-    checks: (body.check_runs ?? []).slice(0, 100).map((check) => ({
-      id: Number(check.id ?? 0),
-      name: String(check.name ?? ""),
-      status: String(check.status ?? ""),
-      conclusion: check.conclusion === null ? null : String(check.conclusion ?? ""),
-      details_url: String(check.details_url ?? ""),
-      started_at: String(check.started_at ?? ""),
-      completed_at: check.completed_at === null ? null : String(check.completed_at ?? ""),
-    })),
+    path: pathname,
+    blob_sha: blobSha,
+    size: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    content: text,
+  };
+}
+
+export async function githubChecksSnapshot(context: CredentialBrokerContext): Promise<unknown> {
+  const { token, binding, state } = await boundPull(context);
+  const checks = await githubCheckRuns(token, binding, state.current_head_sha);
+  return {
+    head_sha: state.current_head_sha,
+    checks,
   };
 }
 
 export async function githubRequiredChecks(context: CredentialBrokerContext): Promise<unknown> {
   const { token, binding, state } = await boundPull(context);
-  const body = await githubApi<{ check_runs?: Array<Record<string, unknown>> }>(
-    token,
-    `${repoPath(binding)}/commits/${state.current_head_sha}/check-runs?per_page=100`,
+  const expectedHead = context.input.expected_head_sha === undefined
+    ? state.current_head_sha
+    : String(context.input.expected_head_sha).toLowerCase();
+  if (!SHA.test(expectedHead) || expectedHead !== state.current_head_sha) {
+    throw new Error("required_checks expected head is stale or invalid");
+  }
+  const required = latestRequiredChecks(
+    await githubCheckRuns(token, binding, expectedHead),
+    binding.required_checks,
   );
-  const checks = body.check_runs ?? [];
-  const required = binding.required_checks.map((name) => {
-    const latest = checks
-      .filter((check) => String(check.name ?? "") === name)
-      .sort((left, right) => Number(right.id ?? 0) - Number(left.id ?? 0))[0];
-    return {
-      name,
-      id: Number(latest?.id ?? 0),
-      status: String(latest?.status ?? "missing"),
-      conclusion: latest?.conclusion === null || latest === undefined
-        ? null
-        : String(latest.conclusion ?? ""),
-    };
-  });
   const failed = required.filter((check) => check.status !== "completed" || check.conclusion !== "success");
   if (failed.length > 0) {
     throw new Error(`Required GitHub checks are not successful: ${failed.map((check) => check.name).join(", ")}`);
@@ -352,6 +517,129 @@ export async function githubRequiredChecks(context: CredentialBrokerContext): Pr
     head_sha: state.current_head_sha,
     required_checks: required,
   };
+}
+
+function validationFeedback(checks: NormalizedCheckRun[]): string[] {
+  return checks
+    .filter((check) => check.status !== "completed" || check.conclusion !== "success")
+    .map((check) => {
+      const evidence = [check.output.title, check.output.summary, check.output.text, check.details_url]
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .join(" | ")
+        .slice(0, 4_000);
+      return `Required check ${check.name} finished as ${check.status}/${check.conclusion ?? "none"}${evidence ? `: ${evidence}` : ""}`;
+    });
+}
+
+async function assertValidationHeadStillCurrent(
+  token: string,
+  binding: GithubPullRequestContext,
+  expectedHead: string,
+): Promise<void> {
+  const pull = await githubApi<PullResponse>(token, `${repoPath(binding)}/pulls/${binding.pull_number}`);
+  if (pullHead(pull, binding) !== expectedHead) {
+    throw new Error("validate_head expected head changed while validation was running");
+  }
+}
+
+function assertValidationRunActive(context: CredentialBrokerContext): void {
+  const runId = context.transport?.run_id;
+  if (!runId || getActiveRun(runId)?.status !== "active") {
+    throw new Error("validate_head run is no longer active");
+  }
+}
+
+export async function githubValidateHead(context: CredentialBrokerContext): Promise<unknown> {
+  assertValidationRunActive(context);
+  const { token, binding, state } = await boundPull(context);
+  const expectedHead = String(context.input.expected_head_sha ?? "").toLowerCase();
+  if (!SHA.test(expectedHead) || expectedHead !== state.current_head_sha) {
+    throw new Error("validate_head expected head is stale or invalid");
+  }
+  const metadata = validationMetadata(context.input, expectedHead);
+  const initialChecks = await githubCheckRuns(token, binding, expectedHead);
+  const initialRequired = latestRequiredChecks(initialChecks, binding.required_checks);
+  if (checksPassed(initialRequired)) {
+    await assertValidationHeadStillCurrent(token, binding, expectedHead);
+    return {
+      status: "passed",
+      verdict: "validated",
+      ...metadata,
+      validation: { workflow_dispatched: false, required_checks: initialRequired },
+      feedback: [],
+      fix_tasks: [],
+    };
+  }
+
+  let workflowDispatched = false;
+  let minimumIds: Map<string, number> | undefined;
+  if (binding.validation_workflow) {
+    minimumIds = new Map(binding.required_checks.map((name) => [
+      name,
+      initialChecks
+        .filter((check) => check.name === name)
+        .reduce((latest, check) => Math.max(latest, check.id), 0),
+    ]));
+    const inputs = Object.fromEntries(Object.entries(binding.validation_workflow.inputs).map(([key, value]) => [
+      key,
+      value === "$head_sha" ? expectedHead : value,
+    ]));
+    await githubApi<void>(
+      token,
+      `${repoPath(binding)}/actions/workflows/${encodeURIComponent(binding.validation_workflow.workflow_id)}/dispatches`,
+      {
+        method: "POST",
+        body: JSON.stringify({ ref: binding.head_ref, inputs }),
+      },
+    );
+    workflowDispatched = true;
+  }
+
+  const deadline = Date.now() + VALIDATION_TIMEOUT_MS;
+  while (true) {
+    assertValidationRunActive(context);
+    const required = latestRequiredChecks(
+      await githubCheckRuns(token, binding, expectedHead),
+      binding.required_checks,
+      minimumIds,
+    );
+    if (checksPassed(required)) {
+      await assertValidationHeadStillCurrent(token, binding, expectedHead);
+      return {
+        status: "passed",
+        verdict: "validated",
+        ...metadata,
+        validation: { workflow_dispatched: workflowDispatched, required_checks: required },
+        feedback: [],
+        fix_tasks: [],
+      };
+    }
+    if (checksTerminal(required)) {
+      await assertValidationHeadStillCurrent(token, binding, expectedHead);
+      const feedback = validationFeedback(required);
+      return {
+        status: "failed",
+        verdict: "changes_requested",
+        ...metadata,
+        validation: { workflow_dispatched: workflowDispatched, required_checks: required },
+        feedback,
+        fix_tasks: [{ id: "trusted-validation", feedback }],
+      };
+    }
+    if (Date.now() >= deadline) {
+      await assertValidationHeadStillCurrent(token, binding, expectedHead);
+      return {
+        status: "timed_out",
+        verdict: "blocked",
+        ...metadata,
+        validation: { workflow_dispatched: workflowDispatched, required_checks: required },
+        feedback: ["Timed out waiting for required checks on the exact Draft PR head"],
+        fix_tasks: [],
+      };
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, VALIDATION_POLL_INTERVAL_MS));
+  }
 }
 
 function pathAllowed(pathname: string, prefixes: string[]): boolean {
@@ -397,11 +685,157 @@ function commitFilesInput(input: Readonly<Record<string, unknown>>, binding: Git
   return { expectedHead, message, files };
 }
 
-export async function githubCommitFiles(context: CredentialBrokerContext): Promise<unknown> {
+interface GithubCommitFile {
+  path: string;
+  mode: "100644" | "100755";
+  bytes: Buffer | null;
+}
+
+function isPathInside(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function git(workspace: string, args: string[], maxBuffer = 2 * 1024 * 1024): string {
+  const result = spawnSync("git", ["-C", workspace, ...args], {
+    encoding: "utf8",
+    timeout: 30_000,
+    maxBuffer,
+    shell: false,
+  });
+  if (result.status !== 0 || result.error) {
+    const detail = String(result.stderr || result.error?.message || "unknown error").trim().slice(0, 1_000);
+    throw new Error(`commit_workspace Git inspection failed: ${detail}`);
+  }
+  return String(result.stdout);
+}
+
+function assertNoSymlinkFilePath(root: string, pathname: string): fs.Stats | undefined {
+  let current = root;
+  const segments = pathname.split("/");
+  for (let index = 0; index < segments.length; index++) {
+    current = path.join(current, segments[index]!);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) throw new Error(`commit_workspace rejects symlink paths: ${pathname}`);
+    if (index < segments.length - 1 && !stat.isDirectory()) {
+      throw new Error(`commit_workspace path parent is not a directory: ${pathname}`);
+    }
+    if (index === segments.length - 1) return stat;
+  }
+  return undefined;
+}
+
+function assertTrackedModeIsRegular(workspace: string, pathname: string): void {
+  const staged = git(workspace, ["ls-files", "--stage", "-z", "--", pathname]).split("\0").filter(Boolean);
+  if (staged.length === 0) return;
+  if (staged.length !== 1) throw new Error(`commit_workspace path has ambiguous Git stages: ${pathname}`);
+  const mode = staged[0]!.slice(0, 6);
+  if (mode !== "100644" && mode !== "100755") {
+    throw new Error(`commit_workspace rejects non-regular tracked path mode ${mode}: ${pathname}`);
+  }
+}
+
+function writableWorkspace(context: CredentialBrokerContext): { relative: string; absolute: string } {
   const runId = context.transport?.run_id;
-  if (!runId) throw new Error("github_pr broker requires a run transport identity");
-  const { token, binding, state } = await boundPull(context);
-  const request = commitFilesInput(context.input, binding);
+  const nodeId = context.transport?.node_id;
+  if (!runId || !nodeId) throw new Error("commit_workspace requires a run and node transport identity");
+  const run = getActiveRun(runId);
+  const node = run?.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  const runtime = node?.extra?.agent_runtime;
+  const access = runtime && typeof runtime === "object" && !Array.isArray(runtime)
+    ? (runtime as Record<string, unknown>).workspace_access
+    : undefined;
+  const writable = access && typeof access === "object" && !Array.isArray(access)
+    ? (access as Record<string, unknown>).writable_paths
+    : undefined;
+  if (!Array.isArray(writable) || writable.length !== 1 || typeof writable[0] !== "string") {
+    throw new Error("commit_workspace requires exactly one declared writable workspace");
+  }
+  const relative = safeRelativePath(writable[0], "commit_workspace declared writable path");
+  if (context.input.workspace_path !== relative) {
+    throw new Error("commit_workspace workspace_path does not match the node write boundary");
+  }
+  const runRoot = fs.realpathSync(runWorkspacePath(runId));
+  const candidate = path.resolve(runRoot, ...relative.split("/"));
+  const absolute = fs.realpathSync(candidate);
+  if (!isPathInside(runRoot, absolute)) throw new Error("commit_workspace path escapes the run workspace");
+  const topLevel = fs.realpathSync(git(absolute, ["rev-parse", "--show-toplevel"]).trim());
+  if (topLevel !== absolute) throw new Error("commit_workspace path is not the declared Git worktree root");
+  const gitDir = fs.realpathSync(git(absolute, ["rev-parse", "--path-format=absolute", "--git-dir"]).trim());
+  const commonDir = fs.realpathSync(git(absolute, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
+  if (!isPathInside(runRoot, gitDir) || !isPathInside(runRoot, commonDir)) {
+    throw new Error("commit_workspace Git metadata escapes the run workspace");
+  }
+  return { relative, absolute };
+}
+
+function workspaceCommitInput(
+  context: CredentialBrokerContext,
+  binding: GithubPullRequestContext,
+): { expectedHead: string; message: string; workspacePath: string; files: GithubCommitFile[]; manifestSha256: string } {
+  const expectedHead = String(context.input.expected_head_sha ?? "").toLowerCase();
+  const message = String(context.input.message ?? "").trim();
+  if (!SHA.test(expectedHead)) throw new Error("commit_workspace expected_head_sha is invalid");
+  if (!message || message.length > 512 || /[\r\n]/.test(message)) {
+    throw new Error("commit_workspace message is invalid");
+  }
+  const workspace = writableWorkspace(context);
+  const localHead = git(workspace.absolute, ["rev-parse", "HEAD"]).trim().toLowerCase();
+  if (localHead !== expectedHead) throw new Error("commit_workspace worktree HEAD differs from expected_head_sha");
+  const changed = git(workspace.absolute, ["diff", "--no-ext-diff", "--name-only", "-z", "--no-renames", "HEAD", "--"])
+    .split("\0").filter(Boolean);
+  const untracked = git(workspace.absolute, ["ls-files", "--others", "--exclude-standard", "-z", "--"])
+    .split("\0").filter(Boolean);
+  const paths = Array.from(new Set([...changed, ...untracked])).sort();
+  if (paths.length < 1 || paths.length > MAX_COMMIT_FILES) {
+    throw new Error(`commit_workspace requires 1-${MAX_COMMIT_FILES} changed files`);
+  }
+  let totalBytes = 0;
+  const files = paths.map((rawPath) => {
+    const pathname = safeRelativePath(rawPath, "commit_workspace changed path");
+    if (!pathAllowed(pathname, binding.writable_paths)) {
+      throw new Error(`commit_workspace path is outside the PR write allowlist: ${pathname}`);
+    }
+    assertTrackedModeIsRegular(workspace.absolute, pathname);
+    const stat = assertNoSymlinkFilePath(workspace.absolute, pathname);
+    if (!stat) return { path: pathname, mode: "100644" as const, bytes: null };
+    if (!stat.isFile()) throw new Error(`commit_workspace path is not a regular file: ${pathname}`);
+    const bytes = fs.readFileSync(path.join(workspace.absolute, ...pathname.split("/")));
+    totalBytes += bytes.byteLength;
+    return {
+      path: pathname,
+      mode: (stat.mode & 0o111) !== 0 ? "100755" as const : "100644" as const,
+      bytes,
+    };
+  });
+  if (totalBytes > MAX_COMMIT_BYTES) throw new Error("commit_workspace content exceeds 1 MiB");
+  const manifest = files.map((file) => ({
+    path: file.path,
+    mode: file.bytes === null ? null : file.mode,
+    sha256: file.bytes === null ? null : createHash("sha256").update(file.bytes).digest("hex"),
+  }));
+  return {
+    expectedHead,
+    message,
+    workspacePath: workspace.relative,
+    files,
+    manifestSha256: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
+  };
+}
+
+async function commitFiles(
+  runId: string,
+  token: string,
+  binding: GithubPullRequestContext,
+  state: GithubPullRequestState,
+  request: { expectedHead: string; message: string; files: GithubCommitFile[] },
+): Promise<{ previousHead: string; nextHead: string }> {
   if (request.expectedHead !== state.current_head_sha) throw new Error("commit_files expected head is stale");
   const repository = repoPath(binding);
   const commit = await githubApi<{ tree?: { sha?: string } }>(token, `${repository}/git/commits/${state.current_head_sha}`);
@@ -409,6 +843,10 @@ export async function githubCommitFiles(context: CredentialBrokerContext): Promi
   if (!SHA.test(baseTree)) throw new Error("GitHub base tree SHA is invalid");
   const treeEntries = [];
   for (const file of request.files) {
+    if (file.bytes === null) {
+      treeEntries.push({ path: file.path, mode: file.mode, type: "blob", sha: null });
+      continue;
+    }
     const blob = await githubApi<{ sha?: string }>(token, `${repository}/git/blobs`, {
       method: "POST",
       body: JSON.stringify({ content: file.bytes.toString("base64"), encoding: "base64" }),
@@ -423,20 +861,14 @@ export async function githubCommitFiles(context: CredentialBrokerContext): Promi
   });
   const treeSha = String(tree.sha ?? "").toLowerCase();
   if (!SHA.test(treeSha)) throw new Error("GitHub tree SHA is invalid");
+  if (treeSha === baseTree) throw new Error("GitHub broker commit would not change the repository tree");
   const nextCommit = await githubApi<{ sha?: string }>(token, `${repository}/git/commits`, {
     method: "POST",
-    body: JSON.stringify({
-      message: request.message,
-      tree: treeSha,
-      parents: [state.current_head_sha],
-    }),
+    body: JSON.stringify({ message: request.message, tree: treeSha, parents: [state.current_head_sha] }),
   });
   const nextHead = String(nextCommit.sha ?? "").toLowerCase();
   if (!SHA.test(nextHead)) throw new Error("GitHub commit SHA is invalid");
-  setActiveRunBrokerState(runId, "github_pr", {
-    ...state,
-    pending_head_sha: nextHead,
-  } satisfies GithubPullRequestState);
+  setActiveRunBrokerState(runId, "github_pr", { ...state, pending_head_sha: nextHead } satisfies GithubPullRequestState);
   const refPath = binding.head_ref.split("/").map(encodeURIComponent).join("/");
   try {
     await githubApi(token, `${repository}/git/refs/heads/${refPath}`, {
@@ -451,17 +883,42 @@ export async function githubCommitFiles(context: CredentialBrokerContext): Promi
       throw error;
     }
   }
-  const finalized: GithubPullRequestState = {
+  setActiveRunBrokerState(runId, "github_pr", {
     version: 1,
     identity: state.identity,
     current_head_sha: nextHead,
-  };
-  setActiveRunBrokerState(runId, "github_pr", finalized);
+  } satisfies GithubPullRequestState);
+  return { previousHead: state.current_head_sha, nextHead };
+}
+
+export async function githubCommitFiles(context: CredentialBrokerContext): Promise<unknown> {
+  const runId = context.transport?.run_id;
+  if (!runId) throw new Error("github_pr broker requires a run transport identity");
+  const { token, binding, state } = await boundPull(context);
+  const request = commitFilesInput(context.input, binding);
+  const committed = await commitFiles(runId, token, binding, state, request);
   return {
     repository: `${binding.owner}/${binding.repo}`,
     pull_number: binding.pull_number,
-    previous_head_sha: state.current_head_sha,
-    head_sha: nextHead,
+    previous_head_sha: committed.previousHead,
+    head_sha: committed.nextHead,
+    committed_files: request.files.map((file) => file.path),
+  };
+}
+
+export async function githubCommitWorkspace(context: CredentialBrokerContext): Promise<unknown> {
+  const runId = context.transport?.run_id;
+  if (!runId) throw new Error("github_pr broker requires a run transport identity");
+  const { token, binding, state } = await boundPull(context);
+  const request = workspaceCommitInput(context, binding);
+  const committed = await commitFiles(runId, token, binding, state, request);
+  return {
+    repository: `${binding.owner}/${binding.repo}`,
+    pull_number: binding.pull_number,
+    previous_head_sha: committed.previousHead,
+    head_sha: committed.nextHead,
+    workspace_path: request.workspacePath,
+    manifest_sha256: request.manifestSha256,
     committed_files: request.files.map((file) => file.path),
   };
 }

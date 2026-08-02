@@ -24,6 +24,7 @@ function _isGatewayNodeType(nodeType: string): boolean {
     nodeType === "join_gateway" ||
     nodeType === "while_gateway" ||
     nodeType === "command_gateway" ||
+    nodeType === "broker_gateway" ||
     nodeType === "approval_gateway" ||
     nodeType === "state_gateway" ||
     nodeType === "fanout_gateway" ||
@@ -34,6 +35,7 @@ function _isLoopFeedbackEdge(graph: DAGGraphData, edge: DAGEdge): boolean {
   if (_isTerminalEdge(edge)) return false;
   const target = graph.nodes.find((node) => node.node_id === edge.to_node);
   if (target?.node_type !== "loop_gateway" && target?.node_type !== "while_gateway") return false;
+  if (edge.label === "feedback") return true;
   const source = graph.nodes.find((node) => node.node_id === edge.from_node);
   return source?.after.includes(target.node_id) ?? false;
 }

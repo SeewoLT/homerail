@@ -14,15 +14,16 @@ spec:
     immutable worker plan; dynamic DeepSeek V4 Flash workers implement its
     isolated sub-tasks, one DeepSeek aggregator publishes a candidate through
     the GitHub broker, and a fresh-context GLM-5.2 reviewer drives at most five
-    total review rounds. Revisions are performed by newly generated DeepSeek
-    workers. The immutable task document, worker plan, and PR binding are
-    mounted below /workspace/input.
+    total review rounds. Every published head first passes a trusted Manager
+    broker validation gate. Revisions are performed by newly generated
+    DeepSeek workers. The immutable task document, worker plan, and PR binding
+    are mounted below /workspace/input.
 
   workspace: { mode: shared }
 
   pattern:
     id: auto-fix-v2
-    version: 2.1.0
+    version: 2.2.0
     source: HomeRail document-first dynamic worker review loop
     parameters:
       max_plan_items: 3
@@ -110,24 +111,84 @@ spec:
     Candidate:
       type: object
       additionalProperties: false
-      required: [head_sha, review_round, summary, tests]
+      required: [head_sha, manifest_sha256, summary, tests]
       properties:
         head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
-        review_round: { type: integer, const: 1 }
+        manifest_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
         summary: { type: string, minLength: 1, maxLength: 12000 }
         tests:
           type: array
           maxItems: 50
           items: { type: string, minLength: 1, maxLength: 2000 }
 
+    ValidationResult:
+      type: object
+      additionalProperties: false
+      required: [status, verdict, head_sha, manifest_sha256, summary, tests, validation, feedback, fix_tasks]
+      properties:
+        status: { type: string, enum: [passed, failed, timed_out] }
+        verdict: { type: string, enum: [validated, changes_requested, blocked] }
+        head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
+        manifest_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        summary: { type: string, maxLength: 12000 }
+        tests:
+          type: array
+          maxItems: 50
+          items: { type: string, maxLength: 2000 }
+        validation:
+          type: object
+          additionalProperties: false
+          required: [workflow_dispatched, required_checks]
+          properties:
+            workflow_dispatched: { type: boolean }
+            required_checks:
+              type: array
+              minItems: 1
+              maxItems: 32
+              items:
+                type: object
+                additionalProperties: false
+                required: [id, name, status, conclusion, details_url, output]
+                properties:
+                  id: { type: integer, minimum: 0 }
+                  name: { type: string, minLength: 1, maxLength: 256 }
+                  status: { type: string, minLength: 1, maxLength: 64 }
+                  conclusion: { oneOf: [{ type: 'null' }, { type: string, maxLength: 64 }] }
+                  details_url: { type: string, maxLength: 2000 }
+                  output:
+                    type: object
+                    additionalProperties: false
+                    required: [title, summary, text]
+                    properties:
+                      title: { type: string, maxLength: 1000 }
+                      summary: { type: string, maxLength: 8000 }
+                      text: { type: string, maxLength: 8000 }
+        feedback:
+          type: array
+          maxItems: 30
+          items: { type: string, minLength: 1, maxLength: 4000 }
+        fix_tasks:
+          type: array
+          maxItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, feedback]
+            properties:
+              id: { type: string, minLength: 1, maxLength: 64 }
+              feedback:
+                type: array
+                minItems: 1
+                maxItems: 30
+                items: { type: string, minLength: 1, maxLength: 4000 }
+
     ReviewDecision:
       type: object
       additionalProperties: false
-      required: [verdict, head_sha, review_round, summary, feedback, fix_tasks]
+      required: [verdict, head_sha, summary, feedback, fix_tasks]
       properties:
         verdict: { type: string, enum: [approve, changes_requested] }
         head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
-        review_round: { type: integer, minimum: 1, maximum: 5 }
         summary: { type: string, minLength: 1, maxLength: 12000 }
         feedback:
           type: array
@@ -151,11 +212,12 @@ spec:
     FixResult:
       type: object
       additionalProperties: false
-      required: [status, previous_head_sha, head_sha, summary, tests]
+      required: [status, previous_head_sha, head_sha, manifest_sha256, summary, tests]
       properties:
         status: { type: string, enum: [fixed, cannot_fix] }
         previous_head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
         head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
+        manifest_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
         summary: { type: string, minLength: 1, maxLength: 8000 }
         tests:
           type: array
@@ -180,7 +242,7 @@ spec:
         type: handoff
         node: review_gate
         port: approved
-        json_pointer: /input
+        json_pointer: /input/values/0
       media_type: application/json
       contract: ReviewDecision
       required: false
@@ -216,36 +278,47 @@ spec:
         git add, commit, cherry-pick, checkout, reset, or merge. Use
         credential_broker_call with credential_ref github-autofix and action
         pull_request_snapshot to obtain the exact current Draft PR head. Publish
-        changed file bytes only through credential_broker_call with the same
-        credential_ref and action commit_files plus expected_head_sha; never
-        use the broker name github_pr as credential_ref, git push, or a raw
-        token. Then hand off candidate with review_round 1 and exactly the
-        head_sha returned by the final successful commit_files call. Manager
-        binds that broker result to the handoff and rejects a worker commit SHA
-        or stale PR head. Refuse unrelated or workflow-file changes. The
+        all changed files atomically through credential_broker_call with the
+        same credential_ref and action commit_workspace, the exact writable
+        workspace_path, and expected_head_sha; never encode file contents into
+        a tool call, omit a dirty file, or make multiple commits for one
+        candidate. Never use the broker name github_pr as credential_ref, git
+        push, or a raw token. Then hand off candidate with exactly the head_sha
+        and manifest_sha256 returned by commit_workspace.
+        Manager derives the complete dirty-file manifest from the only writable
+        worktree, binds both values to the handoff, and rejects omissions,
+        unrelated paths, a worker commit SHA, or a stale PR head. Refuse
+        unrelated or workflow-file changes. The
         snapshot tool arguments are exactly
         {"credential_ref":"github-autofix","action":"pull_request_snapshot","input":{}}.
         The commit action input is exactly
         {"expected_head_sha":"<snapshot head_sha>","message":"<single line>",
-        "files":[{"path":"<relative path>","content_base64":"<canonical base64>"}]}.
+        "workspace_path":"repo"}.
 
     reviewer:
       description: GLM-5.2 fresh-context reviewer
       system: |
         Review only the immutable task document and the current Draft PR state
         obtained through credential_broker_call with credential_ref
-        github-autofix and actions pull_request_snapshot and checks_snapshot.
+        github-autofix and actions pull_request_snapshot, read_file, and
+        checks_snapshot. The exact head already passed the trusted Manager
+        validation gate before this fresh dispatch. The only repository bytes you may trust are returned
+        by read_file for the exact snapshot head; your filesystem contains only
+        immutable task inputs and deliberately has no repository checkout.
+        Read each changed source/test file needed for the decision with
+        read_file input {"expected_head_sha":"<snapshot head_sha>",
+        "path":"<snapshot filename>"}.
         Every dispatch is a fresh provider session: do not rely on prior chat.
-        For the initial candidate set review_round to 1. For a revision, derive
-        review_round as input.fixes.context.review_round + 1. Approve only when
-        all acceptance criteria are met and checks/evidence are sufficient.
-        Before handing off a verdict of approve, call credential_broker_call
-        with credential_ref github-autofix and action required_checks; never use
-        the broker name github_pr as credential_ref. Manager will reject the
-        reviewed handoff unless every immutable required check passed for this
-        dispatch. On approval return empty feedback and fix_tasks. Otherwise
+        Confirm the broker snapshot head equals input.validation.head_sha.
+        Never use the broker name github_pr as credential_ref.
+        Approve only when all acceptance criteria are met and checks/evidence
+        are sufficient. On approval return empty feedback and fix_tasks. Otherwise
         return clear feedback and exactly one fix_tasks item containing the
-        whole feedback.
+        whole feedback. The handoff content must be one JSON object with
+        exactly these fields: {"verdict":"approve|changes_requested",
+        "head_sha":"<sha>","summary":"<text>","feedback":["<text>"],
+        "fix_tasks":[{"id":"round-fix",
+        "feedback":["<same feedback>"]}]}.
 
     fixer:
       description: DeepSeek V4 Flash dynamically generated PR fixer
@@ -254,12 +327,15 @@ spec:
         input.workspace_path. Use credential_broker_call with credential_ref
         github-autofix and action pull_request_snapshot to bind the latest Draft
         PR head, apply all feedback in input.item, run focused tests, and
-        publish file bytes only through credential_broker_call with the same
-        credential_ref and action commit_files plus the snapshot head as
-        expected_head_sha. Never use the broker name github_pr as
+        publish all dirty files atomically through credential_broker_call with
+        the same credential_ref and action commit_workspace,
+        input.workspace_path, and the snapshot head as expected_head_sha. Never
+        encode file contents into a tool call or omit a dirty file. Never use
+        the broker name github_pr as
         credential_ref, git push, or modify any path below .github. Hand off
-        fixed with both previous and new head SHAs. The snapshot tool arguments
-        are exactly {"credential_ref":"github-autofix",
+        fixed with both previous and new head SHAs plus the exact
+        manifest_sha256 returned by commit_workspace. The snapshot tool
+        arguments are exactly {"credential_ref":"github-autofix",
         "action":"pull_request_snapshot","input":{}}.
 
   nodes:
@@ -345,7 +421,7 @@ spec:
           inject:
             mode: manager_broker
             broker: github_pr
-            allowed_actions: [pull_request_snapshot, commit_files]
+            allowed_actions: [pull_request_snapshot, commit_workspace]
       inputs: { workers: {} }
       outputs:
         candidate:
@@ -356,15 +432,60 @@ spec:
               action: pull_request_snapshot
             - credential_ref: github-autofix
               broker: github_pr
-              action: commit_files
+              action: commit_workspace
               result_binding: { result_field: head_sha, content_field: head_sha }
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: commit_workspace
+              result_binding: { result_field: manifest_sha256, content_field: manifest_sha256 }
         failed: {}
+
+    validate_initial:
+      kind: broker
+      inputs: { candidate: { contract: Candidate } }
+      outputs: { result: { contract: ValidationResult }, error: {} }
+      config:
+        input: candidate
+        input_map:
+          expected_head_sha: head_sha
+          manifest_sha256: manifest_sha256
+          summary: summary
+          tests: tests
+        credential_ref: github-autofix
+        purpose: trigger and wait for trusted validation on the initial exact Draft PR head
+        broker: github_pr
+        action: validate_head
+        result_port: result
+        error_port: error
+
+    validation_initial_gate:
+      kind: condition
+      inputs: { validation: { contract: ValidationResult } }
+      outputs:
+        passed: { contract: ValidationResult }
+        changes: { contract: ValidationResult }
+        blocked: { contract: ValidationResult }
+      config:
+        field: status
+        routes: { passed: passed, failed: changes }
+        default: blocked
+
+    initial_decision_join:
+      kind: join
+      inputs: { validation: {}, review: {} }
+      outputs: { ready: {}, missing: {} }
+      config:
+        mode: any
+        field: verdict
+        success_values: [approve, changes_requested]
+        passed_port: ready
+        failed_port: missing
 
     review_initial:
       kind: agent
       agent: reviewer
       session_scope: dispatch
-      workspace_access: { writable_paths: [], readonly_paths: [input, repo, workers] }
+      workspace_access: { writable_paths: [], readonly_paths: [input] }
       allowed_builtin_tools: [Glob, Grep, LS, Read]
       allowed_dag_tools: [handoff, credential_broker_call]
       credentials:
@@ -373,8 +494,8 @@ spec:
           inject:
             mode: manager_broker
             broker: github_pr
-            allowed_actions: [pull_request_snapshot, checks_snapshot, required_checks]
-      inputs: { candidate: { contract: Candidate } }
+            allowed_actions: [pull_request_snapshot, read_file, checks_snapshot]
+      inputs: { validation: { contract: ValidationResult } }
       outputs:
         reviewed:
           contract: ReviewDecision
@@ -382,22 +503,19 @@ spec:
             - credential_ref: github-autofix
               broker: github_pr
               action: pull_request_snapshot
+              result_binding: { result_field: head_sha, content_field: head_sha }
             - credential_ref: github-autofix
               broker: github_pr
               action: checks_snapshot
-            - credential_ref: github-autofix
-              broker: github_pr
-              action: required_checks
-              when: { field: verdict, equals: approve }
               result_binding: { result_field: head_sha, content_field: head_sha }
         failed: {}
 
     review_gate:
       kind: while
-      inputs: { state: { contract: ReviewDecision } }
+      inputs: { state: {} }
       outputs: { fix: {}, approved: {}, exhausted: {} }
       config:
-        field: verdict
+        field: values.0.verdict
         operator: eq
         value: approve
         continue_port: fix
@@ -411,8 +529,8 @@ spec:
       outputs: { fixed: {}, failed: {} }
       config:
         input: review
-        item_field: input.fix_tasks
-        context_field: input
+        item_field: input.values.0.fix_tasks
+        context_field: input.values.0
         worker_agent: fixer
         worker_policy:
           session_scope: dispatch
@@ -425,7 +543,7 @@ spec:
               inject:
                 mode: manager_broker
                 broker: github_pr
-                allowed_actions: [pull_request_snapshot, commit_files]
+                allowed_actions: [pull_request_snapshot, commit_workspace]
         workspace_strategy: isolated_git_worktree
         workspace_root: fixers
         repository_path: repo
@@ -441,20 +559,66 @@ spec:
             when: { field: status, equals: fixed }
           - credential_ref: github-autofix
             broker: github_pr
-            action: commit_files
+            action: commit_workspace
             when: { field: status, equals: fixed }
             result_binding: { result_field: head_sha, content_field: head_sha }
+          - credential_ref: github-autofix
+            broker: github_pr
+            action: commit_workspace
+            when: { field: status, equals: fixed }
+            result_binding: { result_field: manifest_sha256, content_field: manifest_sha256 }
         success_field: status
         success_values: [fixed]
         result_port: fixed
         failed_port: failed
+
+    validate_revision:
+      kind: broker
+      inputs: { fixes: {} }
+      outputs: { result: { contract: ValidationResult }, error: {} }
+      config:
+        input: fixes
+        input_map:
+          expected_head_sha: results.0.content.head_sha
+          manifest_sha256: results.0.content.manifest_sha256
+          summary: results.0.content.summary
+          tests: results.0.content.tests
+        credential_ref: github-autofix
+        purpose: trigger and wait for trusted validation on the revised exact Draft PR head
+        broker: github_pr
+        action: validate_head
+        result_port: result
+        error_port: error
+
+    validation_revision_gate:
+      kind: condition
+      inputs: { validation: { contract: ValidationResult } }
+      outputs:
+        passed: { contract: ValidationResult }
+        changes: { contract: ValidationResult }
+        blocked: { contract: ValidationResult }
+      config:
+        field: status
+        routes: { passed: passed, failed: changes }
+        default: blocked
+
+    revision_decision_join:
+      kind: join
+      inputs: { validation: {}, review: {} }
+      outputs: { ready: {}, missing: {} }
+      config:
+        mode: any
+        field: verdict
+        success_values: [approve, changes_requested]
+        passed_port: ready
+        failed_port: missing
 
     review_revision:
       kind: agent
       agent: reviewer
       depends_on: [review_gate]
       session_scope: dispatch
-      workspace_access: { writable_paths: [], readonly_paths: [input, repo, fixers] }
+      workspace_access: { writable_paths: [], readonly_paths: [input] }
       allowed_builtin_tools: [Glob, Grep, LS, Read]
       allowed_dag_tools: [handoff, credential_broker_call]
       credentials:
@@ -463,8 +627,8 @@ spec:
           inject:
             mode: manager_broker
             broker: github_pr
-            allowed_actions: [pull_request_snapshot, checks_snapshot, required_checks]
-      inputs: { fixes: {} }
+            allowed_actions: [pull_request_snapshot, read_file, checks_snapshot]
+      inputs: { validation: { contract: ValidationResult } }
       outputs:
         reviewed:
           contract: ReviewDecision
@@ -472,15 +636,27 @@ spec:
             - credential_ref: github-autofix
               broker: github_pr
               action: pull_request_snapshot
+              result_binding: { result_field: head_sha, content_field: head_sha }
             - credential_ref: github-autofix
               broker: github_pr
               action: checks_snapshot
-            - credential_ref: github-autofix
-              broker: github_pr
-              action: required_checks
-              when: { field: verdict, equals: approve }
               result_binding: { result_field: head_sha, content_field: head_sha }
         failed: {}
+
+    finalize:
+      kind: broker
+      inputs: { review: {} }
+      outputs: { result: {}, error: {} }
+      config:
+        input: review
+        input_map:
+          expected_head_sha: input.values.0.head_sha
+        credential_ref: github-autofix
+        purpose: enforce final required checks on the exact approved Draft PR head
+        broker: github_pr
+        action: required_checks
+        result_port: result
+        error_port: error
 
     done: { kind: terminal, outcome: success, inputs: { result: {} } }
     preparation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
@@ -489,6 +665,13 @@ spec:
     initial_review_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     revision_review_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     fix_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    initial_validation_error: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    initial_validation_blocked: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    initial_decision_missing: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    revision_validation_error: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    revision_validation_blocked: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    revision_decision_missing: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    finalization_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     needs_human: { kind: terminal, outcome: cancelled, inputs: { result: {} } }
 
   edges:
@@ -497,20 +680,36 @@ spec:
     - { from: prepare_repository.failed, to: preparation_failed.result, condition: on_failure }
     - { from: implement.implemented, to: aggregate.workers }
     - { from: implement.failed, to: implementation_failed.result, condition: on_failure }
-    - { from: aggregate.candidate, to: review_initial.candidate }
+    - { from: aggregate.candidate, to: validate_initial.candidate }
     - { from: aggregate.failed, to: aggregation_failed.result, condition: on_failure }
-    - { from: review_initial.reviewed, to: review_gate.state }
+    - { from: validate_initial.result, to: validation_initial_gate.validation }
+    - { from: validate_initial.error, to: initial_validation_error.result, condition: on_failure }
+    - { from: validation_initial_gate.passed, to: review_initial.validation }
+    - { from: validation_initial_gate.changes, to: initial_decision_join.validation }
+    - { from: validation_initial_gate.blocked, to: initial_validation_blocked.result }
+    - { from: review_initial.reviewed, to: initial_decision_join.review }
     - { from: review_initial.failed, to: initial_review_failed.result, condition: on_failure }
+    - { from: initial_decision_join.ready, to: review_gate.state }
+    - { from: initial_decision_join.missing, to: initial_decision_missing.result }
     - { from: review_gate.fix, to: fix.review }
-    - { from: review_gate.approved, to: done.result }
+    - { from: review_gate.approved, to: finalize.review }
     - { from: review_gate.exhausted, to: needs_human.result }
-    - { from: fix.fixed, to: review_revision.fixes }
+    - { from: fix.fixed, to: validate_revision.fixes }
     - { from: fix.failed, to: fix_failed.result, condition: on_failure }
+    - { from: validate_revision.result, to: validation_revision_gate.validation }
+    - { from: validate_revision.error, to: revision_validation_error.result, condition: on_failure }
+    - { from: validation_revision_gate.passed, to: review_revision.validation }
+    - { from: validation_revision_gate.changes, to: revision_decision_join.validation }
+    - { from: validation_revision_gate.blocked, to: revision_validation_blocked.result }
+    - { from: review_revision.reviewed, to: revision_decision_join.review }
+    - { from: revision_decision_join.missing, to: revision_decision_missing.result }
     - kind: feedback
-      from: review_revision.reviewed
+      from: revision_decision_join.ready
       to: review_gate.state
       max_traversals: 4
     - { from: review_revision.failed, to: revision_review_failed.result, condition: on_failure }
+    - { from: finalize.result, to: done.result }
+    - { from: finalize.error, to: finalization_failed.result, condition: on_failure }
 
   policies:
     max_nodes: 40

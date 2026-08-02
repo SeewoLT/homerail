@@ -20,16 +20,15 @@ Implemented in the MVP:
   ids, and isolated Git worktrees;
 - `session_scope: dispatch` for transcript-free review re-entry;
 - a Manager-only `github_pr` broker for bounded PR/files/check snapshots,
-  exact-head required-check enforcement, and expected-head, non-force file
-  commits;
-- generic conditional output handoff requirements backed by same-dispatch
-  Manager-broker action receipts, used to prevent `approve` when an immutable
-  required check is missing or unsuccessful;
-- an opt-in seven-static-node `auto-fix-v2` WorkflowSpec, mixed-model profile
+  exact-head validation/required-check enforcement, and expected-head,
+  non-force complete-workspace commits;
+- generic Manager-owned broker DAG nodes for model-independent hard gates,
+  alongside conditional output evidence receipts for model nodes;
+- an opt-in fourteen-static-node `auto-fix-v2` WorkflowSpec, mixed-model profile
   configurator, CLI input staging, operator runbook, and deterministic fake
   remote/recovery proof.
 
-Required before the first real Issue #172 pilot:
+Required before the first real low-risk Issue pilot:
 
 - create the same-repository Draft PR and immutable `pr-context.json`;
 - install `github-autofix` as an encrypted fine-grained PAT or GitHub App
@@ -39,9 +38,9 @@ Required before the first real Issue #172 pilot:
 - sync the opt-in workflow and mixed-model profile, then run a
   broker-write-disabled real PR snapshot dry run;
 - configure immutable exact required-check names in `pr-context.json` and
-  arrange trusted CI to publish those checks on the exact Draft head. This
-  repository skips Draft PR CI by default, so the pilot operator must manually
-  dispatch CI with the Draft head branch selected before approval can complete.
+  either configure `validation_workflow` or arrange trusted outer CI to publish
+  those checks on the exact Draft head. This repository skips Draft PR CI by
+  default.
 
 ## Outcome
 
@@ -202,18 +201,25 @@ Tests:
 ### AFV2-401: Implement read-only PR and check gates
 
 - [ ] Add a `github_pr` Manager broker with `pull_request_snapshot`,
-      `checks_snapshot`, and `required_checks`.
+      `read_file`, `checks_snapshot`, `validate_head`, and `required_checks`.
+- [ ] Add a generic Manager-owned `broker` DAG node with one projected
+      credential/action, structured input mapping, and explicit result/error
+      ports.
 - [ ] Bind repo, PR, Draft state, base branch/SHA, head branch/SHA, and policy id
       to the run.
 - [ ] Reject fork PRs, non-Draft PRs, disallowed branches, closed PRs, and
       mismatched repositories in the pilot.
 - [ ] Return bounded, redacted, immutable receipts.
-- [ ] Reject an approval handoff unless the same reviewer dispatch has a
-      successful `required_checks` receipt for the exact current head.
+- [ ] Require `validate_head` before every reviewer dispatch and a separate
+      `required_checks(expected_head_sha)` Manager node after approval.
+- [ ] Optionally dispatch a bounded immutable validation workflow, then accept
+      only newer required check runs attached to the exact candidate head.
 
-### AFV2-402: Implement fast-forward `commit_files`
+### AFV2-402: Implement fast-forward `commit_workspace`
 
-- [ ] Accept only bounded file bytes and an exact `expected_head_sha`.
+- [ ] Accept only the node's exact declared writable worktree, a bounded
+      message, and an exact `expected_head_sha`; derive all file bytes in
+      trusted code.
 - [ ] Revalidate path, file count, size, binary, symlink, submodule, and secret
       restrictions in trusted code.
 - [ ] Create bounded Git blobs, a tree, and a commit without giving the Worker
@@ -271,7 +277,7 @@ Tests:
 
 ### AFV2-504: Build the five-round review/fix loop
 
-- [ ] Push each collected candidate through `commit_files` using exact head
+- [ ] Push each collected candidate through `commit_workspace` using exact head
       fencing; a Draft PR may temporarily hold a candidate that later fails
       validation.
 - [ ] Dispatch GLM-5.2 with fresh context against the exact pushed head.
