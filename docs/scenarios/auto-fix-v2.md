@@ -155,10 +155,14 @@ head update, a fork/cross-repository PR, a task-document digest mismatch, or a
 write outside the path allowlist. `required_checks` contains one to 32 unique,
 exact GitHub check-run names. It is immutable for the run; the broker selects
 the newest run with each exact name and requires `completed`/`success` on the
-current head. `validation_workflow` is optional. When present, `workflow_id`
-is a bounded workflow file/id and `$head_sha` input values are replaced with
-the exact candidate SHA; only check runs newer than the pre-dispatch baseline
-can satisfy that validation attempt.
+current head when trusted outer automation owns validation.
+`validation_workflow` is optional. When present, `workflow_id` is a bounded
+workflow file/id and `$head_sha` input values are replaced with the exact
+candidate SHA. Manager binds the resulting `workflow_dispatch` run to the
+configured workflow, exact branch, and exact candidate SHA. The whole run must
+complete successfully; a successful required anchor cannot mask a later or
+parallel failing matrix job. All required anchors must also exist and succeed
+inside that bound run. The post-review finalizer repeats this whole-run check.
 
 CLI input bindings declare their media type through the immutable mount suffix:
 `.md` is Markdown, `.json` is validated JSON, and `.txt` is plain text. The CLI

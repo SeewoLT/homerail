@@ -244,6 +244,16 @@ interface NormalizedCheckRun {
   };
 }
 
+interface NormalizedWorkflowRun {
+  id: number;
+  head_sha: string;
+  head_branch: string;
+  event: string;
+  status: string;
+  conclusion: string | null;
+  html_url: string;
+}
+
 type PublicCheckRun = Omit<NormalizedCheckRun, "app_slug">;
 
 function publicCheckRun(check: NormalizedCheckRun): PublicCheckRun {
@@ -302,6 +312,134 @@ async function githubCheckRuns(token: string, binding: GithubPullRequestContext,
     }
   }
   return checks.map(normalizeCheckRun);
+}
+
+function normalizeWorkflowRun(run: Record<string, unknown>): NormalizedWorkflowRun {
+  const numericId = Number(run.id ?? 0);
+  return {
+    id: Number.isSafeInteger(numericId) && numericId >= 0 ? numericId : 0,
+    head_sha: String(run.head_sha ?? "").toLowerCase(),
+    head_branch: String(run.head_branch ?? "").slice(0, 255),
+    event: String(run.event ?? "").slice(0, 64),
+    status: String(run.status ?? "").slice(0, 64),
+    conclusion: run.conclusion === null ? null : String(run.conclusion ?? "").slice(0, 64),
+    html_url: String(run.html_url ?? "").slice(0, 2_000),
+  };
+}
+
+async function githubWorkflowRuns(
+  token: string,
+  binding: GithubPullRequestContext,
+): Promise<NormalizedWorkflowRun[]> {
+  if (!binding.validation_workflow) return [];
+  const pathname = `${repoPath(binding)}/actions/workflows/${encodeURIComponent(binding.validation_workflow.workflow_id)}`;
+  const first = await githubApi<{ workflow_runs?: Array<Record<string, unknown>> }>(
+    token,
+    `${pathname}/runs?event=workflow_dispatch&branch=${encodeURIComponent(binding.head_ref)}&per_page=100&page=1`,
+  );
+  return (first.workflow_runs ?? []).map(normalizeWorkflowRun);
+}
+
+function workflowRunsForHead(
+  runs: NormalizedWorkflowRun[],
+  binding: GithubPullRequestContext,
+  headSha: string,
+): NormalizedWorkflowRun[] {
+  return runs.filter((run) => (
+    run.id > 0
+    && run.head_sha === headSha
+    && run.head_branch === binding.head_ref
+    && run.event === "workflow_dispatch"
+  )).sort((left, right) => right.id - left.id);
+}
+
+function normalizeWorkflowJob(job: Record<string, unknown>, binding: GithubPullRequestContext): NormalizedCheckRun {
+  const numericId = Number(job.id ?? 0);
+  const id = Number.isSafeInteger(numericId) && numericId >= 0 ? numericId : 0;
+  const steps = Array.isArray(job.steps) ? job.steps : [];
+  const failedSteps = steps.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const step = entry as Record<string, unknown>;
+    const conclusion = step.conclusion === null ? null : String(step.conclusion ?? "");
+    if (!conclusion || conclusion === "success" || conclusion === "skipped" || conclusion === "neutral") return [];
+    return [`${String(step.name ?? "unnamed step").slice(0, 256)}: ${conclusion.slice(0, 64)}`];
+  });
+  const detailsUrl = String(job.html_url ?? "").slice(0, 2_000);
+  return {
+    id,
+    name: String(job.name ?? "").slice(0, 256),
+    status: String(job.status ?? "").slice(0, 64),
+    conclusion: job.conclusion === null ? null : String(job.conclusion ?? "").slice(0, 64),
+    details_url: detailsUrl || (
+      id > 0 ? `https://github.com/${binding.owner}/${binding.repo}/actions/runs/0/job/${id}` : ""
+    ),
+    app_slug: "github-actions",
+    output: {
+      title: failedSteps.length > 0 ? "Failed GitHub Actions steps" : "",
+      summary: failedSteps.join("\n").slice(0, 8_000),
+      text: "",
+    },
+  };
+}
+
+async function githubWorkflowRunJobs(
+  token: string,
+  binding: GithubPullRequestContext,
+  runId: number,
+): Promise<NormalizedCheckRun[]> {
+  const pathname = `${repoPath(binding)}/actions/runs/${runId}/jobs`;
+  const first = await githubApi<{ jobs?: Array<Record<string, unknown>> }>(
+    token,
+    `${pathname}?filter=all&per_page=100&page=1`,
+  );
+  const jobs = [...(first.jobs ?? [])];
+  if (jobs.length === 100) {
+    const second = await githubApi<{ jobs?: Array<Record<string, unknown>> }>(
+      token,
+      `${pathname}?filter=all&per_page=100&page=2`,
+    );
+    jobs.push(...(second.jobs ?? []));
+    if ((second.jobs ?? []).length === 100) {
+      const overflow = await githubApi<{ jobs?: Array<Record<string, unknown>> }>(
+        token,
+        `${pathname}?filter=all&per_page=100&page=3`,
+      );
+      if ((overflow.jobs ?? []).length > 0) {
+        throw new Error("GitHub validation workflow job list exceeds the bounded snapshot");
+      }
+    }
+  }
+  return jobs.map((job) => normalizeWorkflowJob(job, binding));
+}
+
+function workflowFailureChecks(
+  run: NormalizedWorkflowRun,
+  jobs: NormalizedCheckRun[],
+  required: NormalizedCheckRun[],
+): NormalizedCheckRun[] {
+  const failed = jobs.filter((job) => (
+    job.status !== "completed"
+    || !job.conclusion
+    || !["success", "skipped", "neutral"].includes(job.conclusion)
+  ));
+  for (const check of required) {
+    if (
+      (check.status !== "completed" || check.conclusion !== "success")
+      && !failed.some((entry) => entry.id === check.id && entry.name === check.name)
+    ) failed.push(check);
+  }
+  if (failed.length === 0) {
+    failed.push({
+      id: 0,
+      name: "validation workflow",
+      status: run.status,
+      conclusion: run.conclusion,
+      details_url: run.html_url,
+      app_slug: "github-actions",
+      output: { title: "", summary: "", text: "" },
+    });
+  }
+  return failed;
 }
 
 function latestRequiredChecks(
@@ -526,6 +664,29 @@ export async function githubRequiredChecks(context: CredentialBrokerContext): Pr
   if (!SHA.test(expectedHead) || expectedHead !== state.current_head_sha) {
     throw new Error("required_checks expected head is stale or invalid");
   }
+  if (binding.validation_workflow) {
+    const run = workflowRunsForHead(
+      await githubWorkflowRuns(token, binding),
+      binding,
+      expectedHead,
+    )[0];
+    if (!run || run.status !== "completed" || run.conclusion !== "success") {
+      throw new Error("The exact-head GitHub validation workflow is not successful");
+    }
+    const required = latestRequiredChecks(
+      await githubWorkflowRunJobs(token, binding, run.id),
+      binding.required_checks,
+    );
+    const failed = required.filter((check) => check.status !== "completed" || check.conclusion !== "success");
+    if (failed.length > 0) {
+      throw new Error(`Required GitHub checks are not successful: ${failed.map((check) => check.name).join(", ")}`);
+    }
+    return {
+      passed: true,
+      head_sha: state.current_head_sha,
+      required_checks: required.map(publicCheckRun),
+    };
+  }
   const required = latestRequiredChecks(
     await githubCheckRuns(token, binding, expectedHead),
     binding.required_checks,
@@ -666,7 +827,7 @@ async function validationFeedback(
         .filter(Boolean)
         .join("\n")
         .slice(0, 4_000);
-      return `Required check ${check.name} finished as ${check.status}/${check.conclusion ?? "none"}${evidence ? `: ${evidence}` : ""}`;
+      return `Validation check ${check.name} finished as ${check.status}/${check.conclusion ?? "none"}${evidence ? `: ${evidence}` : ""}`;
     });
 }
 
@@ -696,6 +857,111 @@ export async function githubValidateHead(context: CredentialBrokerContext): Prom
     throw new Error("validate_head expected head is stale or invalid");
   }
   const metadata = validationMetadata(context.input, expectedHead);
+  if (binding.validation_workflow) {
+    const initialRuns = await githubWorkflowRuns(token, binding);
+    const exactInitialRuns = workflowRunsForHead(initialRuns, binding, expectedHead);
+    let selectedRun: NormalizedWorkflowRun | undefined = exactInitialRuns[0];
+    let workflowDispatched = false;
+    const minimumRunId = initialRuns.reduce((latest, run) => Math.max(latest, run.id), 0);
+
+    if (selectedRun?.status === "completed") {
+      const jobs = await githubWorkflowRunJobs(token, binding, selectedRun.id);
+      const required = latestRequiredChecks(jobs, binding.required_checks);
+      if (selectedRun.conclusion === "success" && checksPassed(required)) {
+        await assertValidationHeadStillCurrent(token, binding, expectedHead);
+        return {
+          status: "passed",
+          verdict: "validated",
+          ...metadata,
+          validation: { workflow_dispatched: false, required_checks: required.map(publicCheckRun) },
+          feedback: [],
+          fix_tasks: [],
+        };
+      }
+      selectedRun = undefined;
+    }
+
+    if (!selectedRun) {
+      const inputs = Object.fromEntries(Object.entries(binding.validation_workflow.inputs).map(([key, value]) => [
+        key,
+        value === "$head_sha" ? expectedHead : value,
+      ]));
+      await githubApi<void>(
+        token,
+        `${repoPath(binding)}/actions/workflows/${encodeURIComponent(binding.validation_workflow.workflow_id)}/dispatches`,
+        {
+          method: "POST",
+          body: JSON.stringify({ ref: binding.head_ref, inputs }),
+        },
+      );
+      workflowDispatched = true;
+    }
+
+    const deadline = Date.now() + VALIDATION_TIMEOUT_MS;
+    while (true) {
+      assertValidationRunActive(context);
+      const runs = workflowRunsForHead(
+        await githubWorkflowRuns(token, binding),
+        binding,
+        expectedHead,
+      );
+      if (selectedRun) {
+        const selectedRunId = selectedRun.id;
+        selectedRun = runs.find((run) => run.id === selectedRunId) ?? selectedRun;
+      } else {
+        selectedRun = [...runs]
+          .filter((run) => run.id > minimumRunId)
+          .sort((left, right) => left.id - right.id)[0];
+      }
+      if (selectedRun?.status === "completed") {
+        await assertValidationHeadStillCurrent(token, binding, expectedHead);
+        const jobs = await githubWorkflowRunJobs(token, binding, selectedRun.id);
+        const required = latestRequiredChecks(jobs, binding.required_checks);
+        if (selectedRun.conclusion === "success" && checksPassed(required)) {
+          return {
+            status: "passed",
+            verdict: "validated",
+            ...metadata,
+            validation: { workflow_dispatched: workflowDispatched, required_checks: required.map(publicCheckRun) },
+            feedback: [],
+            fix_tasks: [],
+          };
+        }
+        const feedback = await validationFeedback(
+          token,
+          binding,
+          workflowFailureChecks(selectedRun, jobs, required),
+        );
+        return {
+          status: "failed",
+          verdict: "changes_requested",
+          ...metadata,
+          validation: { workflow_dispatched: workflowDispatched, required_checks: required.map(publicCheckRun) },
+          feedback,
+          fix_tasks: [{ id: "trusted-validation", feedback }],
+        };
+      }
+      if (Date.now() >= deadline) {
+        await assertValidationHeadStillCurrent(token, binding, expectedHead);
+        const required = selectedRun
+          ? latestRequiredChecks(
+            await githubWorkflowRunJobs(token, binding, selectedRun.id),
+            binding.required_checks,
+          )
+          : latestRequiredChecks([], binding.required_checks);
+        return {
+          status: "timed_out",
+          verdict: "blocked",
+          ...metadata,
+          validation: { workflow_dispatched: workflowDispatched, required_checks: required.map(publicCheckRun) },
+          feedback: ["Timed out waiting for the exact-head GitHub validation workflow"],
+          fix_tasks: [],
+        };
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, VALIDATION_POLL_INTERVAL_MS));
+    }
+  }
+
   const initialChecks = await githubCheckRuns(token, binding, expectedHead);
   const initialRequired = latestRequiredChecks(initialChecks, binding.required_checks);
   if (checksPassed(initialRequired)) {
@@ -710,37 +976,12 @@ export async function githubValidateHead(context: CredentialBrokerContext): Prom
     };
   }
 
-  let workflowDispatched = false;
-  let minimumIds: Map<string, number> | undefined;
-  if (binding.validation_workflow) {
-    minimumIds = new Map(binding.required_checks.map((name) => [
-      name,
-      initialChecks
-        .filter((check) => check.name === name)
-        .reduce((latest, check) => Math.max(latest, check.id), 0),
-    ]));
-    const inputs = Object.fromEntries(Object.entries(binding.validation_workflow.inputs).map(([key, value]) => [
-      key,
-      value === "$head_sha" ? expectedHead : value,
-    ]));
-    await githubApi<void>(
-      token,
-      `${repoPath(binding)}/actions/workflows/${encodeURIComponent(binding.validation_workflow.workflow_id)}/dispatches`,
-      {
-        method: "POST",
-        body: JSON.stringify({ ref: binding.head_ref, inputs }),
-      },
-    );
-    workflowDispatched = true;
-  }
-
   const deadline = Date.now() + VALIDATION_TIMEOUT_MS;
   while (true) {
     assertValidationRunActive(context);
     const required = latestRequiredChecks(
       await githubCheckRuns(token, binding, expectedHead),
       binding.required_checks,
-      minimumIds,
     );
     if (checksPassed(required)) {
       await assertValidationHeadStillCurrent(token, binding, expectedHead);
@@ -748,7 +989,7 @@ export async function githubValidateHead(context: CredentialBrokerContext): Prom
         status: "passed",
         verdict: "validated",
         ...metadata,
-        validation: { workflow_dispatched: workflowDispatched, required_checks: required.map(publicCheckRun) },
+        validation: { workflow_dispatched: false, required_checks: required.map(publicCheckRun) },
         feedback: [],
         fix_tasks: [],
       };
@@ -760,7 +1001,7 @@ export async function githubValidateHead(context: CredentialBrokerContext): Prom
         status: "failed",
         verdict: "changes_requested",
         ...metadata,
-        validation: { workflow_dispatched: workflowDispatched, required_checks: required.map(publicCheckRun) },
+        validation: { workflow_dispatched: false, required_checks: required.map(publicCheckRun) },
         feedback,
         fix_tasks: [{ id: "trusted-validation", feedback }],
       };
@@ -771,7 +1012,7 @@ export async function githubValidateHead(context: CredentialBrokerContext): Prom
         status: "timed_out",
         verdict: "blocked",
         ...metadata,
-        validation: { workflow_dispatched: workflowDispatched, required_checks: required.map(publicCheckRun) },
+        validation: { workflow_dispatched: false, required_checks: required.map(publicCheckRun) },
         feedback: ["Timed out waiting for required checks on the exact Draft PR head"],
         fix_tasks: [],
       };

@@ -370,15 +370,24 @@ selected by the caller, not by a model.
   holds the credential or decides whether the gate ran.
 - `validate_head` binds `expected_head_sha` and the Manager-produced
   `manifest_sha256`. If the exact required checks already succeeded, it uses
-  them. Otherwise it may dispatch the immutable `PRContext.validation_workflow`
-  and waits only for newer check runs on that same head.
-- Missing or pending checks remain blocked; terminal failures become a bounded
-  `changes_requested` result and one trusted-validation fixer task.
+  them when validation is supplied by trusted outer automation. When immutable
+  `PRContext.validation_workflow` is configured, Manager instead binds the
+  concrete `workflow_dispatch` run for the exact repository, branch, and head.
+  It waits for that whole run, not merely the first successful anchor job.
+- For a configured validation workflow, every applicable job must settle and
+  the workflow conclusion must be `success`; skipped jobs follow GitHub's own
+  workflow semantics. Any failing job, including one not named in
+  `required_checks`, becomes bounded `changes_requested` evidence and one
+  trusted-validation fixer task. The required-check names remain immutable
+  anchors that must exist and succeed inside the bound workflow run.
+- Without a configured workflow, missing or pending required checks remain
+  blocked and terminal failures become the same bounded fixer task.
 - `checks_snapshot` remains bounded reviewer evidence but cannot authorize an
   approval.
 - After GLM returns `approve`, a second Manager broker node calls
   `required_checks` with the approved `head_sha`. This independently rejects
-  head drift or a no-longer-successful check before terminal success.
+  head drift, a no-longer-successful external check, or a configured validation
+  workflow whose latest exact-head run is not wholly successful.
 - Runtime records only bounded broker receipts, never the credential or
   provider response body.
 

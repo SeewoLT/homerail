@@ -212,8 +212,10 @@ Tests:
 - [ ] Return bounded, redacted, immutable receipts.
 - [ ] Require `validate_head` before every reviewer dispatch and a separate
       `required_checks(expected_head_sha)` Manager node after approval.
-- [ ] Optionally dispatch a bounded immutable validation workflow, then accept
-      only newer required check runs attached to the exact candidate head.
+- [ ] Optionally dispatch a bounded immutable validation workflow, bind its
+      concrete exact-branch/exact-head run, require the whole run plus every
+      immutable anchor job to succeed, and route any failed job evidence to the
+      trusted fixer.
 
 ### AFV2-402: Implement fast-forward `commit_workspace`
 

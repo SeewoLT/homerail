@@ -95,6 +95,8 @@ describe("bounded GitHub Draft PR credential broker", () => {
   let pullFileCount: number;
   let createdTreeSha: string;
   let checkRunsResponses: Array<Array<Record<string, unknown>>> | undefined;
+  let workflowRunsResponses: Array<Array<Record<string, unknown>>> | undefined;
+  let workflowJobs: Map<number, Array<Record<string, unknown>>>;
   let workflowDispatches: Array<Record<string, unknown>>;
   let jobLogs: Map<number, string>;
   let jobLogRequests: number[];
@@ -196,6 +198,8 @@ describe("bounded GitHub Draft PR credential broker", () => {
     pullFileCount = 1;
     createdTreeSha = NEXT_TREE;
     checkRunsResponses = undefined;
+    workflowRunsResponses = undefined;
+    workflowJobs = new Map();
     workflowDispatches = [];
     jobLogs = new Map();
     jobLogRequests = [];
@@ -242,9 +246,19 @@ describe("bounded GitHub Draft PR credential broker", () => {
           check_runs: queued ?? [{ id: 1, name: checkName, status: "completed", conclusion: checkConclusion }],
         });
       }
+      if (
+        method === "GET"
+        && url.pathname === "/repos/acme/widget/actions/workflows/autofix-validate.yml/runs"
+      ) {
+        return json({ workflow_runs: workflowRunsResponses?.shift() ?? [] });
+      }
       if (method === "POST" && url.pathname === "/repos/acme/widget/actions/workflows/autofix-validate.yml/dispatches") {
         workflowDispatches.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
         return new Response(null, { status: 204 });
+      }
+      const workflowJobsMatch = url.pathname.match(/^\/repos\/acme\/widget\/actions\/runs\/(\d+)\/jobs$/);
+      if (method === "GET" && workflowJobsMatch) {
+        return json({ jobs: workflowJobs.get(Number(workflowJobsMatch[1])) ?? [] });
       }
       const jobLogMatch = url.pathname.match(/^\/repos\/acme\/widget\/actions\/jobs\/(\d+)\/logs$/);
       if (method === "GET" && jobLogMatch) {
@@ -485,11 +499,33 @@ describe("bounded GitHub Draft PR credential broker", () => {
       workflow_id: "autofix-validate.yml",
       inputs: { head_sha: "$head_sha", mode: "trusted" },
     });
-    checkRunsResponses = [
-      [{ id: 1, name: "unit", status: "completed", conclusion: "failure" }],
-      [{ id: 2, name: "unit", status: "in_progress", conclusion: null }],
-      [{ id: 2, name: "unit", status: "completed", conclusion: "success" }],
+    workflowRunsResponses = [
+      [],
+      [{
+        id: 101,
+        head_sha: INITIAL_HEAD,
+        head_branch: "autofix/issue-172",
+        event: "workflow_dispatch",
+        status: "in_progress",
+        conclusion: null,
+      }],
+      [{
+        id: 101,
+        head_sha: INITIAL_HEAD,
+        head_branch: "autofix/issue-172",
+        event: "workflow_dispatch",
+        status: "completed",
+        conclusion: "success",
+      }],
     ];
+    workflowJobs.set(101, [{
+      id: 2,
+      name: "unit",
+      status: "completed",
+      conclusion: "success",
+      html_url: "https://github.com/acme/widget/actions/runs/101/job/2",
+      steps: [],
+    }]);
     vi.useFakeTimers();
 
     const validation = call("reviewer", "validate_head", {
@@ -517,6 +553,79 @@ describe("bounded GitHub Draft PR credential broker", () => {
           required_checks: [{ id: 2, name: "unit", status: "completed", conclusion: "success" }],
         },
       },
+    });
+  });
+
+  it("waits for the whole dispatched workflow and reports a non-required failing job", async () => {
+    createBoundRun("github-validation-whole-run", ["src"], INITIAL_HEAD, {
+      workflow_id: "autofix-validate.yml",
+      inputs: { head_sha: "$head_sha" },
+    });
+    const failedRun = {
+      id: 202,
+      head_sha: INITIAL_HEAD,
+      head_branch: "autofix/issue-172",
+      event: "workflow_dispatch",
+      status: "completed",
+      conclusion: "failure",
+      html_url: "https://github.com/acme/widget/actions/runs/202",
+    };
+    workflowRunsResponses = [[], [failedRun]];
+    workflowJobs.set(202, [
+      {
+        id: 2,
+        name: "unit",
+        status: "completed",
+        conclusion: "success",
+        html_url: "https://github.com/acme/widget/actions/runs/202/job/2",
+        steps: [],
+      },
+      {
+        id: 42,
+        name: "Core (Windows, Node 24)",
+        status: "completed",
+        conclusion: "failure",
+        html_url: "https://github.com/acme/widget/actions/runs/202/job/42",
+        steps: [{ name: "Typecheck, build, and test", conclusion: "failure" }],
+      },
+    ]);
+    jobLogs.set(42, "AssertionError: expected commit does not exist, received invalid worktree binding");
+
+    const failed = await call("reviewer", "validate_head", {
+      expected_head_sha: INITIAL_HEAD,
+      manifest_sha256: "7".repeat(64),
+      summary: "candidate with one successful anchor job",
+      tests: ["npm test"],
+    }, "github-validation-whole-run", "validation-session");
+
+    expect(failed).toMatchObject({
+      ok: true,
+      result: {
+        status: "failed",
+        verdict: "changes_requested",
+        validation: {
+          workflow_dispatched: true,
+          required_checks: [{ id: 2, name: "unit", status: "completed", conclusion: "success" }],
+        },
+        feedback: [expect.stringContaining("Core (Windows, Node 24)")],
+        fix_tasks: [{
+          id: "trusted-validation",
+          feedback: [expect.stringContaining("invalid worktree binding")],
+        }],
+      },
+    });
+    expect(jobLogRequests).toEqual([42]);
+
+    workflowRunsResponses = [[failedRun]];
+    await expect(call(
+      "reviewer",
+      "required_checks",
+      { expected_head_sha: INITIAL_HEAD },
+      "github-validation-whole-run",
+      "finalizer-session",
+    )).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("validation workflow is not successful"),
     });
   });
 
