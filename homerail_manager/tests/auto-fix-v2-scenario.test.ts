@@ -93,6 +93,11 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     expect(parsed.meta.agents?.analyzer).toBeUndefined();
     expect(parsed.meta.agents?.implementer?.system).toContain("npm ci");
     expect(parsed.meta.agents?.implementer?.system).toMatch(/never npm\s+install/);
+    for (const agentId of ["aggregator", "reviewer", "fixer"] as const) {
+      expect(parsed.meta.agents?.[agentId]?.system).toMatch(/credential_ref\s+github-autofix/);
+      expect(parsed.meta.agents?.[agentId]?.system).toMatch(/broker name\s+github_pr/);
+      expect(parsed.meta.agents?.[agentId]?.system).not.toMatch(/github_pr\/(?:pull_request_snapshot|commit_files|required_checks)/);
+    }
     expect(source).not.toMatch(/\bmax_[a-z_]*tool_calls[a-z_]*:/);
     for (const nodeId of ["implement", "fix"]) {
       expect(parsed.graph.nodes.find((node) => node.node_id === nodeId)?.gateway_config).toMatchObject({
@@ -251,6 +256,37 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
       broker: "github_pr",
       allowed_actions: ["pull_request_snapshot", "commit_files"],
     }]);
+    const aggregateSession = dispatcher.dispatched.at(-1)?.sessionId ?? "";
+    expect(() => handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
+      head_sha: head,
+      review_round: 1,
+      summary: "candidate",
+      tests: ["fixture"],
+    })).toThrow(/DAG_HANDOFF_BROKER_REQUIREMENT_MISSING/);
+    recordActiveRunBrokerActionSuccess({
+      run_id: "autofix-v2-run",
+      node_id: "aggregate",
+      session_id: aggregateSession,
+      credential_ref: "github-autofix",
+      broker: "github_pr",
+      action: "commit_files",
+      result: { head_sha: "a".repeat(40) },
+    });
+    expect(() => handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
+      head_sha: head,
+      review_round: 1,
+      summary: "candidate",
+      tests: ["fixture"],
+    })).toThrow(/DAG_HANDOFF_BROKER_RESULT_MISMATCH/);
+    recordActiveRunBrokerActionSuccess({
+      run_id: "autofix-v2-run",
+      node_id: "aggregate",
+      session_id: aggregateSession,
+      credential_ref: "github-autofix",
+      broker: "github_pr",
+      action: "commit_files",
+      result: { head_sha: head },
+    });
     handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
       head_sha: head,
       review_round: 1,
@@ -282,6 +318,15 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         broker: "github_pr",
         allowed_actions: ["pull_request_snapshot", "commit_files"],
       }]);
+      recordActiveRunBrokerActionSuccess({
+        run_id: "autofix-v2-run",
+        node_id: fixerId,
+        session_id: fixerEnvelope?.sessionId ?? "",
+        credential_ref: "github-autofix",
+        broker: "github_pr",
+        action: "commit_files",
+        result: { head_sha: head },
+      });
       handoffActiveRun("autofix-v2-run", fixerId, "result", {
         status: "fixed",
         previous_head_sha: head,
@@ -302,6 +347,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
           credential_ref: "github-autofix",
           broker: "github_pr",
           action: "required_checks",
+          result: { head_sha: head },
         });
       }
       if (reviewRound === 5) {
@@ -340,6 +386,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
           credential_ref: "github-autofix",
           broker: "github_pr",
           action: "required_checks",
+          result: { head_sha: head },
         });
         expect(() => handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", {
           verdict: "approve",

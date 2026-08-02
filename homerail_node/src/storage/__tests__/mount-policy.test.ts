@@ -137,11 +137,18 @@ describe("mount-policy", () => {
     });
 
     it("can make the worker workspace mount read-only", () => {
-      expect(workerAllowedMounts("ws-readonly", true)[0]).toMatchObject({
-        host: "/home/user/.homerail/workspace/ws-readonly",
-        container: "/workspace",
-        mode: "ro",
-      });
+      expect(workerAllowedMounts("ws-readonly", true)).toEqual([
+        {
+          host: "/home/user/.homerail/workspace/ws-readonly",
+          container: "/workspace",
+          mode: "ro",
+        },
+        {
+          host: "/home/user/.homerail/workspace/ws-readonly/.homerail-runtime",
+          container: "/workspace/.homerail-runtime",
+          mode: "rw",
+        },
+      ]);
     });
 
     it("supports run/node workspace IDs", () => {

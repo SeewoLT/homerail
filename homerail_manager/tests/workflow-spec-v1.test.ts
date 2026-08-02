@@ -219,6 +219,7 @@ describe("WorkflowSpec v1", () => {
       broker: "github_pr",
       action: "required_checks",
       when: { field: "status", equals: "success" },
+      result_binding: { result_field: "head_sha", content_field: "head_sha" },
     }];
 
     const result = compileWorkflowSource(YAML.stringify(workflow));
@@ -228,6 +229,7 @@ describe("WorkflowSpec v1", () => {
       broker: "github_pr",
       action: "required_checks",
       when: { field: "status", equals: "success" },
+      result_binding: { result_field: "head_sha", content_field: "head_sha" },
     }];
     expect(result.canonical?.nodes.find((node) => node.id === "execute")?.outputs)
       .toContainEqual(expect.objectContaining({ name: "result", required_broker_actions: requirement }));

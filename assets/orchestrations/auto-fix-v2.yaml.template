@@ -214,37 +214,46 @@ spec:
         into /workspace/repo in declared task order, resolve overlap, and run
         focused tests. Git metadata is Manager-owned and read-only: do not run
         git add, commit, cherry-pick, checkout, reset, or merge. Use
-        github_pr/pull_request_snapshot to obtain the
-        exact current Draft PR head. Publish changed file bytes only through
-        github_pr/commit_files with expected_head_sha; never use git push or a
-        raw token. Then hand off candidate with review_round 1 and the broker's
-        returned head SHA. Refuse unrelated or workflow-file changes.
+        credential_broker_call with credential_ref github-autofix and action
+        pull_request_snapshot to obtain the exact current Draft PR head. Publish
+        changed file bytes only through credential_broker_call with the same
+        credential_ref and action commit_files plus expected_head_sha; never
+        use the broker name github_pr as credential_ref, git push, or a raw
+        token. Then hand off candidate with review_round 1 and exactly the
+        head_sha returned by the final successful commit_files call. Manager
+        binds that broker result to the handoff and rejects a worker commit SHA
+        or stale PR head. Refuse unrelated or workflow-file changes.
 
     reviewer:
       description: GLM-5.2 fresh-context reviewer
       system: |
         Review only the immutable task document and the current Draft PR state
-        obtained through github_pr/pull_request_snapshot and checks_snapshot.
+        obtained through credential_broker_call with credential_ref
+        github-autofix and actions pull_request_snapshot and checks_snapshot.
         Every dispatch is a fresh provider session: do not rely on prior chat.
         For the initial candidate set review_round to 1. For a revision, derive
         review_round as input.fixes.context.review_round + 1. Approve only when
         all acceptance criteria are met and checks/evidence are sufficient.
-        Before handing off a verdict of approve, call github_pr/required_checks;
-        Manager will reject the reviewed handoff unless every immutable required
-        check passed for this dispatch. On approval return empty feedback and
-        fix_tasks. Otherwise return clear feedback and exactly one fix_tasks item
-        containing the whole feedback.
+        Before handing off a verdict of approve, call credential_broker_call
+        with credential_ref github-autofix and action required_checks; never use
+        the broker name github_pr as credential_ref. Manager will reject the
+        reviewed handoff unless every immutable required check passed for this
+        dispatch. On approval return empty feedback and fix_tasks. Otherwise
+        return clear feedback and exactly one fix_tasks item containing the
+        whole feedback.
 
     fixer:
       description: DeepSeek V4 Flash dynamically generated PR fixer
       system: |
         You are a newly generated fixer for one review round. Work only in
-        input.workspace_path. Use github_pr/pull_request_snapshot to bind the
-        latest Draft PR head, apply all feedback in input.item, run focused
-        tests, and publish file bytes only through github_pr/commit_files with
-        the snapshot head as expected_head_sha. Never git push and never modify
-        any path below .github. Hand off fixed with both previous and new head
-        SHAs.
+        input.workspace_path. Use credential_broker_call with credential_ref
+        github-autofix and action pull_request_snapshot to bind the latest Draft
+        PR head, apply all feedback in input.item, run focused tests, and
+        publish file bytes only through credential_broker_call with the same
+        credential_ref and action commit_files plus the snapshot head as
+        expected_head_sha. Never use the broker name github_pr as
+        credential_ref, git push, or modify any path below .github. Hand off
+        fixed with both previous and new head SHAs.
 
   nodes:
     prepare_repository:
@@ -331,7 +340,15 @@ spec:
             broker: github_pr
             allowed_actions: [pull_request_snapshot, commit_files]
       inputs: { workers: {} }
-      outputs: { candidate: { contract: Candidate }, failed: {} }
+      outputs:
+        candidate:
+          contract: Candidate
+          required_broker_actions:
+            - credential_ref: github-autofix
+              broker: github_pr
+              action: commit_files
+              result_binding: { result_field: head_sha, content_field: head_sha }
+        failed: {}
 
     review_initial:
       kind: agent
@@ -356,6 +373,7 @@ spec:
               broker: github_pr
               action: required_checks
               when: { field: verdict, equals: approve }
+              result_binding: { result_field: head_sha, content_field: head_sha }
         failed: {}
 
     review_gate:
@@ -400,6 +418,12 @@ spec:
         max_parallelism: 1
         completion: all
         result_contract: FixResult
+        result_required_broker_actions:
+          - credential_ref: github-autofix
+            broker: github_pr
+            action: commit_files
+            when: { field: status, equals: fixed }
+            result_binding: { result_field: head_sha, content_field: head_sha }
         success_field: status
         success_values: [fixed]
         result_port: fixed
@@ -429,6 +453,7 @@ spec:
               broker: github_pr
               action: required_checks
               when: { field: verdict, equals: approve }
+              result_binding: { result_field: head_sha, content_field: head_sha }
         failed: {}
 
     done: { kind: terminal, outcome: success, inputs: { result: {} } }

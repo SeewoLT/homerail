@@ -45,6 +45,7 @@ export interface CanonicalPort {
     broker: string;
     action: string;
     when?: { field: string; equals: unknown };
+    result_binding?: { result_field: string; content_field: string };
   }>;
 }
 
@@ -263,6 +264,7 @@ function portEntries(ports: Record<string, {
     broker: string;
     action: string;
     when?: { field: string; equals: unknown };
+    result_binding?: { result_field: string; content_field: string };
   }>;
 }> | undefined): CanonicalPort[] {
   return Object.entries(ports ?? {})
@@ -274,8 +276,7 @@ function portEntries(ports: Record<string, {
       ...(port.required_broker_actions ? {
         required_broker_actions: [...port.required_broker_actions]
           .sort((left, right) => (
-            `${left.credential_ref}\0${left.broker}\0${left.action}\0${JSON.stringify(left.when ?? null)}`
-              .localeCompare(`${right.credential_ref}\0${right.broker}\0${right.action}\0${JSON.stringify(right.when ?? null)}`)
+            JSON.stringify(deepSort(left)).localeCompare(JSON.stringify(deepSort(right)))
           )),
       } : {}),
     }));
@@ -589,6 +590,7 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
         add(`${nodePath}/config/max_parallelism`, "DAG_SEMANTIC_INVALID_PARALLELISM", "max_parallelism cannot exceed max_items");
       }
       const workerPolicy = node.config.worker_policy;
+      const resultBrokerRequirements = node.config.result_required_broker_actions ?? [];
       if (workerPolicy?.builtin_tool_policy !== undefined && workerPolicy.allowed_builtin_tools !== undefined) {
         add(
           `${nodePath}/config/worker_policy/builtin_tool_policy`,
@@ -619,6 +621,22 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
           "DAG_SEMANTIC_CREDENTIAL_BROKER_TOOL_REQUIRED",
           "fanout workers with manager_broker credentials must allow credential_broker_call",
         );
+      }
+      for (let index = 0; index < resultBrokerRequirements.length; index++) {
+        const requirement = resultBrokerRequirements[index];
+        const declared = (workerPolicy?.credentials ?? []).some((binding) => (
+          binding.credential_ref === requirement.credential_ref
+          && binding.inject.mode === "manager_broker"
+          && binding.inject.broker === requirement.broker
+          && binding.inject.allowed_actions.includes(requirement.action)
+        ));
+        if (!declared) {
+          add(
+            `${nodePath}/config/result_required_broker_actions/${index}`,
+            "DAG_SEMANTIC_UNDECLARED_BROKER_REQUIREMENT",
+            "required fanout result broker action must match a manager_broker credential and allowed action declared in worker_policy",
+          );
+        }
       }
       const writablePaths = workerPolicy?.workspace_access?.writable_paths ?? [];
       const declaresIsolatedWorkspace = writablePaths.length === 1
@@ -1534,6 +1552,7 @@ function authoringPorts(ports: CanonicalPort[]): Record<string, {
     broker: string;
     action: string;
     when?: { field: string; equals: unknown };
+    result_binding?: { result_field: string; content_field: string };
   }>;
 }> | undefined {
   if (ports.length === 0) return undefined;

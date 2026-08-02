@@ -1320,16 +1320,41 @@ interface BrokerActionRequirement {
     field: string;
     equals: unknown;
   };
+  result_binding?: {
+    result_field: string;
+    content_field: string;
+  };
 }
 
-interface BrokerActionReceipt extends BrokerActionRequirement {
+interface BrokerActionReceipt {
+  credential_ref: string;
+  broker: string;
+  action: string;
   node_id: string;
   session_id: string;
   recorded_at: number;
+  bound_results?: Record<string, string | number | boolean | null>;
 }
 
 const BROKER_ACTION_RECEIPTS_KEY = "broker_action_receipts";
 const BROKER_ACTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const BROKER_ACTION_FIELD = /^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/;
+
+function _dottedField(value: unknown, field: string): unknown {
+  let selected = value;
+  for (const segment of field.split(".")) {
+    if (!selected || typeof selected !== "object" || Array.isArray(selected)) return undefined;
+    selected = (selected as Record<string, unknown>)[segment];
+  }
+  return selected;
+}
+
+function _boundedBrokerResult(value: unknown): value is string | number | boolean | null {
+  return value === null
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value))
+    || (typeof value === "string" && value.length <= 1_024);
+}
 
 function _outputBrokerActionRequirements(
   run: ActiveRun,
@@ -1358,19 +1383,23 @@ function _outputBrokerActionRequirements(
       if (!entry.when || typeof entry.when !== "object" || Array.isArray(entry.when)) return [];
       const rawWhen = entry.when as Record<string, unknown>;
       if (typeof rawWhen.field !== "string"
-        || !/^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/.test(rawWhen.field)
+        || !BROKER_ACTION_FIELD.test(rawWhen.field)
         || !("equals" in rawWhen)) return [];
       when = { field: rawWhen.field, equals: rawWhen.equals };
     }
+    let resultBinding: BrokerActionRequirement["result_binding"];
+    if (entry.result_binding !== undefined) {
+      if (!entry.result_binding || typeof entry.result_binding !== "object" || Array.isArray(entry.result_binding)) return [];
+      const rawBinding = entry.result_binding as Record<string, unknown>;
+      if (typeof rawBinding.result_field !== "string" || !BROKER_ACTION_FIELD.test(rawBinding.result_field)
+        || typeof rawBinding.content_field !== "string" || !BROKER_ACTION_FIELD.test(rawBinding.content_field)) return [];
+      resultBinding = {
+        result_field: rawBinding.result_field,
+        content_field: rawBinding.content_field,
+      };
+    }
     if (evaluateConditions && when) {
-      let actual = content;
-      for (const segment of when.field.split(".")) {
-        if (!actual || typeof actual !== "object" || Array.isArray(actual)) {
-          actual = undefined;
-          break;
-        }
-        actual = (actual as Record<string, unknown>)[segment];
-      }
+      const actual = _dottedField(content, when.field);
       if (!isDeepStrictEqual(actual, when.equals)) return [];
     }
     return [{
@@ -1378,6 +1407,7 @@ function _outputBrokerActionRequirements(
       broker: String(entry.broker),
       action: String(entry.action),
       ...(when ? { when } : {}),
+      ...(resultBinding ? { result_binding: resultBinding } : {}),
     }];
   });
 }
@@ -1391,6 +1421,13 @@ function _brokerActionReceipts(run: ActiveRun): BrokerActionReceipt[] {
     if (![entry.credential_ref, entry.broker, entry.action, entry.node_id, entry.session_id].every((field) => (
       typeof field === "string" && BROKER_ACTION_NAME.test(field)
     )) || typeof entry.recorded_at !== "number" || !Number.isFinite(entry.recorded_at)) return [];
+    let boundResults: BrokerActionReceipt["bound_results"];
+    if (entry.bound_results !== undefined) {
+      if (!entry.bound_results || typeof entry.bound_results !== "object" || Array.isArray(entry.bound_results)) return [];
+      const entries = Object.entries(entry.bound_results as Record<string, unknown>);
+      if (entries.length > 8 || entries.some(([field, result]) => !BROKER_ACTION_FIELD.test(field) || !_boundedBrokerResult(result))) return [];
+      boundResults = Object.fromEntries(entries) as BrokerActionReceipt["bound_results"];
+    }
     return [{
       credential_ref: String(entry.credential_ref),
       broker: String(entry.broker),
@@ -1398,6 +1435,7 @@ function _brokerActionReceipts(run: ActiveRun): BrokerActionReceipt[] {
       node_id: String(entry.node_id),
       session_id: String(entry.session_id),
       recorded_at: entry.recorded_at,
+      ...(boundResults ? { bound_results: boundResults } : {}),
     }];
   });
 }
@@ -1409,15 +1447,16 @@ export function recordActiveRunBrokerActionSuccess(input: {
   credential_ref: string;
   broker: string;
   action: string;
+  result?: unknown;
 }): void {
   const run = store.get(input.run_id);
   if (!run || run.status !== "active") throw new Error("Broker action receipt run is not active");
-  const required = _outputBrokerActionRequirements(run, input.node_id).some((requirement) => (
+  const requirements = _outputBrokerActionRequirements(run, input.node_id).filter((requirement) => (
     requirement.credential_ref === input.credential_ref
     && requirement.broker === input.broker
     && requirement.action === input.action
   ));
-  if (!required) return;
+  if (requirements.length === 0) return;
   const session = run.nodeSessions.get(input.node_id);
   if (!session || session.sessionId !== input.session_id) {
     throw new Error("Broker action receipt session is stale");
@@ -1429,6 +1468,15 @@ export function recordActiveRunBrokerActionSuccess(input: {
     node_id: input.node_id,
     session_id: input.session_id,
     recorded_at: Date.now(),
+    ...(() => {
+      const boundResults = Object.fromEntries(requirements.flatMap((requirement) => {
+        const field = requirement.result_binding?.result_field;
+        if (!field) return [];
+        const value = _dottedField(input.result, field);
+        return _boundedBrokerResult(value) ? [[field, value] as const] : [];
+      }));
+      return Object.keys(boundResults).length > 0 ? { bound_results: boundResults } : {};
+    })(),
   };
   const receipts = _brokerActionReceipts(run).filter((entry) => !(
     entry.node_id === receipt.node_id
@@ -2535,15 +2583,33 @@ function _handoffBrokerRequirementViolation(
   const sessionId = run.nodeSessions.get(fromNode)?.sessionId;
   if (!sessionId) return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: node has no active session`;
   const receipts = _brokerActionReceipts(run);
-  const missing = requirements.find((requirement) => !receipts.some((receipt) => (
+  const receiptFor = (requirement: BrokerActionRequirement) => receipts.find((receipt) => (
     receipt.node_id === fromNode
     && receipt.session_id === sessionId
     && receipt.credential_ref === requirement.credential_ref
     && receipt.broker === requirement.broker
     && receipt.action === requirement.action
-  )));
-  if (!missing) return undefined;
-  return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: ${missing.credential_ref}/${missing.broker}/${missing.action}`;
+  ));
+  for (const requirement of requirements) {
+    const receipt = receiptFor(requirement);
+    const actionName = `${requirement.credential_ref}/${requirement.broker}/${requirement.action}`;
+    if (!receipt) {
+      return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: ${actionName}`;
+    }
+    const binding = requirement.result_binding;
+    if (!binding) continue;
+    if (!receipt.bound_results
+      || !Object.prototype.hasOwnProperty.call(receipt.bound_results, binding.result_field)) {
+      return `DAG_HANDOFF_BROKER_RESULT_MISSING ${fromNode}.${port}: ${actionName} did not return ${binding.result_field}`;
+    }
+    if (!isDeepStrictEqual(
+      receipt.bound_results[binding.result_field],
+      _dottedField(content, binding.content_field),
+    )) {
+      return `DAG_HANDOFF_BROKER_RESULT_MISMATCH ${fromNode}.${port}: ${actionName} ${binding.result_field} must equal ${binding.content_field}`;
+    }
+  }
+  return undefined;
 }
 
 function _requiredSurfaceFinalViolation(
@@ -4462,6 +4528,9 @@ function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutR
           workflow_spec_v1: {
             input_contracts: {},
             output_contracts: { result: config.result_contract },
+            ...(Array.isArray(config.result_required_broker_actions) ? {
+              output_broker_requirements: { result: config.result_required_broker_actions },
+            } : {}),
           },
         } : {}),
       },

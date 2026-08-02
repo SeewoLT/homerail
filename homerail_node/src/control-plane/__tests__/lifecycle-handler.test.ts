@@ -492,6 +492,10 @@ describe("handleLifecycleRequest", () => {
       expect(responses[0]!.status).toBe("success");
       const container = provider.containers.get(String(responses[0]!.resource_data!.id));
       expect(container!.config.mounts![0]!.mode).toBe("ro");
+      expect(container!.config.mounts![1]).toMatchObject({
+        container: "/workspace/.homerail-runtime",
+        mode: "rw",
+      });
     });
 
     it("create worker without workspace_id -> error", async () => {

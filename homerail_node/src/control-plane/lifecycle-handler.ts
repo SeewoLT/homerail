@@ -1,4 +1,6 @@
 import type { ExecutionProvider, ContainerConfig } from "../providers/types.js";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { createContainer, createWorkerContainer } from "../lifecycle/create.js";
 import { prepareWorkerWorkspace } from "../storage/workspace-prepare.js";
 import { materializeWorkspaceInputs } from "../storage/workspace-inputs.js";
@@ -148,7 +150,10 @@ async function dispatchOperation(
           workdir: (spec.workdir as string) || "/workspace",
           name: (spec.name as string) || undefined,
         };
-        await prepareWorkerWorkspace(workspaceId, spec.workspace);
+        const preparedWorkspace = await prepareWorkerWorkspace(workspaceId, spec.workspace);
+        if (spec.workspace_read_only === true && preparedWorkspace.prepared) {
+          await mkdir(join(preparedWorkspace.root, ".homerail-runtime"), { recursive: true, mode: 0o700 });
+        }
         const inputCount = materializeWorkspaceInputs(workspaceId, spec.workspace_inputs);
         const info = await createWorkerContainer({
           config,

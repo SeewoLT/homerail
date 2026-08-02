@@ -120,6 +120,13 @@ export interface DAGGatewayConfig {
   max_parallelism?: number;
   completion?: "all" | "any" | "n_of_m" | string;
   result_contract?: string;
+  result_required_broker_actions?: Array<{
+    credential_ref: string;
+    broker: string;
+    action: string;
+    when?: { field: string; equals: unknown };
+    result_binding?: { result_field: string; content_field: string };
+  }>;
   success_field?: string;
   cancel_remaining?: boolean;
 }

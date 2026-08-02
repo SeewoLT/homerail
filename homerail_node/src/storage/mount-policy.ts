@@ -86,6 +86,13 @@ export function workerAllowedMounts(
       mode: readOnly ? "ro" : "rw",
     },
   ];
+  if (readOnly) {
+    mounts.push({
+      host: `${homerailWorkerWorkspacePath(workspaceId)}/.homerail-runtime`,
+      container: "/workspace/.homerail-runtime",
+      mode: "rw",
+    });
+  }
   if (readOnlyInputs) {
     mounts.push({
       host: `${homerailWorkerWorkspacePath(workspaceId)}/input`,

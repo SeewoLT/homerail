@@ -99,6 +99,18 @@ const BrokerActionRequirement = Type.Object({
     }),
     equals: JsonValue,
   }, { additionalProperties: false })),
+  result_binding: Type.Optional(Type.Object({
+    result_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+    content_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+  }, { additionalProperties: false })),
 }, { additionalProperties: false });
 
 const OutputPort = Type.Object({
@@ -330,6 +342,11 @@ const FanoutNode = Type.Object({
     completion: Type.Union([Type.Literal("all"), Type.Literal("any"), Type.Literal("n_of_m")]),
     threshold: Type.Optional(Type.Integer({ minimum: 1, maximum: 256 })),
     result_contract: Type.Optional(ContractIdentifier),
+    result_required_broker_actions: Type.Optional(Type.Array(BrokerActionRequirement, {
+      minItems: 1,
+      maxItems: 8,
+      uniqueItems: true,
+    })),
     success_field: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
     success_values: Type.Optional(Type.Array(JsonValue, { minItems: 1, maxItems: 128 })),
     result_port: Identifier,

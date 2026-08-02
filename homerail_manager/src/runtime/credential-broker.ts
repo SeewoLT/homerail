@@ -204,6 +204,7 @@ export async function executeCredentialBrokerCall(
       credential_ref: request.credential_ref,
       broker: request.broker,
       action: request.action,
+      result,
     });
     return { request_id: request.request_id, ok: true, result };
   } catch (error) {

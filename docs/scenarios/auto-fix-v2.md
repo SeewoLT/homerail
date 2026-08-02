@@ -31,13 +31,20 @@ predates the runtime and broker support described below.
   `workspace-write`; Docker mounts, network, cgroups, and HomeRail's post-turn
   path verification remain active.
 - The DeepSeek aggregator may read and update only the bound Draft PR through
-  the `github_pr` Manager broker.
+  the `github_pr` Manager broker. Manager records the final successful
+  `commit_files` result and rejects the Candidate unless its `head_sha` is the
+  exact returned PR head. Dynamic fixers have the same result-to-handoff
+  binding when they report `fixed`.
 - GLM-5.2 reviewer nodes have `session_scope: dispatch`; every re-entry gets a
   new provider session and no portable checkpoint/transcript. A rejected
   handoff-contract correction stays in that same logical dispatch so a valid
   same-session `required_checks` receipt remains usable; if the receipt was
   missing, correction mode permits only that declared read-only verification
   call before the final handoff.
+- Read-only reviewer containers keep `/workspace` read-only and receive one
+  nested writable mount only at `/workspace/.homerail-runtime` for trusted
+  Worker audit/session telemetry. This prevents audit writer startup from
+  crashing a read-only Worker without granting repository writes.
 - Each rejected review creates one fresh dynamic DeepSeek fixer. Four fix
   rounds plus the initial review give exactly five total review rounds.
 - GitHub writes are expected-head, fast-forward-only, non-force, bounded to 64
@@ -45,8 +52,12 @@ predates the runtime and broker support described below.
   `writable_paths: ["."]` is invalid; `.github/**`, `.git/**`, and the mounted
   input directory are always denied even when a broader prefix is declared.
 - An `approve` handoff is rejected by Manager unless the same fresh reviewer
-  dispatch successfully called `github_pr/required_checks` and every immutable
-  required check passed on the exact current PR head.
+  dispatch successfully called `credential_broker_call` with
+  `credential_ref: github-autofix` and action `required_checks`, and every
+  immutable required check passed on the exact current PR head. The returned
+  check `head_sha` must also equal the review handoff's `head_sha`. `github_pr`
+  is the broker implementation name and must never be supplied as the
+  credential reference.
 
 ## GitHub credential
 
