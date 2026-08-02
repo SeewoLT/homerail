@@ -530,6 +530,19 @@ user, cgroup, and workspace boundaries remain in force, while model-issued
 commands remain constrained by Codex's inner `workspace-write` sandbox. Other
 Worker backends and Plugin Runtime isolation are unchanged.
 
+Writable Codex dispatches also receive a trusted dependency projection when
+the checked-out HomeRail dependency metadata matches the metadata baked
+into the selected Worker image. Worker creates an ignored per-worktree
+`node_modules` facade whose external entries point into the immutable image
+cache and whose HomeRail-local entries point at the current isolated worktree.
+The cache covers `homerail_protocol`, `homerail_plugin_sdk`,
+`homerail_manager`, and `homerail_worker`; its manifests participate in the
+Worker source fingerprint, so deployment cannot select an image with stale
+cache metadata. Read-only dispatches receive no facade. Changed manifests,
+changed locks, missing cache data, symlinked target package roots, and existing
+dependency trees without HomeRail's matching projection marker all fail
+closed without opening network access.
+
 Before a real run, the stable adapter resolves each selector to exactly one
 active LLM setting, confirms the required compatible harness and endpoint, and
 runs bounded capability smokes for tool use, structured handoff, and fresh

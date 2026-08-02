@@ -38,6 +38,7 @@ import {
 import { appendTranscriptEntry, redactAgentContext, saveSession } from "./session/session-store.js";
 import { redactTelemetry } from "./telemetry-redaction.js";
 import { snapshotWorkspace, verifyWorkspacePolicy, type WorkspaceSnapshot } from "./workspace-policy.js";
+import { materializeTrustedWorkspaceDependencies } from "./workspace-dependencies.js";
 import { completedActivityPayloadForHandoff, createDagActivityEmitter } from "./dag-activity.js";
 import {
   REPORT_SURFACE_STATE_PROMPT,
@@ -490,9 +491,35 @@ export async function runPrompt(
       job.dagConfig.builtin_tool_policy,
       job.dagConfig.workspace_access,
     );
+    const dependencyProjection = effectiveAgentBackend === "codex_appserver" && !correctionOnly
+      ? materializeTrustedWorkspaceDependencies(workspace, dagState.workspaceAccess)
+      : { projected: [], already_present: [], skipped: [] };
+    const readyDependencyPackages = [
+      ...dependencyProjection.projected,
+      ...dependencyProjection.already_present,
+    ];
+    if (readyDependencyPackages.length > 0 || dependencyProjection.skipped.length > 0) {
+      sendStream({
+        event: "workspace_dependency_projection",
+        projected: dependencyProjection.projected,
+        already_present: dependencyProjection.already_present,
+        skipped: dependencyProjection.skipped,
+      });
+    }
+    const dependencyPrompt = readyDependencyPackages.length > 0 || dependencyProjection.skipped.length > 0
+      ? [
+          readyDependencyPackages.length > 0
+            ? `Trusted lockfile-matched node_modules are already projected for: ${readyDependencyPackages.join(", ")}. Run repository build, typecheck, and test commands directly. Do not run npm install or npm ci unless you intentionally changed package.json or package-lock.json.`
+            : "No trusted node_modules projection is available for this worktree.",
+          dependencyProjection.skipped.length > 0
+            ? `No dependency projection was made for: ${dependencyProjection.skipped.map((entry) => `${entry.package} (${entry.reason})`).join(", ")}.`
+            : "",
+        ].filter(Boolean).join(" ")
+      : undefined;
+    const projectedSystemPrompt = [effectiveSystemPrompt, dependencyPrompt].filter(Boolean).join("\n\n") || undefined;
     const agent = createAgentClient(agentBackend);
     const context: AgentRunContext = {
-      systemPrompt: effectiveSystemPrompt,
+      systemPrompt: projectedSystemPrompt,
       systemPromptMode: correctionOnly ? "replace" : "append",
       provider: job.llmProvider,
       protocol: job.llmProtocol,

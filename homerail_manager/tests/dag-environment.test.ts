@@ -81,6 +81,38 @@ function fingerprintFixture(): string {
     }),
     "homerail_protocol/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
     "homerail_protocol/src/index.ts": "export const contract = 1;\n",
+    "homerail_plugin_sdk/package.json": JSON.stringify({
+      name: "homerail-plugin-sdk",
+      version: "0.1.0-alpha.1",
+      dependencies: { "homerail-protocol": "file:../homerail_protocol" },
+    }),
+    "homerail_plugin_sdk/package-lock.json": JSON.stringify({
+      name: "homerail-plugin-sdk",
+      version: "0.1.0-alpha.1",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "homerail-plugin-sdk", version: "0.1.0-alpha.1" },
+        "../homerail_protocol": { name: "homerail-protocol", version: "0.1.0-alpha.1" },
+      },
+    }),
+    "homerail_manager/package.json": JSON.stringify({
+      name: "homerail-manager",
+      version: "0.1.0-alpha.1",
+      dependencies: {
+        "homerail-plugin-sdk": "file:../homerail_plugin_sdk",
+        "homerail-protocol": "file:../homerail_protocol",
+      },
+    }),
+    "homerail_manager/package-lock.json": JSON.stringify({
+      name: "homerail-manager",
+      version: "0.1.0-alpha.1",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "homerail-manager", version: "0.1.0-alpha.1" },
+        "../homerail_plugin_sdk": { name: "homerail-plugin-sdk", version: "0.1.0-alpha.1" },
+        "../homerail_protocol": { name: "homerail-protocol", version: "0.1.0-alpha.1" },
+      },
+    }),
   };
   for (const [relativePath, content] of Object.entries(files)) {
     const target = path.join(repoRoot, relativePath);
@@ -141,6 +173,10 @@ it("ignores release-only package metadata in the Worker source fingerprint", () 
     "homerail_worker/package-lock.json",
     "homerail_protocol/package.json",
     "homerail_protocol/package-lock.json",
+    "homerail_plugin_sdk/package.json",
+    "homerail_plugin_sdk/package-lock.json",
+    "homerail_manager/package.json",
+    "homerail_manager/package-lock.json",
   ]) {
     const filePath = path.join(repoRoot, relativePath);
     const metadata = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
@@ -151,6 +187,9 @@ it("ignores release-only package metadata in the Worker source fingerprint", () 
     if (metadata.packages?.[""]) metadata.packages[""].version = "0.1.0-beta.99";
     if (metadata.packages?.["../homerail_protocol"]) {
       metadata.packages["../homerail_protocol"].version = "0.1.0-beta.99";
+    }
+    if (metadata.packages?.["../homerail_plugin_sdk"]) {
+      metadata.packages["../homerail_plugin_sdk"].version = "0.1.0-beta.99";
     }
     fs.writeFileSync(filePath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   }

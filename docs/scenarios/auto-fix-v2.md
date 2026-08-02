@@ -30,6 +30,16 @@ predates the runtime and broker support described below.
   and does not use privileged containers. Codex still enforces
   `workspace-write`; Docker mounts, network, cgroups, and HomeRail's post-turn
   path verification remain active.
+- The Worker image contains an immutable dependency cache for the HomeRail
+  protocol, plugin SDK, Manager, and Worker packages. Before a writable Codex
+  dispatch, Worker compares each worktree's dependency-relevant normalized
+  `package.json` and `package-lock.json` with the image-owned copies. Matches receive an
+  ignored `node_modules` facade made only of links into the image; local
+  HomeRail dependencies link back to that dispatch's worktree. A metadata
+  mismatch or an unmarked existing dependency tree is not reused. Agent turns
+  remain network-disabled and should run build/typecheck/test directly rather
+  than `npm ci`. Tasks that change package metadata need a future trusted
+  dependency-update service outside the model container.
 - The DeepSeek aggregator may read and update only the bound Draft PR through
   the `github_pr` Manager broker. `commit_workspace` derives every dirty path
   and byte from the node's single declared writable worktree and publishes one

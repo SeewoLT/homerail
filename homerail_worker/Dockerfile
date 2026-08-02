@@ -43,6 +43,18 @@ RUN npm ci --ignore-scripts
 RUN command -v kimi
 RUN command -v codex && codex --version
 
+# Auto Fix coding Workers run without network access. Keep a trusted dependency
+# cache in the image for the HomeRail packages exercised by implementation and
+# validation. Worker projects it only when the dependency-relevant normalized
+# package.json + package-lock.json metadata matches these image-owned copies.
+RUN mkdir -p /opt/homerail-dependency-cache \
+  && ln -s /homerail_protocol /opt/homerail-dependency-cache/homerail_protocol \
+  && ln -s /app /opt/homerail-dependency-cache/homerail_worker
+COPY homerail_plugin_sdk/package.json homerail_plugin_sdk/package-lock.json* /opt/homerail-dependency-cache/homerail_plugin_sdk/
+RUN cd /opt/homerail-dependency-cache/homerail_plugin_sdk && npm ci
+COPY homerail_manager/package.json homerail_manager/package-lock.json* /opt/homerail-dependency-cache/homerail_manager/
+RUN cd /opt/homerail-dependency-cache/homerail_manager && npm ci
+
 COPY homerail_worker/tsconfig.json ./
 COPY homerail_worker/src ./src
 RUN npm run build
