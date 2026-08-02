@@ -280,6 +280,10 @@ config:
   workspace_strategy: isolated_git_worktree
   workspace_root: workers
   repository_path: repo
+  result_git_commit:
+    commit_field: commit_sha
+    workspace_field: workspace_path
+    require_clean: true
 ```
 
 Its semantics are:
@@ -300,6 +304,10 @@ Its semantics are:
 - only `handoff` is available unless DAG tools are declared explicitly;
 - each child has a unique logical actor, provider session, and isolated
   worktree based on the same immutable source SHA;
+- successful child handoffs are accepted only when the reported workspace is
+  that child's exact worktree, the reported commit exists and equals its HEAD,
+  and the worktree is clean; a syntactically valid but fabricated SHA is
+  rejected before aggregation;
 - child corrections retain the same policy and cannot broaden it;
 - runtime events expose the effective policy digest for audit.
 
@@ -505,7 +513,7 @@ strict v1 template.
    automation, and security-sensitive infrastructure from the first pilot.
 7. Run one real Draft-PR pilot with no auto-ready or merge behavior.
 8. Expand only after at least four of five eligible pilots produce a validated
-   Draft PR within the agreed runtime budget and no capability boundary is
+   Draft PR within the agreed operational time window and no capability boundary is
    violated.
 
 The current Auto Fix workflow can be deprecated only after the pilot evidence

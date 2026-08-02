@@ -534,6 +534,10 @@ spec:
           workspace_access: { writable_paths: [], readonly_paths: [input] }
         workspace_strategy: isolated_git_worktree
         repository_path: repo
+        result_git_commit:
+          commit_field: commit_sha
+          workspace_field: workspace_path
+          require_clean: true
         max_items: 2
         max_parallelism: 1
         completion: all
@@ -558,6 +562,15 @@ spec:
       "writable_paths: ['{{fanout_workspace}}']",
     ));
     expect(declared.valid, declared.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+
+    const shared = compileWorkflowSource(source
+      .replace("writable_paths: []", "writable_paths: ['{{fanout_workspace}}']")
+      .replace("workspace_strategy: isolated_git_worktree", "workspace_strategy: shared"));
+    expect(shared.valid).toBe(false);
+    expect(shared.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_FANOUT_GIT_RESULT_REQUIRES_WORKTREE",
+      path: "/spec/nodes/fan/config/result_git_commit",
+    }));
   });
 
   it("rejects an approval workflow that authorizes its proposer", () => {

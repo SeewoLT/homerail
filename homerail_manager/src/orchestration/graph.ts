@@ -111,6 +111,11 @@ export interface DAGGatewayConfig {
   workspace_root?: string;
   repository_path?: string;
   revision_field?: string;
+  result_git_commit?: {
+    commit_field: string;
+    workspace_field: string;
+    require_clean?: boolean;
+  };
   max_parallelism?: number;
   completion?: "all" | "any" | "n_of_m" | string;
   result_contract?: string;

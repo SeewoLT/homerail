@@ -156,6 +156,38 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         allowed_dag_tools: ["handoff"],
         credentials: [],
       });
+      if (index === 1) {
+        expect(() => handoffActiveRun("autofix-v2-run", nodeId, "result", {
+          status: "implemented",
+          task_id: "runtime",
+          commit_sha: "f".repeat(40),
+          workspace_path: workspacePath,
+          summary: "fabricated commit",
+          tests: [],
+        })).toThrow("DAG_FANOUT_GIT_RESULT_INVALID commit does not exist");
+        expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get(nodeId)).toBe("RUNNING");
+        expect(() => handoffActiveRun("autofix-v2-run", nodeId, "result", {
+          status: "implemented",
+          task_id: "runtime",
+          commit_sha: head,
+          workspace_path: "workers/implement/inv_0001/item_0002",
+          summary: "wrong workspace",
+          tests: [],
+        })).toThrow("DAG_FANOUT_GIT_RESULT_INVALID workspace");
+        expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get(nodeId)).toBe("RUNNING");
+        const dirtyPath = path.join(home, "workspace", "autofix-v2-run", workspacePath, "dirty.tmp");
+        fs.writeFileSync(dirtyPath, "uncommitted");
+        expect(() => handoffActiveRun("autofix-v2-run", nodeId, "result", {
+          status: "implemented",
+          task_id: "runtime",
+          commit_sha: head,
+          workspace_path: workspacePath,
+          summary: "dirty workspace",
+          tests: [],
+        })).toThrow("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree has uncommitted changes");
+        expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get(nodeId)).toBe("RUNNING");
+        fs.rmSync(dirtyPath);
+      }
       handoffActiveRun("autofix-v2-run", nodeId, "result", {
         status: "implemented",
         task_id: index === 1 ? "runtime" : "tests",

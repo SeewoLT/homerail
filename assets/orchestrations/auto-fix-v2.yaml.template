@@ -58,10 +58,6 @@ spec:
           minItems: 1
           maxItems: 30
           items: { type: string, minLength: 1, maxLength: 2000 }
-        dependencies:
-          type: array
-          maxItems: 3
-          items: { type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$' }
 
     TaskPlan:
       type: object
@@ -89,10 +85,6 @@ spec:
                 minItems: 1
                 maxItems: 30
                 items: { type: string, minLength: 1, maxLength: 2000 }
-              dependencies:
-                type: array
-                maxItems: 3
-                items: { type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$' }
         shared:
           type: object
           additionalProperties: false
@@ -202,19 +194,26 @@ spec:
       system: |
         Read /workspace/input/task.md as the immutable authoritative task and
         /workspace/input/pr-context.json as immutable PR identity. Inspect the
-        read-only repository at /workspace/repo. Produce a minimal independent
-        task list. Do not edit files and do not access GitHub. Finish only with
-        handoff(planned) matching TaskPlan. Set shared paths exactly to repo,
-        input/task.md, and input/pr-context.json.
+        read-only repository at /workspace/repo. Produce only implementation
+        tasks that are independently executable in isolated Git worktrees. Do
+        not emit dependency-only verification, coordination, or follow-up tasks;
+        combine coupled changes into one task. Do not edit files or access
+        GitHub. Finish only with handoff(planned), passing content as an object
+        matching exactly:
+        {"tasks":[{"id":"implementation","title":"...","description":"...","files":["..."],"acceptance":["..."]}],"shared":{"repository_path":"repo","task_document":"input/task.md","pr_context":"input/pr-context.json"}}
+        Never use work_items, findings, task, or a JSON-encoded string as the
+        handoff content. Set the three shared paths exactly as shown.
 
     implementer:
       description: DeepSeek V4 Flash isolated implementation worker
       system: |
         Implement only input.item inside input.workspace_path. Read the mounted
         task document for authoritative acceptance criteria. Never access the
-        PR or credentials. Run focused tests, commit the changes in the detached
-        Git worktree, and hand off result with the exact commit SHA and workspace
-        path. Do not modify another worker's directory.
+        PR or credentials. input.workspace_path is a real Git worktree even
+        though .git is a file. Run focused tests and commit from that exact
+        worktree. Never copy changes into /workspace/repo or another worker's
+        directory. Verify git cat-file -e HEAD^{commit} and a clean git status,
+        then hand off result with the exact HEAD SHA and workspace path.
 
     aggregator:
       description: DeepSeek V4 Flash candidate integrator
@@ -314,6 +313,10 @@ spec:
         workspace_strategy: isolated_git_worktree
         workspace_root: workers
         repository_path: repo
+        result_git_commit:
+          commit_field: commit_sha
+          workspace_field: workspace_path
+          require_clean: true
         max_items: 3
         max_parallelism: 3
         completion: all

@@ -143,6 +143,12 @@ Auto Fix v2 Agent node.
 Auto Fix v2 intentionally does not configure any node-level or workflow-level
 tool-call budget. Do not add a fixed tool-call budget to this workflow.
 
+The analyzer may emit only parallel-safe implementation items. It must combine
+coupled work instead of generating a separate verification/dependency worker.
+For every successful worker result, Manager verifies that `workspace_path` is
+the assigned isolated worktree, `commit_sha` exists and is that worktree's
+current HEAD, and the worktree is clean before aggregation can start.
+
 ## Start a local or stable run
 
 ```bash
