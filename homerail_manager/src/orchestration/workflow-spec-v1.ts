@@ -609,6 +609,13 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
           "{{fanout_workspace}} is only available with isolated_git_worktree fanout",
         );
       }
+      if (node.config.result_git_commit && node.config.workspace_strategy !== "isolated_git_worktree") {
+        add(
+          `${nodePath}/config/result_git_commit`,
+          "DAG_SEMANTIC_FANOUT_GIT_RESULT_REQUIRES_WORKTREE",
+          "result_git_commit validation requires isolated_git_worktree fanout",
+        );
+      }
     }
     if (node.kind === "await_command") {
       for (let index = 0; index < (node.config.target_actors ?? []).length; index++) {

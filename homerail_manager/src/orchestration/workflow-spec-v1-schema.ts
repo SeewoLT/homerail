@@ -313,6 +313,11 @@ const FanoutNode = Type.Object({
     workspace_root: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
     repository_path: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
     revision_field: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+    result_git_commit: Type.Optional(Type.Object({
+      commit_field: Identifier,
+      workspace_field: Identifier,
+      require_clean: Type.Optional(Type.Boolean()),
+    }, { additionalProperties: false })),
     max_items: Type.Integer({ minimum: 1, maximum: 256 }),
     max_parallelism: Type.Integer({ minimum: 1, maximum: 256 }),
     completion: Type.Union([Type.Literal("all"), Type.Literal("any"), Type.Literal("n_of_m")]),

@@ -4470,6 +4470,85 @@ function _interruptDynamicNode(run: ActiveRun, nodeId: string): void {
   }
 }
 
+function _assertFanoutGitCommitResult(
+  run: ActiveRun,
+  parent: DAGGraphNode,
+  state: FanoutRuntimeState,
+  index: number,
+  content: unknown,
+): void {
+  const validation = parent.gateway_config?.result_git_commit;
+  if (!validation) return;
+  if (parent.gateway_config?.workspace_strategy !== "isolated_git_worktree") {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID result_git_commit requires isolated_git_worktree");
+  }
+  const commitSha = _fieldValue(content, validation.commit_field);
+  const reportedWorkspace = _fieldValue(content, validation.workspace_field);
+  const expectedWorkspace = _fanoutChildWorkspacePath(parent, state, index);
+  if (reportedWorkspace !== expectedWorkspace) {
+    throw new Error(
+      `DAG_FANOUT_GIT_RESULT_INVALID workspace '${String(reportedWorkspace ?? "")}' does not match '${expectedWorkspace}'`,
+    );
+  }
+  if (typeof commitSha !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID commit SHA is missing or malformed");
+  }
+  const resolved = _commandGatewayCwd(run, RUN_WORKSPACE_CWD);
+  if ("error" in resolved) throw new Error(`DAG_FANOUT_GIT_RESULT_INVALID ${resolved.error}`);
+  const runWorkspace = resolved.cwd;
+  const workspace = path.resolve(runWorkspace, expectedWorkspace);
+  if (!_pathIsWithin(runWorkspace, workspace)) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID workspace escaped the run workspace");
+  }
+  const repositoryPath = parent.gateway_config?.repository_path === "."
+    ? "."
+    : _fanoutSafeRelativePath(parent.gateway_config?.repository_path, "repo");
+  const repository = path.resolve(runWorkspace, repositoryPath);
+  const git = (args: string[], timeout = 10_000) => spawnSync("git", ["-C", workspace, ...args], {
+    encoding: "utf8",
+    timeout,
+    maxBuffer: 256_000,
+    shell: false,
+  });
+  const topLevel = git(["rev-parse", "--show-toplevel"]);
+  const commonDir = git(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const gitDir = git(["rev-parse", "--path-format=absolute", "--git-dir"]);
+  let resolvedTopLevel: string;
+  let resolvedCommonDir: string;
+  let resolvedGitDir: string;
+  let expectedCommonDir: string;
+  try {
+    resolvedTopLevel = realpathSync(String(topLevel.stdout).trim());
+    resolvedCommonDir = realpathSync(String(commonDir.stdout).trim());
+    resolvedGitDir = realpathSync(String(gitDir.stdout).trim());
+    expectedCommonDir = realpathSync(path.join(repository, ".git"));
+  } catch {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree Git metadata could not be resolved");
+  }
+  if (
+    topLevel.status !== 0 || commonDir.status !== 0 || gitDir.status !== 0
+    || resolvedTopLevel !== realpathSync(workspace)
+    || resolvedCommonDir !== expectedCommonDir
+    || !_pathIsWithin(path.join(expectedCommonDir, "worktrees"), resolvedGitDir)
+  ) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree Git binding is invalid");
+  }
+  const exists = git(["cat-file", "-e", `${commitSha.toLowerCase()}^{commit}`]);
+  if (exists.status !== 0 || exists.error) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID commit does not exist in the isolated worktree");
+  }
+  const head = git(["rev-parse", "HEAD"]);
+  if (head.status !== 0 || head.error || String(head.stdout).trim().toLowerCase() !== commitSha.toLowerCase()) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID commit is not the isolated worktree HEAD");
+  }
+  if (validation.require_clean !== false) {
+    const status = git(["status", "--porcelain"]);
+    if (status.status !== 0 || status.error || String(status.stdout).trim()) {
+      throw new Error("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree has uncommitted changes");
+    }
+  }
+}
+
 function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, content: unknown): void {
   const dynamic = child.extra?.dynamic_fanout;
   if (!dynamic || typeof dynamic !== "object" || Array.isArray(dynamic)) return;
@@ -4485,6 +4564,7 @@ function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, c
   const selected = _fieldValue(content, config?.success_field);
   const successValues = config?.success_values ?? [true, "pass", "passed", "success", "approved", "yes", "act"];
   const success = port !== "failed" && (!config?.success_field || successValues.some((value) => value === selected));
+  if (success) _assertFanoutGitCommitResult(run, parent, state, index, content);
   state.results.push({ index, node_id: child.node_id, port, content, success });
   state.results.sort((left, right) => left.index - right.index);
   const successes = state.results.filter((result) => result.success).length;
