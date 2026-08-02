@@ -39,15 +39,7 @@ export function selectAutoFixV2Setting(settings, selector, role) {
   if (!enabled(setting.is_active) || !enabled(setting.supports_llm)) {
     throw new Error(`Auto Fix v2 ${role} model is not an active LLM setting: ${wanted}`);
   }
-  const hasKimiCodeEndpoint = Boolean(
-    text(setting.base_url)
-    || text(setting.provider_base_url)
-    || text(setting.chat_completions_base_url),
-  );
-  if (role === "analyzer" && !hasKimiCodeEndpoint) {
-    throw new Error(`Auto Fix v2 analyzer model has no Kimi Code-compatible endpoint: ${wanted}`);
-  }
-  if (role !== "analyzer" && !text(setting.anthropic_base_url)) {
+  if (!text(setting.anthropic_base_url)) {
     throw new Error(`Auto Fix v2 ${role} model has no Anthropic-compatible endpoint: ${wanted}`);
   }
   return setting;
@@ -67,7 +59,7 @@ export function autoFixV2RuntimeProfileYaml({ profileId, analyzer, implementatio
     "workflow_id: auto-fix-v2",
     "description: K3 analysis, DeepSeek V4 Flash implementation/fix/aggregation, and fresh GLM-5.2 review.",
     "agents:",
-    ...agentEntry("analyzer", analyzer, "kimi_code"),
+    ...agentEntry("analyzer", analyzer, "claude-sdk"),
     ...agentEntry("implementer", implementation, "claude-sdk"),
     ...agentEntry("aggregator", implementation, "claude-sdk"),
     ...agentEntry("fixer", implementation, "claude-sdk"),
