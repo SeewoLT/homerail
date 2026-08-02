@@ -439,6 +439,7 @@ The Manager-side `github_pr` broker implements these first-version actions:
 | Action | Purpose |
 | --- | --- |
 | `pull_request_snapshot` | Return bounded immutable PR metadata and the changed-file inventory |
+| `read_diff` | Return one bounded GitHub PR patch chunk for a changed path on the exact current head |
 | `read_file` | Return one bounded UTF-8 file chunk from the exact current head SHA |
 | `checks_snapshot` | Return bounded checks for the current exact head SHA |
 | `required_checks` | Fail unless every immutable required check succeeds on that head |
@@ -487,6 +488,10 @@ description so a 100-file inventory remains inline in Claude Agent SDK instead
 of being redirected to an SDK-private temporary file outside the reviewer's
 read-only workspace. The reviewer obtains trusted source bytes through
 exact-head `read_file` calls for the inventory paths relevant to its decision.
+The reviewer first calls `read_diff` per inventory path so review cost scales
+with changed hunks rather than whole repository files. GitHub may omit a patch
+for binary or oversized diffs; `patch_available` is explicit and the reviewer
+falls back to exact-head file chunks and acceptance-test evidence.
 `read_file` accepts an optional Unicode-character `offset` and `max_chars`,
 returns `next_offset`, and caps each JSON-escaped content chunk below the SDK
 inline-result threshold. A reviewer can therefore inspect a large UTF-8 source
@@ -506,7 +511,7 @@ the pair and its action-specific input.
 | DeepSeek implementer | isolated worktree | bounded read/write/shell | none |
 | DeepSeek aggregator | integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
 | Exact-head validator | none | Manager runtime only | `validate_head` |
-| GLM reviewer | immutable input only; exact files via broker | Read/Grep/Glob | `pull_request_snapshot`, `read_file`, `checks_snapshot` |
+| GLM reviewer | immutable input only; exact diffs/files via broker | Read/Grep/Glob | `pull_request_snapshot`, `read_diff`, `read_file`, `checks_snapshot` |
 | DeepSeek fixer | fresh integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
 | Finalizer | none | Manager runtime only | `required_checks` |
 

@@ -574,8 +574,10 @@ async function boundPull(context: CredentialBrokerContext): Promise<{
   return { token, binding, pull, state };
 }
 
-export async function githubPullRequestSnapshot(context: CredentialBrokerContext): Promise<unknown> {
-  const { token, binding, pull, state } = await boundPull(context);
+async function githubPullFiles(
+  token: string,
+  binding: GithubPullRequestContext,
+): Promise<Array<Record<string, unknown>>> {
   const files = await githubApi<Array<Record<string, unknown>>>(
     token,
     `${repoPath(binding)}/pulls/${binding.pull_number}/files?per_page=100&page=1`,
@@ -587,6 +589,67 @@ export async function githubPullRequestSnapshot(context: CredentialBrokerContext
     );
     if (overflow.length > 0) throw new Error("GitHub pull request file list exceeds the bounded snapshot");
   }
+  return files;
+}
+
+function boundedTextChunk(
+  text: string,
+  input: Readonly<Record<string, unknown>>,
+  action: string,
+): {
+  offset: number;
+  total_chars: number;
+  content: string;
+  next_offset: number | null;
+  truncated: boolean;
+} {
+  const requestedOffset = input.offset === undefined ? 0 : Number(input.offset);
+  const requestedMaxChars = input.max_chars === undefined
+    ? DEFAULT_READ_FILE_CHARS
+    : Number(input.max_chars);
+  if (!Number.isSafeInteger(requestedOffset) || requestedOffset < 0) {
+    throw new Error(`${action} offset is invalid`);
+  }
+  if (
+    !Number.isSafeInteger(requestedMaxChars)
+    || requestedMaxChars < 1
+    || requestedMaxChars > MAX_READ_FILE_CHARS
+  ) {
+    throw new Error(`${action} max_chars must be between 1 and ${MAX_READ_FILE_CHARS}`);
+  }
+  const characters = Array.from(text);
+  if (requestedOffset > characters.length) throw new Error(`${action} offset exceeds the content length`);
+  const requestedEnd = Math.min(characters.length, requestedOffset + requestedMaxChars);
+  let low = requestedOffset;
+  let high = requestedEnd;
+  let end = requestedOffset;
+  let content = "";
+  while (low <= high) {
+    const candidateEnd = Math.floor((low + high) / 2);
+    const candidate = characters.slice(requestedOffset, candidateEnd).join("");
+    if (Buffer.byteLength(JSON.stringify(candidate), "utf8") <= MAX_READ_FILE_CONTENT_JSON_BYTES) {
+      end = candidateEnd;
+      content = candidate;
+      low = candidateEnd + 1;
+    } else {
+      high = candidateEnd - 1;
+    }
+  }
+  if (requestedOffset < characters.length && end === requestedOffset) {
+    throw new Error(`${action} could not produce a bounded UTF-8 chunk`);
+  }
+  return {
+    offset: requestedOffset,
+    total_chars: characters.length,
+    content,
+    next_offset: end < characters.length ? end : null,
+    truncated: end < characters.length,
+  };
+}
+
+export async function githubPullRequestSnapshot(context: CredentialBrokerContext): Promise<unknown> {
+  const { token, binding, pull, state } = await boundPull(context);
+  const files = await githubPullFiles(token, binding);
   return {
     repository: `${binding.owner}/${binding.repo}`,
     pull_number: binding.pull_number,
@@ -633,41 +696,7 @@ export async function githubReadFile(context: CredentialBrokerContext): Promise<
   if (Buffer.from(text, "utf8").compare(bytes) !== 0 || text.includes("\0")) {
     throw new Error("read_file supports UTF-8 text files only");
   }
-  const requestedOffset = context.input.offset === undefined ? 0 : Number(context.input.offset);
-  const requestedMaxChars = context.input.max_chars === undefined
-    ? DEFAULT_READ_FILE_CHARS
-    : Number(context.input.max_chars);
-  if (!Number.isSafeInteger(requestedOffset) || requestedOffset < 0) {
-    throw new Error("read_file offset is invalid");
-  }
-  if (
-    !Number.isSafeInteger(requestedMaxChars)
-    || requestedMaxChars < 1
-    || requestedMaxChars > MAX_READ_FILE_CHARS
-  ) {
-    throw new Error(`read_file max_chars must be between 1 and ${MAX_READ_FILE_CHARS}`);
-  }
-  const characters = Array.from(text);
-  if (requestedOffset > characters.length) throw new Error("read_file offset exceeds the file length");
-  const requestedEnd = Math.min(characters.length, requestedOffset + requestedMaxChars);
-  let low = requestedOffset;
-  let high = requestedEnd;
-  let end = requestedOffset;
-  let content = "";
-  while (low <= high) {
-    const candidateEnd = Math.floor((low + high) / 2);
-    const candidate = characters.slice(requestedOffset, candidateEnd).join("");
-    if (Buffer.byteLength(JSON.stringify(candidate), "utf8") <= MAX_READ_FILE_CONTENT_JSON_BYTES) {
-      end = candidateEnd;
-      content = candidate;
-      low = candidateEnd + 1;
-    } else {
-      high = candidateEnd - 1;
-    }
-  }
-  if (requestedOffset < characters.length && end === requestedOffset) {
-    throw new Error("read_file could not produce a bounded UTF-8 chunk");
-  }
+  const chunk = boundedTextChunk(text, context.input, "read_file");
   const blobSha = String(file.sha ?? "").toLowerCase();
   if (!SHA.test(blobSha)) throw new Error("read_file GitHub blob SHA is invalid");
   return {
@@ -676,11 +705,34 @@ export async function githubReadFile(context: CredentialBrokerContext): Promise<
     blob_sha: blobSha,
     size: bytes.byteLength,
     sha256: createHash("sha256").update(bytes).digest("hex"),
-    offset: requestedOffset,
-    total_chars: characters.length,
-    content,
-    next_offset: end < characters.length ? end : null,
-    truncated: end < characters.length,
+    ...chunk,
+  };
+}
+
+export async function githubReadDiff(context: CredentialBrokerContext): Promise<unknown> {
+  const { token, binding, state } = await boundPull(context);
+  const expectedHead = String(context.input.expected_head_sha ?? "").toLowerCase();
+  if (!SHA.test(expectedHead)) throw new Error("read_diff expected_head_sha is invalid");
+  if (expectedHead !== state.current_head_sha) throw new Error("read_diff expected head is stale");
+  const pathname = safeRelativePath(context.input.path, "read_diff path");
+  const file = (await githubPullFiles(token, binding)).find((entry) => String(entry.filename ?? "") === pathname);
+  if (!file) throw new Error("read_diff path is not in the bound pull request");
+  const patch = typeof file.patch === "string" ? file.patch : "";
+  const chunk = boundedTextChunk(patch, context.input, "read_diff");
+  return {
+    head_sha: state.current_head_sha,
+    path: pathname,
+    status: String(file.status ?? ""),
+    additions: Number(file.additions ?? 0),
+    deletions: Number(file.deletions ?? 0),
+    changes: Number(file.changes ?? 0),
+    previous_filename: typeof file.previous_filename === "string" ? file.previous_filename : null,
+    patch_available: typeof file.patch === "string",
+    offset: chunk.offset,
+    total_chars: chunk.total_chars,
+    patch: chunk.content,
+    next_offset: chunk.next_offset,
+    truncated: chunk.truncated,
   };
 }
 

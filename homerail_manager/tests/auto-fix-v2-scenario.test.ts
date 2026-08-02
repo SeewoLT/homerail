@@ -454,7 +454,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     });
     expect(initialReview.credentialProjections).toMatchObject([{
       broker: "github_pr",
-      allowed_actions: ["pull_request_snapshot", "read_file", "checks_snapshot"],
+      allowed_actions: ["pull_request_snapshot", "read_diff", "read_file", "checks_snapshot"],
     }]);
     const reviewSessions: string[] = [initialReview.sessionId ?? ""];
     for (const action of ["pull_request_snapshot", "checks_snapshot"]) {

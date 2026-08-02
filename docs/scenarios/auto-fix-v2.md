@@ -56,14 +56,16 @@ predates the runtime and broker support described below.
   `pull_request_snapshot` and `checks_snapshot` reads; it cannot broaden the
   original capability.
 - GLM receives no repository/workers/fixers mount. It reads changed or related
-  UTF-8 source only through `read_file` bound to the exact current PR head, so
+  PR hunks through `read_diff` and UTF-8 source through `read_file`, both bound
+  to the exact current PR head, so
   local dirty integration state cannot influence the verdict. The PR snapshot
   contains a compact changed-file inventory rather than patch bodies; even a
   100-file snapshot stays inline instead of being redirected to an unreadable
   Claude SDK temporary file. `read_file` likewise returns bounded inline UTF-8
   chunks with `next_offset`; reviewers continue the same exact-head path until
   the offset is null, including for source files larger than the old single-call
-  result bound.
+  result bound. `read_diff` uses the same inline chunk contract, keeping the
+  normal review path proportional to changed hunks.
 - Read-only reviewer containers keep `/workspace` read-only and receive one
   nested writable mount only at `/workspace/.homerail-runtime` for trusted
   Worker audit/session telemetry. This prevents audit writer startup from

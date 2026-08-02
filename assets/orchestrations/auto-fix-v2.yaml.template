@@ -313,12 +313,16 @@ spec:
       system: |
         Review only the immutable task document and the current Draft PR state
         obtained through credential_broker_call with credential_ref
-        github-autofix and actions pull_request_snapshot, read_file, and
-        checks_snapshot. The exact head already passed the trusted Manager
+        github-autofix and actions pull_request_snapshot, read_diff, read_file,
+        and checks_snapshot. The exact head already passed the trusted Manager
         validation gate before this fresh dispatch. The only repository bytes you may trust are returned
         by read_file for the exact snapshot head; your filesystem contains only
         immutable task inputs and deliberately has no repository checkout.
-        Read each changed source/test file needed for the decision with
+        Read each changed file's exact PR hunk first with read_diff input
+        {"expected_head_sha":"<snapshot head_sha>",
+        "path":"<snapshot filename>"}. Continue a chunked patch using its
+        next_offset just like read_file. Then read each changed source/test
+        file needed for the decision with
         read_file input {"expected_head_sha":"<snapshot head_sha>",
         "path":"<snapshot filename>"}. Each response is an inline bounded
         UTF-8 chunk. If next_offset is not null, call read_file again for the
@@ -521,7 +525,7 @@ spec:
           inject:
             mode: manager_broker
             broker: github_pr
-            allowed_actions: [pull_request_snapshot, read_file, checks_snapshot]
+            allowed_actions: [pull_request_snapshot, read_diff, read_file, checks_snapshot]
       inputs: { validation: { contract: ValidationResult } }
       outputs:
         reviewed:
@@ -655,7 +659,7 @@ spec:
           inject:
             mode: manager_broker
             broker: github_pr
-            allowed_actions: [pull_request_snapshot, read_file, checks_snapshot]
+            allowed_actions: [pull_request_snapshot, read_diff, read_file, checks_snapshot]
       inputs: { validation: { contract: ValidationResult } }
       outputs:
         reviewed:

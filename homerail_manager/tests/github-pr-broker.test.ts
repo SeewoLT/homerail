@@ -61,7 +61,7 @@ spec:
       kind: agent
       agent: actor
       allowed_dag_tools: [handoff, credential_broker_call]
-      credentials:${binding("pull_request_snapshot, read_file, checks_snapshot, required_checks, validate_head")}
+      credentials:${binding("pull_request_snapshot, read_diff, read_file, checks_snapshot, required_checks, validate_head")}
       inputs: { task: {} }
       outputs:
         reviewed:
@@ -489,6 +489,57 @@ describe("bounded GitHub Draft PR credential broker", () => {
     expect(snapshot.result.files).toHaveLength(100);
     expect(snapshot.result.files.every((file) => !("patch" in file))).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(snapshot), "utf8")).toBeLessThan(32 * 1024);
+  });
+
+  it("reads an exact-head PR patch through bounded inline chunks", async () => {
+    pullPatch = "@@ -1 +1 @@\n-old\n+new\n".repeat(4_000);
+    let offset = 0;
+    let reconstructed = "";
+    let chunks = 0;
+    do {
+      const response = await call("reviewer", "read_diff", {
+        expected_head_sha: INITIAL_HEAD,
+        path: "src/fix-0.ts",
+        offset,
+        max_chars: 24_000,
+      }) as {
+        ok: boolean;
+        result: {
+          head_sha: string;
+          path: string;
+          patch: string;
+          patch_available: boolean;
+          offset: number;
+          next_offset: number | null;
+        };
+      };
+      expect(response).toMatchObject({
+        ok: true,
+        result: {
+          head_sha: INITIAL_HEAD,
+          path: "src/fix-0.ts",
+          patch_available: true,
+          offset,
+        },
+      });
+      expect(Buffer.byteLength(JSON.stringify(response), "utf8")).toBeLessThan(32 * 1024);
+      reconstructed += response.result.patch;
+      chunks += 1;
+      if (response.result.next_offset === null) break;
+      expect(response.result.next_offset).toBeGreaterThan(offset);
+      offset = response.result.next_offset;
+    } while (chunks < 100);
+
+    expect(chunks).toBeGreaterThan(1);
+    expect(reconstructed).toBe(pullPatch);
+    await expect(call("reviewer", "read_diff", {
+      expected_head_sha: "9".repeat(40),
+      path: "src/fix-0.ts",
+    })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("stale") });
+    await expect(call("reviewer", "read_diff", {
+      expected_head_sha: INITIAL_HEAD,
+      path: "src/not-changed.ts",
+    })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("not in the bound pull request") });
   });
 
   it("binds workspace commits to the caller node's sole writable path", async () => {
