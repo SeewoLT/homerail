@@ -95,6 +95,7 @@ describe("bounded GitHub Draft PR credential broker", () => {
   let pullFileCount: number;
   let pullBody: string;
   let pullPatch: string;
+  let readFileContent: string;
   let createdTreeSha: string;
   let checkRunsResponses: Array<Array<Record<string, unknown>>> | undefined;
   let workflowRunsResponses: Array<Array<Record<string, unknown>>> | undefined;
@@ -200,6 +201,7 @@ describe("bounded GitHub Draft PR credential broker", () => {
     pullFileCount = 1;
     pullBody = "Bound task";
     pullPatch = "@@ fake";
+    readFileContent = "export const fixed = true;\n";
     createdTreeSha = NEXT_TREE;
     checkRunsResponses = undefined;
     workflowRunsResponses = undefined;
@@ -241,8 +243,8 @@ describe("bounded GitHub Draft PR credential broker", () => {
         })));
       }
       if (method === "GET" && url.pathname === "/repos/acme/widget/contents/src/fix.ts") {
-        const content = Buffer.from("export const fixed = true;\n").toString("base64");
-        return json({ type: "file", encoding: "base64", content, sha: BLOB, size: 27 });
+        const content = Buffer.from(readFileContent).toString("base64");
+        return json({ type: "file", encoding: "base64", content, sha: BLOB, size: Buffer.byteLength(readFileContent) });
       }
       if (method === "GET" && url.pathname.endsWith("/check-runs")) {
         const queued = checkRunsResponses?.shift();
@@ -398,6 +400,9 @@ describe("bounded GitHub Draft PR credential broker", () => {
         head_sha: INITIAL_HEAD,
         path: "src/fix.ts",
         blob_sha: BLOB,
+        offset: 0,
+        next_offset: null,
+        truncated: false,
         content: "export const fixed = true;\n",
       },
     });
@@ -405,6 +410,58 @@ describe("bounded GitHub Draft PR credential broker", () => {
       expected_head_sha: "9".repeat(40),
       path: "src/fix.ts",
     })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("stale") });
+  });
+
+  it("reads a large exact-head UTF-8 file through bounded inline chunks", async () => {
+    readFileContent = "0123456789\n".repeat(25_000);
+    let offset = 0;
+    let reconstructed = "";
+    let chunks = 0;
+    do {
+      const response = await call("reviewer", "read_file", {
+        expected_head_sha: INITIAL_HEAD,
+        path: "src/fix.ts",
+        offset,
+        max_chars: 24_000,
+      }) as {
+        ok: boolean;
+        result: {
+          content: string;
+          offset: number;
+          next_offset: number | null;
+          total_chars: number;
+          truncated: boolean;
+        };
+      };
+      expect(response.ok).toBe(true);
+      expect(response.result.offset).toBe(offset);
+      expect(Buffer.byteLength(JSON.stringify(response), "utf8")).toBeLessThan(32 * 1024);
+      reconstructed += response.result.content;
+      chunks += 1;
+      if (response.result.next_offset === null) {
+        expect(response.result.truncated).toBe(false);
+        break;
+      }
+      expect(response.result.truncated).toBe(true);
+      expect(response.result.next_offset).toBeGreaterThan(offset);
+      offset = response.result.next_offset;
+    } while (chunks < 100);
+
+    expect(chunks).toBeGreaterThan(1);
+    expect(reconstructed).toBe(readFileContent);
+  });
+
+  it("rejects invalid read_file chunk bounds", async () => {
+    await expect(call("reviewer", "read_file", {
+      expected_head_sha: INITIAL_HEAD,
+      path: "src/fix.ts",
+      offset: -1,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("offset is invalid") });
+    await expect(call("reviewer", "read_file", {
+      expected_head_sha: INITIAL_HEAD,
+      path: "src/fix.ts",
+      max_chars: 24_001,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("max_chars") });
   });
 
   it("accepts exactly 100 PR files but rejects an unbounded second page", async () => {

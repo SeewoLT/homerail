@@ -58,8 +58,10 @@ const OWNER_REPO = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?$/;
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9._-]+$/;
 const MAX_COMMIT_FILES = 64;
 const MAX_COMMIT_BYTES = 1024 * 1024;
-const MAX_READ_FILE_BYTES = 192 * 1024;
-const MAX_READ_FILE_JSON_BYTES = 224 * 1024;
+const MAX_READ_FILE_BYTES = 1024 * 1024;
+const DEFAULT_READ_FILE_CHARS = 16_000;
+const MAX_READ_FILE_CHARS = 24_000;
+const MAX_READ_FILE_CONTENT_JSON_BYTES = 28 * 1024;
 const MAX_PULL_BODY_CHARS = 8_000;
 const MAX_VALIDATION_LOG_CHECKS = 4;
 const MAX_VALIDATION_LOG_DOWNLOAD_BYTES = 512 * 1024;
@@ -631,18 +633,54 @@ export async function githubReadFile(context: CredentialBrokerContext): Promise<
   if (Buffer.from(text, "utf8").compare(bytes) !== 0 || text.includes("\0")) {
     throw new Error("read_file supports UTF-8 text files only");
   }
+  const requestedOffset = context.input.offset === undefined ? 0 : Number(context.input.offset);
+  const requestedMaxChars = context.input.max_chars === undefined
+    ? DEFAULT_READ_FILE_CHARS
+    : Number(context.input.max_chars);
+  if (!Number.isSafeInteger(requestedOffset) || requestedOffset < 0) {
+    throw new Error("read_file offset is invalid");
+  }
+  if (
+    !Number.isSafeInteger(requestedMaxChars)
+    || requestedMaxChars < 1
+    || requestedMaxChars > MAX_READ_FILE_CHARS
+  ) {
+    throw new Error(`read_file max_chars must be between 1 and ${MAX_READ_FILE_CHARS}`);
+  }
+  const characters = Array.from(text);
+  if (requestedOffset > characters.length) throw new Error("read_file offset exceeds the file length");
+  const requestedEnd = Math.min(characters.length, requestedOffset + requestedMaxChars);
+  let low = requestedOffset;
+  let high = requestedEnd;
+  let end = requestedOffset;
+  let content = "";
+  while (low <= high) {
+    const candidateEnd = Math.floor((low + high) / 2);
+    const candidate = characters.slice(requestedOffset, candidateEnd).join("");
+    if (Buffer.byteLength(JSON.stringify(candidate), "utf8") <= MAX_READ_FILE_CONTENT_JSON_BYTES) {
+      end = candidateEnd;
+      content = candidate;
+      low = candidateEnd + 1;
+    } else {
+      high = candidateEnd - 1;
+    }
+  }
+  if (requestedOffset < characters.length && end === requestedOffset) {
+    throw new Error("read_file could not produce a bounded UTF-8 chunk");
+  }
   const blobSha = String(file.sha ?? "").toLowerCase();
   if (!SHA.test(blobSha)) throw new Error("read_file GitHub blob SHA is invalid");
-  if (Buffer.byteLength(JSON.stringify(text), "utf8") > MAX_READ_FILE_JSON_BYTES) {
-    throw new Error("read_file escaped text exceeds the bounded broker result");
-  }
   return {
     head_sha: state.current_head_sha,
     path: pathname,
     blob_sha: blobSha,
     size: bytes.byteLength,
     sha256: createHash("sha256").update(bytes).digest("hex"),
-    content: text,
+    offset: requestedOffset,
+    total_chars: characters.length,
+    content,
+    next_offset: end < characters.length ? end : null,
+    truncated: end < characters.length,
   };
 }
 

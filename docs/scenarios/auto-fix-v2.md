@@ -60,7 +60,10 @@ predates the runtime and broker support described below.
   local dirty integration state cannot influence the verdict. The PR snapshot
   contains a compact changed-file inventory rather than patch bodies; even a
   100-file snapshot stays inline instead of being redirected to an unreadable
-  Claude SDK temporary file.
+  Claude SDK temporary file. `read_file` likewise returns bounded inline UTF-8
+  chunks with `next_offset`; reviewers continue the same exact-head path until
+  the offset is null, including for source files larger than the old single-call
+  result bound.
 - Read-only reviewer containers keep `/workspace` read-only and receive one
   nested writable mount only at `/workspace/.homerail-runtime` for trusted
   Worker audit/session telemetry. This prevents audit writer startup from

@@ -439,7 +439,7 @@ The Manager-side `github_pr` broker implements these first-version actions:
 | Action | Purpose |
 | --- | --- |
 | `pull_request_snapshot` | Return bounded immutable PR metadata and the changed-file inventory |
-| `read_file` | Return bounded UTF-8 file bytes from the exact current head SHA |
+| `read_file` | Return one bounded UTF-8 file chunk from the exact current head SHA |
 | `checks_snapshot` | Return bounded checks for the current exact head SHA |
 | `required_checks` | Fail unless every immutable required check succeeds on that head |
 | `validate_head` | Optionally dispatch trusted validation and wait for required checks on one exact head |
@@ -487,6 +487,11 @@ description so a 100-file inventory remains inline in Claude Agent SDK instead
 of being redirected to an SDK-private temporary file outside the reviewer's
 read-only workspace. The reviewer obtains trusted source bytes through
 exact-head `read_file` calls for the inventory paths relevant to its decision.
+`read_file` accepts an optional Unicode-character `offset` and `max_chars`,
+returns `next_offset`, and caps each JSON-escaped content chunk below the SDK
+inline-result threshold. A reviewer can therefore inspect a large UTF-8 source
+file without receiving a host path it is forbidden to read. The broker still
+hashes and binds the complete exact-head file and rejects files above 1 MiB.
 The tool schema enumerates the credential references and action names actually
 projected into that dispatch, and its description lists the valid
 credential/action pairs. Trusted runtime validation remains authoritative for

@@ -320,7 +320,10 @@ spec:
         immutable task inputs and deliberately has no repository checkout.
         Read each changed source/test file needed for the decision with
         read_file input {"expected_head_sha":"<snapshot head_sha>",
-        "path":"<snapshot filename>"}.
+        "path":"<snapshot filename>"}. Each response is an inline bounded
+        UTF-8 chunk. If next_offset is not null, call read_file again for the
+        same path and head with "offset":<next_offset> until next_offset is
+        null. Never try to read a provider SDK temporary tool-result path.
         Every dispatch is a fresh provider session: do not rely on prior chat.
         Confirm the broker snapshot head equals input.validation.head_sha.
         Never use the broker name github_pr as credential_ref.
