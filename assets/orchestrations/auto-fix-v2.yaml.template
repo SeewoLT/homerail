@@ -212,7 +212,7 @@ spec:
     FixResult:
       type: object
       additionalProperties: false
-      required: [status, previous_head_sha, head_sha, manifest_sha256, summary, tests]
+      required: [status, previous_head_sha, summary, tests]
       properties:
         status: { type: string, enum: [fixed, cannot_fix] }
         previous_head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
@@ -223,6 +223,15 @@ spec:
           type: array
           maxItems: 30
           items: { type: string, minLength: 1, maxLength: 2000 }
+      allOf:
+        - if:
+            required: [status]
+            properties: { status: { const: fixed } }
+          then:
+            required: [head_sha, manifest_sha256]
+            properties:
+              head_sha: {}
+              manifest_sha256: {}
 
   artifacts:
     - name: task-plan.json
@@ -342,6 +351,11 @@ spec:
         "head_sha":"<commit result head_sha>",
         "manifest_sha256":"<commit result manifest_sha256>",
         "summary":"<bounded fix summary>","tests":["<test evidence>"]}.
+        If no safe change can be published within the immutable PR path
+        allowlist, leave the worktree clean, do not call commit_workspace, and
+        hand off exactly {"status":"cannot_fix",
+        "previous_head_sha":"<snapshot head_sha>",
+        "summary":"<bounded blocker summary>","tests":["<test evidence>"]}.
         The snapshot tool
         arguments are exactly {"credential_ref":"github-autofix",
         "action":"pull_request_snapshot","input":{}}.
@@ -567,7 +581,7 @@ spec:
           - credential_ref: github-autofix
             broker: github_pr
             action: pull_request_snapshot
-            when: { field: status, equals: fixed }
+            result_binding: { result_field: head_sha, content_field: previous_head_sha }
           - credential_ref: github-autofix
             broker: github_pr
             action: commit_workspace

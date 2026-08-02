@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DAGDispatcher, DispatchEnvelope } from "../src/orchestration/dag-dispatcher.js";
 import { GraphExecutor } from "../src/orchestration/graph-executor.js";
+import { validateJsonContract } from "../src/orchestration/json-contract.js";
 import { parseWorkflowSource } from "../src/orchestration/workflow-spec-v1.js";
 import { createCredential } from "../src/persistence/credentials.js";
 import { closeDb } from "../src/persistence/db.js";
@@ -153,6 +154,21 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     expect(parsed.meta.agents?.fixer?.system).toMatch(
       /containing exactly\s+\{"status":"fixed","previous_head_sha":"<snapshot head_sha>"/,
     );
+    expect(parsed.meta.agents?.fixer?.system).toMatch(
+      /If no safe change can be published[\s\S]*"status":"cannot_fix"/,
+    );
+    expect(validateJsonContract(parsed.meta.contracts?.FixResult, {
+      status: "cannot_fix",
+      previous_head_sha: head,
+      summary: "outside immutable path allowlist",
+      tests: ["focused test passed"],
+    })).toMatchObject({ valid: true });
+    expect(validateJsonContract(parsed.meta.contracts?.FixResult, {
+      status: "fixed",
+      previous_head_sha: head,
+      summary: "missing publish receipt fields",
+      tests: [],
+    })).toMatchObject({ valid: false });
     for (const agentId of ["aggregator", "reviewer", "fixer"] as const) {
       expect(parsed.meta.agents?.[agentId]?.system).toMatch(/credential_ref\s+github-autofix/);
       expect(parsed.meta.agents?.[agentId]?.system).toMatch(/broker name\s+github_pr/);
@@ -169,6 +185,31 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         ...(nodeId === "implement" ? { result_git_commit: { commit_mode: "manager" } } : {}),
       });
     }
+    expect(parsed.graph.nodes.find((node) => node.node_id === "fix")?.gateway_config)
+      .toMatchObject({
+        result_required_broker_actions: [
+          {
+            credential_ref: "github-autofix",
+            broker: "github_pr",
+            action: "pull_request_snapshot",
+            result_binding: { result_field: "head_sha", content_field: "previous_head_sha" },
+          },
+          {
+            credential_ref: "github-autofix",
+            broker: "github_pr",
+            action: "commit_workspace",
+            when: { field: "status", equals: "fixed" },
+            result_binding: { result_field: "head_sha", content_field: "head_sha" },
+          },
+          {
+            credential_ref: "github-autofix",
+            broker: "github_pr",
+            action: "commit_workspace",
+            when: { field: "status", equals: "fixed" },
+            result_binding: { result_field: "manifest_sha256", content_field: "manifest_sha256" },
+          },
+        ],
+      });
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
 
     const task = stageDagRunInputArtifact({

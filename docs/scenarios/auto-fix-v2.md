@@ -44,8 +44,10 @@ predates the runtime and broker support described below.
   the `github_pr` Manager broker. `commit_workspace` derives every dirty path
   and byte from the node's single declared writable worktree and publishes one
   commit, so the model cannot omit a file or spend output context on base64.
-  Manager rejects the Candidate/FixResult unless both `head_sha` and
-  `manifest_sha256` match that exact broker result.
+  Manager rejects every successful Candidate/FixResult unless both `head_sha`
+  and `manifest_sha256` match that exact broker result. A `cannot_fix` result
+  instead binds `previous_head_sha` to the exact PR snapshot and requires no
+  fabricated commit manifest.
 - GLM-5.2 reviewer nodes have `session_scope: dispatch`; every re-entry gets a
   new provider session and no portable checkpoint/transcript. A rejected
   handoff-contract correction stays in that same logical dispatch so valid
