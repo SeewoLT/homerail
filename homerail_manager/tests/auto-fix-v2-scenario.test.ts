@@ -84,8 +84,9 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     const source = fs.readFileSync(TEMPLATE, "utf8");
     const parsed = parseWorkflowSource(source);
     expect(parsed.meta.workflow_id).toBe("auto-fix-v2");
-    expect(parsed.graph.nodes).toHaveLength(8);
+    expect(parsed.graph.nodes).toHaveLength(7);
     expect(parsed.graph.edges.length).toBeLessThanOrEqual(28);
+    expect(parsed.meta.agents?.analyzer).toBeUndefined();
     expect(source).not.toMatch(/\bmax_[a-z_]*tool_calls[a-z_]*:/);
     for (const nodeId of ["implement", "fix"]) {
       expect(parsed.graph.nodes.find((node) => node.node_id === nodeId)?.gateway_config).toMatchObject({
@@ -123,27 +124,36 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         required_checks: ["unit"],
       }),
     });
+    const taskPlanContent = {
+      version: 1,
+      task_document_sha256: task.sha256,
+      tasks: [
+        { id: "runtime", title: "Runtime", description: "Implement runtime", files: ["src/runtime.ts"], acceptance: ["passes"] },
+        { id: "tests", title: "Tests", description: "Add tests", files: ["tests/runtime.test.ts"], acceptance: ["passes"] },
+      ],
+      shared: {
+        repository_path: "repo",
+        task_document: "input/task.md",
+        task_plan: "input/task-plan.json",
+        pr_context: "input/pr-context.json",
+      },
+    };
+    const taskPlan = stageDagRunInputArtifact({
+      scope_id: "pilot",
+      name: "task-plan.json",
+      media_type: "application/json",
+      content: JSON.stringify(taskPlanContent),
+    });
     const bindings = resolveDagRunInputBindings("pilot", [
       { artifact_id: task.artifact_id, logical_name: "task_document", mount_path: "input/task.md" },
+      { artifact_id: taskPlan.artifact_id, logical_name: "task_plan", mount_path: "input/task-plan.json" },
       { artifact_id: pr.artifact_id, logical_name: "pr_context", mount_path: "input/pr-context.json" },
     ]);
     createActiveRun("autofix-v2-run", parsed, { initialPrompt: "{}", inputArtifacts: bindings });
     const dispatcher = new ReentrantDispatcher();
     const executor = new GraphExecutor(dispatcher);
 
-    handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", {
-      repository_path: "repo",
-      head,
-    });
-    executor.tick("autofix-v2-run");
-    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("analyze");
-    handoffActiveRun("autofix-v2-run", "analyze", "planned", {
-      tasks: [
-        { id: "runtime", title: "Runtime", description: "Implement runtime", acceptance: ["passes"] },
-        { id: "tests", title: "Tests", description: "Add tests", acceptance: ["passes"] },
-      ],
-      shared: { repository_path: "repo", task_document: "input/task.md", pr_context: "input/pr-context.json" },
-    });
+    handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", taskPlanContent);
     executor.tick("autofix-v2-run");
     expect(dispatcher.dispatched.filter((entry) => entry.nodeId.startsWith("implement__item_"))).toHaveLength(2);
     for (let index = 1; index <= 2; index++) {
@@ -353,6 +363,6 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     });
     expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("review_gate")).toBe("COMPLETED");
     expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.some((node) => node.node_id.includes("inv_0005"))).toBe(false);
-    expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes).toHaveLength(14);
+    expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes).toHaveLength(13);
   });
 });

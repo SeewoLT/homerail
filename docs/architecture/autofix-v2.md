@@ -42,7 +42,7 @@ to stand in for durable task state and deterministic evidence.
 - Bind every run to an immutable, content-addressed task document.
 - Bind every mutable PR operation to an exact repository, PR number, branch,
   base SHA, and expected head SHA.
-- Use K3 to produce a bounded work plan.
+- Require the trusted caller to supply a bounded, immutable work plan.
 - Dynamically fan out one to three independent DeepSeek V4 Flash implementers.
 - Use a DeepSeek V4 Flash aggregator to integrate worker patches.
 - Use a fresh-context GLM-5.2 reviewer for every review round.
@@ -63,7 +63,7 @@ to stand in for durable task state and deterministic evidence.
 - Mounting arbitrary caller-selected host paths into Workers.
 - Supporting fork pull requests, cross-repository changes, or multiple PRs in
   the first release.
-- Letting the planner emit arbitrary graph patches. The first release supports
+- Letting the caller emit arbitrary graph patches. The first release supports
   a bounded list of parallel-safe work items only.
 - Replacing the current Auto Fix workflow before the pilot gates pass.
 
@@ -90,9 +90,9 @@ to stand in for durable task state and deterministic evidence.
 ## Proposed Flow
 
 ```text
-caller creates immutable task input and identifies an existing Draft PR
+caller creates immutable task + task-plan inputs and identifies an existing Draft PR
   -> bind task SHA + immutable PR base/head snapshot
-  -> K3 planner emits 1..3 parallel-safe WorkItems
+  -> validate the caller-authored 1..3 parallel-safe WorkItems
   -> dynamic DeepSeek implementers work in isolated worktrees
   -> deterministic patch collection and safety checks
   -> DeepSeek aggregator integrates patches in declared order
@@ -155,6 +155,11 @@ It returns an immutable descriptor:
       "artifact_id": "run-input-...",
       "logical_name": "task_document",
       "mount_path": "input/task.md"
+    },
+    {
+      "artifact_id": "run-input-plan-...",
+      "logical_name": "task_plan",
+      "mount_path": "input/task-plan.json"
     }
   ]
 }
@@ -180,7 +185,8 @@ The task document itself should contain the objective, constraints, detailed
 design, acceptance criteria, excluded paths, and required validation. PR
 metadata belongs in the structured run input, not in the document body. Use the
 [`Auto Fix v2 task template`](../scenarios/auto-fix-v2-task-template.md) as the
-caller-facing authoring contract.
+caller-facing authoring contract. The caller also supplies a versioned
+`task-plan.json` whose `task_document_sha256` binds it to that exact document.
 
 ## PR Binding
 
@@ -238,10 +244,10 @@ Every finding must have a stable id, severity, file, optional line, evidence,
 and a concrete expected correction. The fixer reports which finding ids it
 resolved or rejected.
 
-### Planner restrictions
+### Caller-authored plan restrictions
 
-The K3 planner may emit one to three work items. In the first release every item
-must be parallel-safe:
+The trusted caller may supply one to three work items. In the first release
+every item must be parallel-safe:
 
 - no dependencies on another work item's uncommitted output;
 - an explicit allowed-path set;
@@ -249,8 +255,9 @@ must be parallel-safe:
 - a declared integration order;
 - overlapping paths identified as a conflict risk.
 
-If the task cannot be represented safely, the planner emits one combined work
-item or `needs_human`. It does not request arbitrary dynamic nodes or edges.
+If the task cannot be represented safely, the caller supplies one combined
+work item or does not start the run. The plan cannot request arbitrary dynamic
+nodes or edges.
 
 ## Secure Dynamic Fan-Out
 
@@ -423,7 +430,7 @@ secrets. It must reject calls from nodes that lack both the
 | Role | Repository workspace | Built-in tools | PR broker |
 | --- | --- | --- | --- |
 | Binder | trusted command | fixed command only | `pull_request_snapshot` |
-| K3 planner | read-only evidence | Read/Grep/Glob | none |
+| Caller plan validator | trusted command | fixed command only | none |
 | DeepSeek implementer | isolated worktree | bounded read/write/shell | none |
 | DeepSeek aggregator | integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_files` |
 | GLM reviewer | read-only snapshot/evidence | Read/Grep/Glob | `pull_request_snapshot`, `checks_snapshot`, `required_checks` |
@@ -441,7 +448,6 @@ profile:
 
 | Agent role | Required setting |
 | --- | --- |
-| `planner` | K3 |
 | `implementer` | DeepSeek V4 Flash |
 | `aggregator` | DeepSeek V4 Flash |
 | `fixer` | DeepSeek V4 Flash |

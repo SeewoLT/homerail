@@ -25,7 +25,7 @@ Implemented in the MVP:
 - generic conditional output handoff requirements backed by same-dispatch
   Manager-broker action receipts, used to prevent `approve` when an immutable
   required check is missing or unsuccessful;
-- an opt-in eight-static-node `auto-fix-v2` WorkflowSpec, mixed-model profile
+- an opt-in seven-static-node `auto-fix-v2` WorkflowSpec, mixed-model profile
   configurator, CLI input staging, operator runbook, and deterministic fake
   remote/recovery proof.
 
@@ -34,8 +34,8 @@ Required before the first real Issue #172 pilot:
 - create the same-repository Draft PR and immutable `pr-context.json`;
 - install `github-autofix` as an encrypted fine-grained PAT or GitHub App
   credential;
-- verify the stable Manager still has active, runnable K3, DeepSeek V4 Flash,
-  and GLM-5.2 settings after deploying the v2-capable release;
+- verify the stable Manager still has active, runnable DeepSeek V4 Flash and
+  GLM-5.2 settings after deploying the v2-capable release;
 - sync the opt-in workflow and mixed-model profile, then run a
   broker-write-disabled real PR snapshot dry run;
 - configure immutable exact required-check names in `pr-context.json` and
@@ -47,8 +47,10 @@ Required before the first real Issue #172 pilot:
 
 Deliver a manual `auto-fix-v2` workflow in which:
 
-- a caller stages an immutable local task document and binds it to a Draft PR;
-- K3 creates a bounded plan of one to three parallel-safe work items;
+- a caller stages an immutable local task document, a bound task plan, and a
+  Draft PR context;
+- the DAG validates and executes the caller-authored one to three parallel-safe
+  work items without repeating analysis inside the execution graph;
 - dynamically created DeepSeek V4 Flash implementers work without remote
   credentials in isolated worktrees;
 - a DeepSeek V4 Flash aggregator integrates their patches;
@@ -244,9 +246,10 @@ Tests:
 - [ ] Require stable finding ids and exact source/head SHAs.
 - [ ] Reject incomplete success handoffs rather than synthesizing success.
 
-### AFV2-502: Build the planner and implementation fan-out
+### AFV2-502: Validate the caller plan and build implementation fan-out
 
-- [ ] K3 emits one to three independent WorkItems or `needs_human`.
+- [ ] Require a versioned immutable `task_plan` with one to three independent
+      WorkItems bound to `task_document_sha256`.
 - [ ] Reject arbitrary graph mutation and dependent parallel tasks.
 - [ ] Dynamically create one DeepSeek V4 Flash implementer per item.
 - [ ] Run each child in its isolated worktree without a PR broker.
@@ -278,7 +281,6 @@ Tests:
 
 ### AFV2-505: Add the mixed-model runtime profile
 
-- [ ] Resolve one active K3 setting for `planner`.
 - [ ] Resolve one active DeepSeek V4 Flash setting for `implementer`,
       `aggregator`, and `fixer`.
 - [ ] Resolve one active GLM-5.2 setting for `reviewer`.

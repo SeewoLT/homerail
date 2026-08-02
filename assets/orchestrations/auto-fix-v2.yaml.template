@@ -10,18 +10,19 @@ metadata:
 
 spec:
   description: |
-    A document-first Auto Fix workflow. A K3 analyzer creates a bounded task
-    plan, dynamic DeepSeek V4 Flash workers implement isolated sub-tasks, one
-    DeepSeek aggregator publishes a candidate through the GitHub broker, and a
-    fresh-context GLM-5.2 reviewer drives at most five total review rounds.
-    Revisions are performed by newly generated DeepSeek workers. The immutable
-    task document and PR binding are mounted below /workspace/input.
+    A document-first Auto Fix workflow. The trusted caller supplies a bounded,
+    immutable worker plan; dynamic DeepSeek V4 Flash workers implement its
+    isolated sub-tasks, one DeepSeek aggregator publishes a candidate through
+    the GitHub broker, and a fresh-context GLM-5.2 reviewer drives at most five
+    total review rounds. Revisions are performed by newly generated DeepSeek
+    workers. The immutable task document, worker plan, and PR binding are
+    mounted below /workspace/input.
 
   workspace: { mode: shared }
 
   pattern:
     id: auto-fix-v2
-    version: 2.0.0
+    version: 2.1.0
     source: HomeRail document-first dynamic worker review loop
     parameters:
       max_plan_items: 3
@@ -33,24 +34,17 @@ spec:
     Start:
       type: object
 
-    RepositoryReady:
-      type: object
-      additionalProperties: false
-      required: [repository_path, head]
-      properties:
-        repository_path: { type: string, const: repo }
-        head: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
-
     TaskItem:
       type: object
       additionalProperties: false
-      required: [id, title, description, acceptance]
+      required: [id, title, description, files, acceptance]
       properties:
         id: { type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$' }
         title: { type: string, minLength: 1, maxLength: 300 }
         description: { type: string, minLength: 1, maxLength: 6000 }
         files:
           type: array
+          minItems: 1
           maxItems: 50
           items: { type: string, minLength: 1, maxLength: 1000 }
         acceptance:
@@ -62,8 +56,10 @@ spec:
     TaskPlan:
       type: object
       additionalProperties: false
-      required: [tasks, shared]
+      required: [version, task_document_sha256, tasks, shared]
       properties:
+        version: { type: integer, const: 1 }
+        task_document_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
         tasks:
           type: array
           minItems: 1
@@ -71,13 +67,14 @@ spec:
           items:
             type: object
             additionalProperties: false
-            required: [id, title, description, acceptance]
+            required: [id, title, description, files, acceptance]
             properties:
               id: { type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$' }
               title: { type: string, minLength: 1, maxLength: 300 }
               description: { type: string, minLength: 1, maxLength: 6000 }
               files:
                 type: array
+                minItems: 1
                 maxItems: 50
                 items: { type: string, minLength: 1, maxLength: 1000 }
               acceptance:
@@ -88,10 +85,11 @@ spec:
         shared:
           type: object
           additionalProperties: false
-          required: [repository_path, task_document, pr_context]
+          required: [repository_path, task_document, task_plan, pr_context]
           properties:
             repository_path: { type: string, const: repo }
             task_document: { type: string, const: input/task.md }
+            task_plan: { type: string, const: input/task-plan.json }
             pr_context: { type: string, const: input/pr-context.json }
 
     WorkerResult:
@@ -166,7 +164,7 @@ spec:
 
   artifacts:
     - name: task-plan.json
-      source: { type: handoff, node: analyze, port: planned }
+      source: { type: handoff, node: prepare_repository, port: ready }
       media_type: application/json
       contract: TaskPlan
       required: true
@@ -189,31 +187,18 @@ spec:
       publish: success
 
   agents:
-    analyzer:
-      description: K3 task analyst
-      system: |
-        Read /workspace/input/task.md as the immutable authoritative task and
-        /workspace/input/pr-context.json as immutable PR identity. Inspect the
-        read-only repository at /workspace/repo. Produce only implementation
-        tasks that are independently executable in isolated Git worktrees. Do
-        not emit dependency-only verification, coordination, or follow-up tasks;
-        combine coupled changes into one task. Do not edit files or access
-        GitHub. Finish only with handoff(planned), passing content as an object
-        matching exactly:
-        {"tasks":[{"id":"implementation","title":"...","description":"...","files":["..."],"acceptance":["..."]}],"shared":{"repository_path":"repo","task_document":"input/task.md","pr_context":"input/pr-context.json"}}
-        Never use work_items, findings, task, or a JSON-encoded string as the
-        handoff content. Set the three shared paths exactly as shown.
-
     implementer:
       description: DeepSeek V4 Flash isolated implementation worker
       system: |
-        Implement only input.item inside input.workspace_path. Read the mounted
-        task document for authoritative acceptance criteria. Never access the
-        PR or credentials. input.workspace_path is a real Git worktree even
-        though .git is a file. Run focused tests and commit from that exact
-        worktree. Never copy changes into /workspace/repo or another worker's
-        directory. Verify git cat-file -e HEAD^{commit} and a clean git status,
-        then hand off result with the exact HEAD SHA and workspace path.
+        Implement only the caller-authored input.item inside
+        input.workspace_path. The immutable task plan owns worker division;
+        read the mounted task document for global acceptance criteria. Never
+        access the PR or credentials. input.workspace_path is a real Git
+        worktree even though .git is a file. Run focused tests and commit from
+        that exact worktree. Never copy changes into /workspace/repo or another
+        worker's directory. Verify git cat-file -e HEAD^{commit} and a clean
+        git status, then hand off result with the exact HEAD SHA and workspace
+        path.
 
     aggregator:
       description: DeepSeek V4 Flash candidate integrator
@@ -256,7 +241,7 @@ spec:
     prepare_repository:
       kind: command
       inputs: { start: { contract: Start } }
-      outputs: { ready: { contract: RepositoryReady }, failed: {} }
+      outputs: { ready: { contract: TaskPlan }, failed: {} }
       config:
         command:
           - node
@@ -267,8 +252,12 @@ spec:
             const fail=m=>{throw new Error(m)};
             if(ctx.version!==1||ctx.clone_url!==`https://github.com/${ctx.owner}/${ctx.repo}.git`)fail('clone_url does not match repository');
             if(!ctx.base_ref||!ctx.head_ref)fail('missing branch binding');
-            const task=fs.readFileSync(process.argv[2]);
-            if(crypto.createHash('sha256').update(task).digest('hex')!==ctx.task_document_sha256)fail('task document digest mismatch');
+            const task=fs.readFileSync(process.argv[2]),plan=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));
+            const taskDigest=crypto.createHash('sha256').update(task).digest('hex');
+            if(taskDigest!==ctx.task_document_sha256)fail('task document digest mismatch');
+            if(plan.version!==1||plan.task_document_sha256!==taskDigest)fail('task plan identity mismatch');
+            const shared=plan&&plan.shared;
+            if(!shared||shared.repository_path!=='repo'||shared.task_document!=='input/task.md'||shared.task_plan!=='input/task-plan.json'||shared.pr_context!=='input/pr-context.json')fail('task plan shared paths mismatch');
             if(!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(ctx.initial_head_sha||''))fail('invalid head');
             const run=a=>{const r=cp.spawnSync('git',a,{encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});if(r.status!==0)fail(String(r.stderr||r.error));return String(r.stdout).trim()};
             if(!fs.existsSync('repo/.git'))run(['clone','--no-checkout','--',ctx.clone_url,'repo']);
@@ -276,25 +265,16 @@ spec:
             run(['-C','repo','checkout','--detach',ctx.initial_head_sha]);
             const head=run(['-C','repo','rev-parse','HEAD']).toLowerCase();
             if(head!==ctx.initial_head_sha.toLowerCase())fail('checkout head mismatch');
-            process.stdout.write(JSON.stringify({repository_path:'repo',head}));
+            process.stdout.write(JSON.stringify(plan));
           - $run_input/pr_context
           - $run_input/task_document
+          - $run_input/task_plan
         cwd: $run_workspace
         timeout_ms: 180000
         parse_stdout: json
         result_payload: value
         success_port: ready
         failure_port: failed
-
-    analyze:
-      kind: agent
-      agent: analyzer
-      session_scope: dispatch
-      workspace_access: { writable_paths: [], readonly_paths: [input, repo] }
-      allowed_builtin_tools: [Glob, Grep, LS, Read]
-      allowed_dag_tools: [handoff]
-      inputs: { repository: { contract: RepositoryReady } }
-      outputs: { planned: { contract: TaskPlan }, failed: {} }
 
     implement:
       kind: fanout
@@ -443,7 +423,6 @@ spec:
 
     done: { kind: terminal, outcome: success, inputs: { result: {} } }
     preparation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
-    analysis_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     implementation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     aggregation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     initial_review_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
@@ -453,10 +432,8 @@ spec:
 
   edges:
     - { from: $run.input, to: prepare_repository.start }
-    - { from: prepare_repository.ready, to: analyze.repository }
+    - { from: prepare_repository.ready, to: implement.plan }
     - { from: prepare_repository.failed, to: preparation_failed.result, condition: on_failure }
-    - { from: analyze.planned, to: implement.plan }
-    - { from: analyze.failed, to: analysis_failed.result, condition: on_failure }
     - { from: implement.implemented, to: aggregate.workers }
     - { from: implement.failed, to: implementation_failed.result, condition: on_failure }
     - { from: aggregate.candidate, to: review_initial.candidate }

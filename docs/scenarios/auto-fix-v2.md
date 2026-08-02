@@ -11,10 +11,11 @@ predates the runtime and broker support described below.
 
 ## What is enforced
 
-- `task_document` and `pr_context` are staged as content-addressed Manager
-  artifacts and projected read-only below `/workspace/input`.
-- K3 analyzes the task. Dynamic DeepSeek V4 Flash implementers receive isolated
-  Git worktrees and no GitHub credential. Their worker policy must explicitly
+- `task_document`, `task_plan`, and `pr_context` are staged as content-addressed
+  Manager artifacts and projected read-only below `/workspace/input`.
+- The trusted caller owns worker decomposition. Dynamic DeepSeek V4 Flash
+  implementers receive the validated plan, isolated Git worktrees, and no
+  GitHub credential. Their worker policy must explicitly
   declare `{{fanout_workspace}}`; Manager resolves it to the unique child
   worktree, so isolation never creates an implicit write grant.
 - The DeepSeek aggregator may read and update only the bound Draft PR through
@@ -123,29 +124,63 @@ unreachable Git objects, but cannot advance the PR. Operators should respect
 GitHub rate limits and retry only after re-reading the bound PR head; the broker
 reconciles a pending update during recovery.
 
+## Immutable task plan
+
+The Manager Agent or another trusted caller must turn the reviewed task
+document into this fixed `task_plan` input before starting the DAG:
+
+```json
+{
+  "version": 1,
+  "task_document_sha256": "64-character-sha256-of-task.md",
+  "tasks": [
+    {
+      "id": "implementation",
+      "title": "One parallel-safe implementation unit",
+      "description": "Exact scope and implementation direction",
+      "files": ["path/to/expected-file.ts"],
+      "acceptance": ["Observable focused check"]
+    }
+  ],
+  "shared": {
+    "repository_path": "repo",
+    "task_document": "input/task.md",
+    "task_plan": "input/task-plan.json",
+    "pr_context": "input/pr-context.json"
+  }
+}
+```
+
+The command gateway verifies the document digest and the exact shared paths;
+the WorkflowSpec contract enforces one to three bounded tasks. Dependent work
+must be combined into one item. Because this plan is a content-addressed run
+input, dynamic worker count and division cannot drift with Agent conversation
+history.
+
 ## Model profile
 
 The stable Manager must contain active Anthropic-compatible settings whose
-identities match K3, DeepSeek V4 Flash, and GLM-5.2. Configure the profile with:
+identities match DeepSeek V4 Flash and GLM-5.2. Configure the profile with:
 
 ```bash
-export HOMERAIL_AUTO_FIX_V2_ANALYZER_MODEL='<K3 setting id>'
 export HOMERAIL_AUTO_FIX_V2_IMPLEMENTATION_MODEL='<DeepSeek V4 Flash setting id>'
 export HOMERAIL_AUTO_FIX_V2_REVIEW_MODEL='<GLM-5.2 setting id>'
 node scripts/configure-auto-fix-v2-runtime-profile.mjs
 ```
 
-K3, DeepSeek, and GLM all use the Claude Agent SDK harness against their
+DeepSeek and GLM use the Claude Agent SDK harness against their
 Anthropic-compatible endpoints; no coding role uses Kimi Code or direct
-chat-completions. This keeps `allowed_builtin_tools` enforceable for every
-Auto Fix v2 Agent node.
+chat-completions. This keeps `allowed_builtin_tools` enforceable for every Auto
+Fix v2 Agent node. An upstream Manager Agent may use any suitable model to
+author `task-plan.json`; that planning session is not part of the execution DAG.
 
 Auto Fix v2 intentionally does not configure any node-level or workflow-level
 tool-call budget. Do not add a fixed tool-call budget to this workflow.
 
-The analyzer may emit only parallel-safe implementation items. It must combine
-coupled work instead of generating a separate verification/dependency worker.
-For every successful worker result, Manager verifies that `workspace_path` is
+The caller may supply only one to three parallel-safe implementation items and
+must combine coupled work instead of declaring a separate
+verification/dependency worker. For every successful worker result, Manager
+verifies that `workspace_path` is
 the assigned isolated worktree, `commit_sha` exists and is that worktree's
 current HEAD, and the worktree is clean before aggregation can start.
 
@@ -157,6 +192,7 @@ hr run auto-fix-v2 --sync \
   --profile auto-fix-v2-mixed \
   --input-scope issue-172-pilot \
   --input-file task_document:input/task.md=/absolute/path/to/task.md \
+  --input-file task_plan:input/task-plan.json=/absolute/path/to/task-plan.json \
   --input-file pr_context:input/pr-context.json=/absolute/path/to/pr-context.json
 ```
 

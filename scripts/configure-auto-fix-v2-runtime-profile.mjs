@@ -3,7 +3,6 @@
 import { pathToFileURL } from "node:url";
 
 const ROLE_PATTERNS = Object.freeze({
-  analyzer: /(?:^|[-_. /])k3(?:$|[-_. /])/i,
   implementation: /deepseek.*v4.*flash|v4.*flash.*deepseek/i,
   review: /glm[-_. /]*5(?:[-_. /]*2|\.2)/i,
 });
@@ -53,13 +52,12 @@ function agentEntry(id, setting, agentType) {
   ];
 }
 
-export function autoFixV2RuntimeProfileYaml({ profileId, analyzer, implementation, review }) {
+export function autoFixV2RuntimeProfileYaml({ profileId, implementation, review }) {
   return [
     `profile_id: ${yamlString(profileId)}`,
     "workflow_id: auto-fix-v2",
-    "description: K3 analysis, DeepSeek V4 Flash implementation/fix/aggregation, and fresh GLM-5.2 review.",
+    "description: Caller-authored task plan, DeepSeek V4 Flash implementation/fix/aggregation, and fresh GLM-5.2 review.",
     "agents:",
-    ...agentEntry("analyzer", analyzer, "claude-sdk"),
     ...agentEntry("implementer", implementation, "claude-sdk"),
     ...agentEntry("aggregator", implementation, "claude-sdk"),
     ...agentEntry("fixer", implementation, "claude-sdk"),
@@ -88,17 +86,15 @@ async function request(managerUrl, pathname, init) {
 export async function configureAutoFixV2RuntimeProfile({
   managerUrl = process.env.HOMERAIL_MANAGER_URL ?? "http://127.0.0.1:19191",
   profileId = process.env.HOMERAIL_AUTO_FIX_V2_PROFILE_ID ?? "auto-fix-v2-mixed",
-  analyzerSelector = process.env.HOMERAIL_AUTO_FIX_V2_ANALYZER_MODEL,
   implementationSelector = process.env.HOMERAIL_AUTO_FIX_V2_IMPLEMENTATION_MODEL,
   reviewSelector = process.env.HOMERAIL_AUTO_FIX_V2_REVIEW_MODEL,
 } = {}) {
   const root = managerUrl.replace(/\/+$/, "");
   const listed = await request(root, "/api/llm/settings");
   const settings = Array.isArray(listed?.settings) ? listed.settings : [];
-  const analyzer = selectAutoFixV2Setting(settings, analyzerSelector, "analyzer");
   const implementation = selectAutoFixV2Setting(settings, implementationSelector, "implementation");
   const review = selectAutoFixV2Setting(settings, reviewSelector, "review");
-  const yamlText = autoFixV2RuntimeProfileYaml({ profileId, analyzer, implementation, review });
+  const yamlText = autoFixV2RuntimeProfileYaml({ profileId, implementation, review });
   const synced = await request(root, "/api/dag/profiles/sync", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -111,7 +107,7 @@ export async function configureAutoFixV2RuntimeProfile({
   if (synced?.profile?.profile_id !== profileId || synced?.profile?.workflow_id !== "auto-fix-v2") {
     throw new Error("Manager synced an unexpected Auto Fix v2 runtime profile");
   }
-  return { profileId, analyzer, implementation, review, yamlText };
+  return { profileId, implementation, review, yamlText };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
