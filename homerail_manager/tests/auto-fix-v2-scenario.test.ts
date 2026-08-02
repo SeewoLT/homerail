@@ -149,7 +149,24 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     for (let index = 1; index <= 2; index++) {
       const nodeId = `implement__item_${String(index).padStart(4, "0")}`;
       const workspacePath = `workers/implement/inv_0001/item_${String(index).padStart(4, "0")}`;
-      expect(fs.existsSync(path.join(home, "workspace", "autofix-v2-run", workspacePath, ".git"))).toBe(true);
+      const runWorkspace = path.join(home, "workspace", "autofix-v2-run");
+      const worktree = path.join(runWorkspace, workspacePath);
+      const worktreeGitFile = path.join(worktree, ".git");
+      expect(fs.existsSync(worktreeGitFile)).toBe(true);
+      const gitDirPointer = fs.readFileSync(worktreeGitFile, "utf8").trim().replace(/^gitdir:\s*/, "");
+      expect(path.isAbsolute(gitDirPointer)).toBe(false);
+      const adminGitDir = git(worktree, ["rev-parse", "--absolute-git-dir"]);
+      expect(path.isAbsolute(fs.readFileSync(path.join(adminGitDir, "gitdir"), "utf8").trim())).toBe(false);
+      if (index === 1) {
+        const relocatedWorkspace = path.join(home, "relocated", "autofix-v2-run");
+        fs.cpSync(runWorkspace, relocatedWorkspace, { recursive: true });
+        const relocatedWorktree = path.join(relocatedWorkspace, workspacePath);
+        expect(fs.realpathSync(git(relocatedWorktree, ["rev-parse", "--show-toplevel"]))).toBe(fs.realpathSync(relocatedWorktree));
+        expect(fs.realpathSync(git(relocatedWorktree, ["rev-parse", "--git-common-dir"]))).toBe(
+          fs.realpathSync(path.join(relocatedWorkspace, "repo", ".git")),
+        );
+        expect(git(relocatedWorktree, ["status", "--porcelain"])).toBe("");
+      }
       const child = getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.find((node) => node.node_id === nodeId);
       expect(child?.extra?.agent_runtime).toMatchObject({
         workspace_access: { writable_paths: [workspacePath], readonly_paths: ["input"] },
