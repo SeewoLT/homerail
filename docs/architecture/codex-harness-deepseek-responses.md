@@ -127,6 +127,7 @@ as an execution limiter.
 | Live mid-turn steering | yes | partial | no |
 | Live Voice | n/a | subscription Codex only | n/a |
 | Exact Claude-style built-in tool allowlist | yes | no | no; asserted DAG allowlists fail closed |
+| Explicit backend-native coding surface | n/a | implicit | yes; `backend_native` + required workspace policy |
 | Workspace read-only mode | hooks plus SDK permissions | Codex sandbox | HomeRail outer policy + Codex `read-only` |
 | Per-root mixed read/write policy | yes | configurable Codex sandbox | audit-only; not yet mapped into Codex roots |
 | Token usage and backend-native raw trace | yes | partial | no |
@@ -143,7 +144,9 @@ that is enforceable.
    disables every project Skill outside the pinned DAG projection.
 2. Map HomeRail's per-root mixed workspace policy and, where a workflow asserts
    a Claude-style built-in tool allowlist, an equivalent enforceable Codex
-   permission policy. Keep fail-closed behavior until then.
+   permission policy. Exact allowlists remain fail-closed; workflows that need
+   the complete Codex coding surface must opt in explicitly with
+   `builtin_tool_policy: backend_native` and a declared workspace policy.
 3. Add DAG native thread resume, turn-controller steering, cumulative usage,
    and raw app-server trace capture.
 4. Distinguish subscription Codex and provider-backed Codex more explicitly in

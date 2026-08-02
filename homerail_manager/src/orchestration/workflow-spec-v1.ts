@@ -426,6 +426,20 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       add(`${nodePath}/agent`, "DAG_SEMANTIC_UNKNOWN_AGENT", `unknown agent '${node.agent}'`);
     }
     if (node.kind === "agent") {
+      if (node.builtin_tool_policy !== undefined && node.allowed_builtin_tools !== undefined) {
+        add(
+          `${nodePath}/builtin_tool_policy`,
+          "DAG_SEMANTIC_BUILTIN_TOOL_POLICY_CONFLICT",
+          "builtin_tool_policy is mutually exclusive with allowed_builtin_tools",
+        );
+      }
+      if (node.builtin_tool_policy === "backend_native" && !node.workspace_access) {
+        add(
+          `${nodePath}/workspace_access`,
+          "DAG_SEMANTIC_BACKEND_NATIVE_WORKSPACE_REQUIRED",
+          "backend_native agents must declare workspace_access",
+        );
+      }
       const advisorIds = new Set<string>();
       for (let index = 0; index < (node.advisors ?? []).length; index++) {
         const advisor = node.advisors![index];
@@ -575,6 +589,20 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
         add(`${nodePath}/config/max_parallelism`, "DAG_SEMANTIC_INVALID_PARALLELISM", "max_parallelism cannot exceed max_items");
       }
       const workerPolicy = node.config.worker_policy;
+      if (workerPolicy?.builtin_tool_policy !== undefined && workerPolicy.allowed_builtin_tools !== undefined) {
+        add(
+          `${nodePath}/config/worker_policy/builtin_tool_policy`,
+          "DAG_SEMANTIC_BUILTIN_TOOL_POLICY_CONFLICT",
+          "fanout worker_policy builtin_tool_policy is mutually exclusive with allowed_builtin_tools",
+        );
+      }
+      if (workerPolicy?.builtin_tool_policy === "backend_native" && !workerPolicy.workspace_access) {
+        add(
+          `${nodePath}/config/worker_policy/workspace_access`,
+          "DAG_SEMANTIC_BACKEND_NATIVE_WORKSPACE_REQUIRED",
+          "backend_native fanout workers must declare workspace_access",
+        );
+      }
       if (workerPolicy?.allowed_dag_tools !== undefined && !workerPolicy.allowed_dag_tools.includes("handoff")) {
         add(
           `${nodePath}/config/worker_policy/allowed_dag_tools`,
@@ -840,6 +868,9 @@ function canonicalNode(id: string, node: WorkflowSpecV1Node): CanonicalNode {
     const config = {
       ...(node.advisors ? { advisors: node.advisors } : {}),
       ...(node.workspace_access ? { workspace_access: node.workspace_access } : {}),
+      ...(node.builtin_tool_policy !== undefined
+        ? { builtin_tool_policy: node.builtin_tool_policy }
+        : {}),
       ...(node.allowed_builtin_tools !== undefined
         ? { allowed_builtin_tools: [...node.allowed_builtin_tools].sort() }
         : {}),
@@ -1537,6 +1568,9 @@ function authoringNode(node: CanonicalNode, canonical: CanonicalWorkflowIR): Rec
       agent: node.agent,
       ...(Array.isArray(node.config?.advisors) ? { advisors: node.config.advisors } : {}),
       ...(node.config?.workspace_access ? { workspace_access: node.config.workspace_access } : {}),
+      ...(node.config?.builtin_tool_policy === "backend_native"
+        ? { builtin_tool_policy: node.config.builtin_tool_policy }
+        : {}),
       ...(Array.isArray(node.config?.allowed_builtin_tools)
         ? { allowed_builtin_tools: node.config.allowed_builtin_tools }
         : {}),

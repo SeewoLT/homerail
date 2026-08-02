@@ -301,7 +301,11 @@ Its semantics are:
   budget fields unset; completion is governed by handoff contracts,
   model/runtime limits, and operator cancellation rather than a fixed
   tool-call budget;
-- omitted tool allowlists are empty for dynamic children;
+- omitted tool allowlists are empty for dynamic children unless the workflow
+  explicitly selects `builtin_tool_policy: backend_native`;
+- `backend_native` is mutually exclusive with `allowed_builtin_tools`, requires
+  declared workspace access, and is accepted only by a backend that explicitly
+  supports the policy (currently Codex app-server);
 - omitted credentials mean no credentials;
 - omitted workspace access means no writable paths;
 - `isolated_git_worktree` is rejected unless the worker policy declares
@@ -452,6 +456,15 @@ profile:
 | `aggregator` | DeepSeek V4 Flash |
 | `fixer` | DeepSeek V4 Flash |
 | `reviewer` | GLM-5.2 |
+
+All DeepSeek V4 Flash roles use the container Codex app-server Responses
+harness with explicit `reasoning_effort: max` and explicit
+`builtin_tool_policy: backend_native`; their long reasoning phase is normal and
+is not an execution timeout signal. This mode authorizes Codex's native
+sandboxed shell/patch surface, not a fictional translation to Claude tool
+names. The outer HomeRail workspace policy still verifies paths after the turn,
+and all GitHub mutation remains fenced behind the Manager broker. GLM-5.2
+review uses the Claude Agent SDK with a fresh dispatch-scoped session.
 
 Before a real run, the stable adapter resolves each selector to exactly one
 active LLM setting, confirms the required compatible harness and endpoint, and

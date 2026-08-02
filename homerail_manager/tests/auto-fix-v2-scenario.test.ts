@@ -87,11 +87,14 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     expect(parsed.graph.nodes).toHaveLength(7);
     expect(parsed.graph.edges.length).toBeLessThanOrEqual(28);
     expect(parsed.meta.agents?.analyzer).toBeUndefined();
+    expect(parsed.meta.agents?.implementer?.system).toContain("npm ci");
+    expect(parsed.meta.agents?.implementer?.system).toMatch(/never npm\s+install/);
     expect(source).not.toMatch(/\bmax_[a-z_]*tool_calls[a-z_]*:/);
     for (const nodeId of ["implement", "fix"]) {
       expect(parsed.graph.nodes.find((node) => node.node_id === nodeId)?.gateway_config).toMatchObject({
         workspace_strategy: "isolated_git_worktree",
         worker_policy: {
+          builtin_tool_policy: "backend_native",
           workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: ["input"] },
         },
       });
@@ -156,6 +159,10 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", taskPlanContent);
     executor.tick("autofix-v2-run");
     expect(dispatcher.dispatched.filter((entry) => entry.nodeId.startsWith("implement__item_"))).toHaveLength(2);
+    for (const entry of dispatcher.dispatched.filter((candidate) => candidate.nodeId.startsWith("implement__item_"))) {
+      expect(entry.builtinToolPolicy).toBe("backend_native");
+      expect(entry.allowedBuiltinTools).toBeUndefined();
+    }
     for (let index = 1; index <= 2; index++) {
       const nodeId = `implement__item_${String(index).padStart(4, "0")}`;
       const workspacePath = `workers/implement/inv_0001/item_${String(index).padStart(4, "0")}`;
@@ -179,6 +186,7 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
       }
       const child = getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.find((node) => node.node_id === nodeId);
       expect(child?.extra?.agent_runtime).toMatchObject({
+        builtin_tool_policy: "backend_native",
         workspace_access: { writable_paths: [workspacePath], readonly_paths: ["input"] },
         allowed_dag_tools: ["handoff"],
         credentials: [],
@@ -224,8 +232,14 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         tests: ["fixture"],
       });
     }
+
+    expect(parsed.graph.nodes.find((node) => node.node_id === "aggregate")?.extra?.agent_runtime).toMatchObject({
+      builtin_tool_policy: "backend_native",
+    });
     executor.tick("autofix-v2-run");
     expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("aggregate");
+    expect(dispatcher.dispatched.at(-1)?.builtinToolPolicy).toBe("backend_native");
+    expect(dispatcher.dispatched.at(-1)?.allowedBuiltinTools).toBeUndefined();
     expect(dispatcher.dispatched.at(-1)?.credentialProjections).toMatchObject([{
       broker: "github_pr",
       allowed_actions: ["pull_request_snapshot", "commit_files"],
@@ -255,6 +269,8 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         : `fix__inv_${String(fixRound).padStart(4, "0")}__item_0001`;
       const fixerEnvelope = dispatcher.dispatched.find((entry) => entry.nodeId === fixerId);
       expect(fixerEnvelope).toBeDefined();
+      expect(fixerEnvelope?.builtinToolPolicy).toBe("backend_native");
+      expect(fixerEnvelope?.allowedBuiltinTools).toBeUndefined();
       expect(fixerEnvelope?.credentialProjections).toMatchObject([{
         broker: "github_pr",
         allowed_actions: ["pull_request_snapshot", "commit_files"],

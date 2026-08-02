@@ -42,6 +42,7 @@ import {
   isDisabledDirectLlmAgentType,
   normalizeManagerAgentRuntimeAgentType,
   redactTelemetry,
+  type AgentBuiltinToolPolicy,
   type AgentBuiltinToolName,
   type DagAdvisorConfig,
   type DagAgentToolName,
@@ -4303,7 +4304,13 @@ function _fanoutWorkerRuntime(
     ...(Array.isArray(access.readonly_paths) ? access.readonly_paths.map(replacePath).filter((entry): entry is string => typeof entry === "string") : []),
   ])).sort();
   policy.workspace_access = access;
-  policy.allowed_builtin_tools = Array.isArray(policy.allowed_builtin_tools) ? policy.allowed_builtin_tools : [];
+  if (policy.builtin_tool_policy === "backend_native") {
+    if (policy.allowed_builtin_tools !== undefined) {
+      throw new Error("fanout builtin_tool_policy is mutually exclusive with allowed_builtin_tools");
+    }
+  } else {
+    policy.allowed_builtin_tools = Array.isArray(policy.allowed_builtin_tools) ? policy.allowed_builtin_tools : [];
+  }
   policy.allowed_dag_tools = Array.isArray(policy.allowed_dag_tools) ? policy.allowed_dag_tools : ["handoff"];
   policy.credentials = Array.isArray(policy.credentials) ? policy.credentials : [];
   return policy;
@@ -4911,6 +4918,13 @@ function _allowedBuiltinTools(node: DAGGraphNode): AgentBuiltinToolName[] | unde
   ));
 }
 
+function _builtinToolPolicy(node: DAGGraphNode): AgentBuiltinToolPolicy | undefined {
+  const raw = _agentRuntimeConfig(node).builtin_tool_policy;
+  if (raw === undefined) return undefined;
+  if (raw !== "backend_native") throw new Error(`unsupported builtin_tool_policy '${String(raw)}'`);
+  return raw;
+}
+
 function _maxBuiltinToolCalls(run: ActiveRun, node: DAGGraphNode): number | undefined {
   const configured = _agentRuntimeConfig(node).max_builtin_tool_calls;
   const nodeLimit = Number.isInteger(configured) && Number(configured) > 0
@@ -5180,6 +5194,7 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
       requiredCapabilities: _requiredDispatchCapabilities(run, node),
       advisors: advisorResolution.advisors,
       workspaceAccess: _workspaceAccess(node),
+      builtinToolPolicy: _builtinToolPolicy(node),
       allowedBuiltinTools: _allowedBuiltinTools(node),
       maxBuiltinToolCalls: _maxBuiltinToolCalls(run, node),
       allowedDagTools: _allowedDagTools(node),

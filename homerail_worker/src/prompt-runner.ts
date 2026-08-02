@@ -132,11 +132,31 @@ function assertAgentRuntimeProtocol(agentBackend: string | undefined, protocol: 
   }
 }
 
-function assertBuiltinToolPolicySupported(agentBackend: string | undefined, allowedTools: unknown): void {
-  if (allowedTools === undefined) return;
+function assertBuiltinToolPolicySupported(
+  agentBackend: string | undefined,
+  allowedTools: unknown,
+  builtinToolPolicy: unknown,
+  workspaceAccess: unknown,
+): void {
   const backend = normalizeManagerAgentRuntimeAgentType(
     agentBackend ?? process.env.AGENT_BACKEND ?? "claude-sdk",
   );
+  if (builtinToolPolicy !== undefined) {
+    if (builtinToolPolicy !== "backend_native") {
+      throw new Error(`unsupported builtin_tool_policy '${String(builtinToolPolicy)}'`);
+    }
+    if (allowedTools !== undefined) {
+      throw new Error("builtin_tool_policy is mutually exclusive with allowed_builtin_tools");
+    }
+    if (backend !== "codex_appserver") {
+      throw new Error(`builtin_tool_policy 'backend_native' is not supported by agent backend '${backend ?? "unknown"}'`);
+    }
+    if (!workspaceAccess || typeof workspaceAccess !== "object" || Array.isArray(workspaceAccess)) {
+      throw new Error("builtin_tool_policy 'backend_native' requires workspace_access");
+    }
+    return;
+  }
+  if (allowedTools === undefined) return;
   if (backend === "claude-sdk" || backend === "deterministic") return;
   throw new Error(
     `allowed_builtin_tools is not enforced by agent backend '${backend ?? "unknown"}'`,
@@ -463,7 +483,12 @@ export async function runPrompt(
       });
     }
     assertAgentRuntimeProtocol(agentBackend, job.llmProtocol);
-    assertBuiltinToolPolicySupported(agentBackend, job.dagConfig.allowed_builtin_tools);
+    assertBuiltinToolPolicySupported(
+      agentBackend,
+      job.dagConfig.allowed_builtin_tools,
+      job.dagConfig.builtin_tool_policy,
+      job.dagConfig.workspace_access,
+    );
     const agent = createAgentClient(agentBackend);
     const context: AgentRunContext = {
       systemPrompt: effectiveSystemPrompt,

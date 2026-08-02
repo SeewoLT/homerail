@@ -38,17 +38,21 @@ export function selectAutoFixV2Setting(settings, selector, role) {
   if (!enabled(setting.is_active) || !enabled(setting.supports_llm)) {
     throw new Error(`Auto Fix v2 ${role} model is not an active LLM setting: ${wanted}`);
   }
-  if (!text(setting.anthropic_base_url)) {
+  if (role === "implementation" && !text(setting.responses_base_url)) {
+    throw new Error(`Auto Fix v2 ${role} model has no Responses endpoint for Codex: ${wanted}`);
+  }
+  if (role === "review" && !text(setting.anthropic_base_url)) {
     throw new Error(`Auto Fix v2 ${role} model has no Anthropic-compatible endpoint: ${wanted}`);
   }
   return setting;
 }
 
-function agentEntry(id, setting, agentType) {
+function agentEntry(id, setting, agentType, reasoningEffort) {
   return [
     `  ${id}:`,
     `    llm_setting_id: ${yamlString(setting.id)}`,
     `    agent_type: ${agentType}`,
+    ...(reasoningEffort ? [`    reasoning_effort: ${reasoningEffort}`] : []),
   ];
 }
 
@@ -56,11 +60,11 @@ export function autoFixV2RuntimeProfileYaml({ profileId, implementation, review 
   return [
     `profile_id: ${yamlString(profileId)}`,
     "workflow_id: auto-fix-v2",
-    "description: Caller-authored task plan, DeepSeek V4 Flash implementation/fix/aggregation, and fresh GLM-5.2 review.",
+    "description: Caller-authored task plan, DeepSeek V4 Flash Codex/max implementation/fix/aggregation, and fresh GLM-5.2 review.",
     "agents:",
-    ...agentEntry("implementer", implementation, "claude-sdk"),
-    ...agentEntry("aggregator", implementation, "claude-sdk"),
-    ...agentEntry("fixer", implementation, "claude-sdk"),
+    ...agentEntry("implementer", implementation, "codex_appserver", "max"),
+    ...agentEntry("aggregator", implementation, "codex_appserver", "max"),
+    ...agentEntry("fixer", implementation, "codex_appserver", "max"),
     ...agentEntry("reviewer", review, "claude-sdk"),
     "",
   ].join("\n");

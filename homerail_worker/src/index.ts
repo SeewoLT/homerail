@@ -16,6 +16,7 @@ import {
   DAG_TRANSPORT_FENCE_CAPABILITY,
   DAG_TRANSPORT_FENCE_V1_CAPABILITY,
   type DagActorCheckpointV1,
+  type AgentBuiltinToolPolicy,
   type AgentBuiltinToolName,
   type DagAdvisorConfig,
   type DagAgentToolName,
@@ -229,6 +230,9 @@ client.on("task", async (msg) => {
         advisors: Array.isArray(envelope.advisors) ? envelope.advisors as DagAdvisorConfig[] : undefined,
         workspace_access: envelope.workspaceAccess && typeof envelope.workspaceAccess === "object"
           ? envelope.workspaceAccess as unknown as DagWorkspaceAccess
+          : undefined,
+        builtin_tool_policy: typeof envelope.builtinToolPolicy === "string"
+          ? envelope.builtinToolPolicy as AgentBuiltinToolPolicy
           : undefined,
         allowed_builtin_tools: Array.isArray(envelope.allowedBuiltinTools)
           ? envelope.allowedBuiltinTools as AgentBuiltinToolName[]

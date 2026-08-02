@@ -150,8 +150,10 @@ Likely code areas:
 
 Tests:
 
-- [ ] child inherits exact built-in and DAG tool allowlists;
-- [ ] child inherits workspace restrictions and tool-call budget;
+- [ ] child inherits either an exact built-in allowlist or an explicit
+      backend-native policy, plus the exact DAG tool allowlist;
+- [ ] child inherits workspace restrictions without introducing a tool-call
+      budget;
 - [ ] child cannot acquire undeclared credentials or broker actions;
 - [ ] correction and recovery do not widen policy;
 - [ ] old `worker_agent` workflows remain compatible without permissive
@@ -284,7 +286,8 @@ Tests:
 - [ ] Resolve one active DeepSeek V4 Flash setting for `implementer`,
       `aggregator`, and `fixer`.
 - [ ] Resolve one active GLM-5.2 setting for `reviewer`.
-- [ ] Require the compatible harness and endpoint for every setting.
+- [ ] Require Codex app-server Responses with `reasoning_effort: max` for every
+      DeepSeek role and Claude Agent SDK for GLM review.
 - [ ] Add preflight smokes for built-in tools, structured handoff, and fresh
       context.
 - [ ] Fail explicitly when DeepSeek V4 Flash is unavailable; do not substitute

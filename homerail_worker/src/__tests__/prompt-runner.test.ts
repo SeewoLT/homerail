@@ -586,6 +586,65 @@ describe("prompt runner", () => {
     }));
   });
 
+  it("allows explicit backend-native tools only for sandboxed Codex DAG turns", async () => {
+    let called = false;
+    const mockAgent: AgentClient = {
+      run(_prompt, _tools, context) {
+        called = true;
+        expect(context.workspaceAccess).toEqual({ writable_paths: ["repo"], readonly_paths: ["input"] });
+        return (async function* () {
+          yield { type: "done" as const };
+        })();
+      },
+    };
+    registerAgentBackend("codex_appserver", () => mockAgent);
+
+    const sent: string[] = [];
+    await runPrompt({
+      task: "use the native coding surface",
+      sender: "test",
+      runId: "run-codex-native-tools",
+      llmProtocol: "responses_compatible",
+      dagConfig: makeConfigWith({
+        agent_type: "codex_appserver",
+        builtin_tool_policy: "backend_native",
+        workspace_access: { writable_paths: ["repo"], readonly_paths: ["input"] },
+      }),
+    }, {
+      wsSend: (data) => sent.push(data),
+      agentBackend: "codex_appserver",
+    });
+
+    expect(called).toBe(true);
+    expect(sent.map((message) => JSON.parse(message)).filter((message) => message.type === "node_error"))
+      .toEqual([expect.objectContaining({ data: expect.objectContaining({ message: "agent ended without DAG handoff" }) })]);
+
+    for (const invalid of [
+      makeConfigWith({ builtin_tool_policy: "backend_native" }),
+      makeConfigWith({
+        builtin_tool_policy: "backend_native",
+        allowed_builtin_tools: ["Write"],
+        workspace_access: { writable_paths: ["repo"] },
+      }),
+    ]) {
+      const rejected: string[] = [];
+      await runPrompt({
+        task: "reject",
+        sender: "test",
+        runId: "run-invalid-native-tools",
+        llmProtocol: "anthropic_compatible",
+        dagConfig: invalid,
+      }, {
+        wsSend: (data) => rejected.push(data),
+        agentBackend: "claude-sdk",
+      });
+      expect(rejected.map((message) => JSON.parse(message))).toContainEqual(expect.objectContaining({
+        type: "node_error",
+        data: expect.objectContaining({ message: expect.stringMatching(/backend_native|mutually exclusive/) }),
+      }));
+    }
+  });
+
   it("defers node_error delivery to the worker lifecycle when requested", async () => {
     const mockAgent: AgentClient = {
       run() {

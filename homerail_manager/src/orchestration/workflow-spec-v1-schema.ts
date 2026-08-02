@@ -185,6 +185,9 @@ const CredentialBinding = Type.Object({
 const AgentRuntimeFields = {
   advisors: Type.Optional(Type.Array(AdvisorBinding, { uniqueItems: true, maxItems: 16 })),
   workspace_access: Type.Optional(WorkspaceAccess),
+  builtin_tool_policy: Type.Optional(Type.Literal("backend_native", {
+    description: "Explicitly use the selected harness's native shell/file surface. Mutually exclusive with allowed_builtin_tools.",
+  })),
   allowed_builtin_tools: Type.Optional(Type.Array(AgentBuiltinToolName, {
     uniqueItems: true,
     maxItems: AGENT_BUILTIN_TOOL_NAMES.length,

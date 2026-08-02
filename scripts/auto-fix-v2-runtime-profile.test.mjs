@@ -16,7 +16,7 @@ const setting = (id, model, endpoint) => ({
 });
 
 const settings = [
-  setting("deepseek-v4-flash", "DeepSeek V4 Flash", { anthropic_base_url: "https://models.example/v1" }),
+  setting("deepseek-v4-flash", "DeepSeek V4 Flash", { responses_base_url: "https://models.example/v1/responses" }),
   setting("glm-5-2", "GLM-5.2", { anthropic_base_url: "https://models.example/v1" }),
 ];
 const implementation = selectAutoFixV2Setting(settings, "deepseek-v4-flash", "implementation");
@@ -26,9 +26,12 @@ const yaml = autoFixV2RuntimeProfileYaml({ profileId: "pilot", implementation, r
 assert.match(yaml, /workflow_id: auto-fix-v2/);
 assert.doesNotMatch(yaml, /analyzer:/);
 for (const id of ["implementer", "aggregator", "fixer"]) {
-  assert.match(yaml, new RegExp(`${id}:\\n    llm_setting_id: "deepseek-v4-flash"`));
+  assert.match(yaml, new RegExp(`${id}:\\n    llm_setting_id: "deepseek-v4-flash"\\n    agent_type: codex_appserver\\n    reasoning_effort: max`));
 }
 assert.match(yaml, /reviewer:\n    llm_setting_id: "glm-5-2"/);
 assert.throws(() => selectAutoFixV2Setting(settings, "glm-5-2", "implementation"), /required model family/);
+assert.throws(() => selectAutoFixV2Setting([
+  setting("deepseek-no-responses", "DeepSeek V4 Flash", { anthropic_base_url: "https://models.example/v1" }),
+], "deepseek-no-responses", "implementation"), /no Responses endpoint for Codex/);
 
 process.stdout.write("auto-fix-v2 runtime profile tests passed\n");

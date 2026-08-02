@@ -198,7 +198,11 @@ spec:
         that exact worktree. Never copy changes into /workspace/repo or another
         worker's directory. Verify git cat-file -e HEAD^{commit} and a clean
         git status, then hand off result with the exact HEAD SHA and workspace
-        path.
+        path. If dependencies are absent, use only the repository's locked,
+        lockfile-preserving install command (for npm, use npm ci and never npm
+        install). Do not modify dependency manifests or lockfiles unless the
+        task item explicitly lists them; revert incidental changes before
+        committing.
 
     aggregator:
       description: DeepSeek V4 Flash candidate integrator
@@ -287,7 +291,7 @@ spec:
         worker_agent: implementer
         worker_policy:
           session_scope: dispatch
-          allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
+          builtin_tool_policy: backend_native
           allowed_dag_tools: [handoff]
           workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
         workspace_strategy: isolated_git_worktree
@@ -311,7 +315,7 @@ spec:
       agent: aggregator
       session_scope: dispatch
       workspace_access: { writable_paths: [repo], readonly_paths: [input, workers] }
-      allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
+      builtin_tool_policy: backend_native
       allowed_dag_tools: [handoff, credential_broker_call]
       credentials:
         - credential_ref: github-autofix
@@ -372,7 +376,7 @@ spec:
         worker_agent: fixer
         worker_policy:
           session_scope: dispatch
-          allowed_builtin_tools: [Bash, Edit, Glob, Grep, LS, Read, Write]
+          builtin_tool_policy: backend_native
           allowed_dag_tools: [handoff, credential_broker_call]
           workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
           credentials:

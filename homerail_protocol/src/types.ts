@@ -444,6 +444,12 @@ export const AGENT_BUILTIN_TOOL_NAMES = [
 
 export type AgentBuiltinToolName = (typeof AGENT_BUILTIN_TOOL_NAMES)[number];
 
+/**
+ * Explicitly delegate shell/file tool selection to the selected harness.
+ * This is intentionally distinct from an exact Claude-style allowlist.
+ */
+export type AgentBuiltinToolPolicy = "backend_native";
+
 export const DAG_AGENT_TOOL_NAMES = [
   "handoff",
   "send_message",
@@ -624,6 +630,8 @@ export interface DagNodeConfig {
   workspace_access?: DagWorkspaceAccess;
   /** Optional exact allowlist for backend-provided shell and file tools. */
   allowed_builtin_tools?: AgentBuiltinToolName[];
+  /** Explicit opt-in to the harness-native shell/file surface. */
+  builtin_tool_policy?: AgentBuiltinToolPolicy;
   /** Hard per-turn budget for backend-provided tools; DAG handoff tools remain available. */
   max_builtin_tool_calls?: number;
   /** Optional exact allowlist for HomeRail DAG tools. */

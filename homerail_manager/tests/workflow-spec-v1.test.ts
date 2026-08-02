@@ -161,6 +161,34 @@ describe("WorkflowSpec v1", () => {
     }
   });
 
+  it("canonicalizes explicit backend-native tools and rejects ambiguous or unbounded declarations", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.execute.builtin_tool_policy = "backend_native";
+    workflow.spec.nodes.execute.workspace_access = { writable_paths: ["repo"], readonly_paths: ["input"] };
+
+    const valid = compileWorkflowSource(YAML.stringify(workflow));
+    expect(valid.valid, valid.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+    expect(valid.canonical?.nodes.find((node) => node.id === "execute")?.config).toMatchObject({
+      builtin_tool_policy: "backend_native",
+      workspace_access: { writable_paths: ["repo"], readonly_paths: ["input"] },
+    });
+
+    workflow.spec.nodes.execute.allowed_builtin_tools = ["Write"];
+    const ambiguous = compileWorkflowSource(YAML.stringify(workflow));
+    expect(ambiguous.valid).toBe(false);
+    expect(ambiguous.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_BUILTIN_TOOL_POLICY_CONFLICT",
+    }));
+
+    delete workflow.spec.nodes.execute.allowed_builtin_tools;
+    delete workflow.spec.nodes.execute.workspace_access;
+    const unbounded = compileWorkflowSource(YAML.stringify(workflow));
+    expect(unbounded.valid).toBe(false);
+    expect(unbounded.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_BACKEND_NATIVE_WORKSPACE_REQUIRED",
+    }));
+  });
+
   it("requires output-producing agents to retain the handoff DAG tool", () => {
     const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
     workflow.spec.nodes.execute.allowed_dag_tools = ["get_graph_context"];

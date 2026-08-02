@@ -18,6 +18,11 @@ predates the runtime and broker support described below.
   GitHub credential. Their worker policy must explicitly
   declare `{{fanout_workspace}}`; Manager resolves it to the unique child
   worktree, so isolation never creates an implicit write grant.
+- DeepSeek coding roles explicitly select
+  `builtin_tool_policy: backend_native`. This is a Codex-only opt-in to the
+  native sandboxed shell/patch surface, is mutually exclusive with the exact
+  Claude-style `allowed_builtin_tools` field, and requires `workspace_access`.
+  HomeRail still verifies that the turn changed only declared paths.
 - The DeepSeek aggregator may read and update only the bound Draft PR through
   the `github_pr` Manager broker.
 - GLM-5.2 reviewer nodes have `session_scope: dispatch`; every re-entry gets a
@@ -159,8 +164,9 @@ history.
 
 ## Model profile
 
-The stable Manager must contain active Anthropic-compatible settings whose
-identities match DeepSeek V4 Flash and GLM-5.2. Configure the profile with:
+The stable Manager must contain an active Responses-compatible DeepSeek V4
+Flash setting and an active Anthropic-compatible GLM-5.2 setting. Configure the
+profile with:
 
 ```bash
 export HOMERAIL_AUTO_FIX_V2_IMPLEMENTATION_MODEL='<DeepSeek V4 Flash setting id>'
@@ -168,11 +174,13 @@ export HOMERAIL_AUTO_FIX_V2_REVIEW_MODEL='<GLM-5.2 setting id>'
 node scripts/configure-auto-fix-v2-runtime-profile.mjs
 ```
 
-DeepSeek and GLM use the Claude Agent SDK harness against their
-Anthropic-compatible endpoints; no coding role uses Kimi Code or direct
-chat-completions. This keeps `allowed_builtin_tools` enforceable for every Auto
-Fix v2 Agent node. An upstream Manager Agent may use any suitable model to
-author `task-plan.json`; that planning session is not part of the execution DAG.
+DeepSeek implementers, aggregator, and fixers use the Codex app-server harness
+against the Responses endpoint with `reasoning_effort: max`. Long multi-minute
+reasoning and high tool counts are expected; operators must not treat elapsed
+thinking time as a stuck worker. GLM review uses the Claude Agent SDK against
+its Anthropic-compatible endpoint. No coding role uses Kimi Code or direct
+chat-completions. An upstream Manager Agent may use any suitable model to author
+`task-plan.json`; that planning session is not part of the execution DAG.
 
 Auto Fix v2 intentionally does not configure any node-level or workflow-level
 tool-call budget. Do not add a fixed tool-call budget to this workflow.
@@ -211,6 +219,10 @@ npm --prefix homerail_manager exec vitest run \
 npm --prefix homerail_node exec vitest run \
   src/storage/__tests__/workspace-inputs.test.ts \
   src/control-plane/__tests__/lifecycle-handler.test.ts
+npm --prefix homerail_worker exec vitest run \
+  src/__tests__/prompt-runner.test.ts \
+  src/__tests__/codex-appserver.test.ts \
+  src/__tests__/codex-working-directory.test.ts
 npm --prefix homerail_cli exec vitest run tests/run-inputs.test.ts
 node scripts/auto-fix-v2-runtime-profile.test.mjs
 ```

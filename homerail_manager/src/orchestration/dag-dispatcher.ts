@@ -1,5 +1,6 @@
 import type { DAGAgentConfig, DAGEdge } from "./graph.js";
 import type {
+  AgentBuiltinToolPolicy,
   AgentBuiltinToolName,
   DagActorCheckpointV1,
   DagAdvisorConfig,
@@ -35,6 +36,7 @@ export interface DispatchEnvelope {
   requiredCapabilities?: string[];
   advisors?: DagAdvisorConfig[];
   workspaceAccess?: DagWorkspaceAccess;
+  builtinToolPolicy?: AgentBuiltinToolPolicy;
   allowedBuiltinTools?: AgentBuiltinToolName[];
   maxBuiltinToolCalls?: number;
   allowedDagTools?: DagAgentToolName[];
