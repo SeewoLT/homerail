@@ -135,8 +135,10 @@ export HOMERAIL_AUTO_FIX_V2_REVIEW_MODEL='<GLM-5.2 setting id>'
 node scripts/configure-auto-fix-v2-runtime-profile.mjs
 ```
 
-The analyzer uses the `kimi-code` harness. DeepSeek and GLM use the
-Claude-compatible harness; no coding role uses direct chat-completions.
+K3, DeepSeek, and GLM all use the Claude Agent SDK harness against their
+Anthropic-compatible endpoints; no coding role uses Kimi Code or direct
+chat-completions. This keeps `allowed_builtin_tools` enforceable for every
+Auto Fix v2 Agent node.
 
 ## Start a local or stable run
 
