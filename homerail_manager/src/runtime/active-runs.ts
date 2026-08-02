@@ -4368,6 +4368,15 @@ function _fanoutWorkerRuntime(
       throw new Error("isolated git worktree fanout must explicitly declare {{fanout_workspace}} as its writable path");
     }
     access.writable_paths = [workspacePath];
+    // Every isolated fan-out child snapshots the shared run workspace. Sibling
+    // worktrees may legitimately change while this child is running, so exclude
+    // only those Manager-derived paths from mutation ownership accounting. This
+    // runtime-only field is deliberately not accepted by WorkflowSpec v1.
+    access.snapshot_exclude_paths = state.items
+      .map((_item, siblingIndex) => siblingIndex === index
+        ? undefined
+        : _fanoutChildWorkspacePath(node, state, siblingIndex))
+      .filter((entry): entry is string => typeof entry === "string");
   } else {
     access.writable_paths = Array.isArray(access.writable_paths) ? access.writable_paths.map(replacePath) : [];
   }
@@ -5076,10 +5085,14 @@ function _workspaceAccess(node: DAGGraphNode): DagWorkspaceAccess | undefined {
   const readonly = Array.isArray(value.readonly_paths)
     ? value.readonly_paths.filter((entry): entry is string => typeof entry === "string")
     : undefined;
+  const snapshotExclude = Array.isArray(value.snapshot_exclude_paths)
+    ? value.snapshot_exclude_paths.filter((entry): entry is string => typeof entry === "string")
+    : undefined;
   return {
     writable_paths: writable,
     ...(readonly ? { readonly_paths: readonly } : {}),
     ...(typeof value.max_snapshot_files === "number" ? { max_snapshot_files: value.max_snapshot_files } : {}),
+    ...(snapshotExclude ? { snapshot_exclude_paths: snapshotExclude } : {}),
   };
 }
 

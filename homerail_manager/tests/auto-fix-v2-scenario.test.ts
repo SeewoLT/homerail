@@ -197,7 +197,13 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
       const child = getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.find((node) => node.node_id === nodeId);
       expect(child?.extra?.agent_runtime).toMatchObject({
         builtin_tool_policy: "backend_native",
-        workspace_access: { writable_paths: [workspacePath], readonly_paths: ["input"] },
+        workspace_access: {
+          writable_paths: [workspacePath],
+          readonly_paths: ["input"],
+          snapshot_exclude_paths: [
+            `workers/implement/inv_0001/item_${String(index === 1 ? 2 : 1).padStart(4, "0")}`,
+          ],
+        },
         allowed_dag_tools: ["handoff"],
         credentials: [],
       });

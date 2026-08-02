@@ -163,6 +163,32 @@ describe("runtime pattern worker tools", () => {
     }
   });
 
+  it("ignores Manager-declared concurrent paths without hiding other unauthorized mutations", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-concurrent-"));
+    try {
+      fs.mkdirSync(path.join(root, "workers", "own"), { recursive: true });
+      fs.mkdirSync(path.join(root, "workers", "sibling"), { recursive: true });
+      fs.writeFileSync(path.join(root, "workers", "own", "code.ts"), "before");
+      fs.writeFileSync(path.join(root, "workers", "sibling", "code.ts"), "before");
+      const policy = {
+        writable_paths: ["workers/own"],
+        readonly_paths: ["input"],
+        snapshot_exclude_paths: ["workers/sibling"],
+      };
+      const before = snapshotWorkspace(root, policy);
+      fs.writeFileSync(path.join(root, "workers", "own", "code.ts"), "own change");
+      fs.writeFileSync(path.join(root, "workers", "sibling", "code.ts"), "concurrent sibling change");
+      fs.writeFileSync(path.join(root, "README.md"), "unauthorized");
+
+      const result = verifyWorkspacePolicy(before, snapshotWorkspace(root, policy), policy);
+      expect(result.valid).toBe(false);
+      expect(result.changed_paths).toEqual(["README.md", "workers/own/code.ts"]);
+      expect(result.unauthorized_changes).toEqual(["README.md"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects workspace symlinks that escape the policy root", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-symlink-"));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-outside-"));

@@ -658,6 +658,12 @@ export interface DagWorkspaceAccess {
   writable_paths: string[];
   readonly_paths?: string[];
   max_snapshot_files?: number;
+  /**
+   * Manager-owned runtime exclusions for paths concurrently mutated by sibling
+   * actors. This field is intentionally absent from the workflow schema so a
+   * workflow author cannot weaken mutation ownership checks.
+   */
+  snapshot_exclude_paths?: string[];
 }
 
 // ── Event Emitter Wire Types ─────────────────────────────────────

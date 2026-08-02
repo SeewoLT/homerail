@@ -42,8 +42,10 @@ function digestFiles(files: Record<string, string>): string {
 export function snapshotWorkspace(root: string, policy: DagWorkspaceAccess): WorkspaceSnapshot {
   const resolvedRoot = realpathSync(path.resolve(root));
   const maxFiles = policy.max_snapshot_files ?? 20_000;
+  const excluded = (policy.snapshot_exclude_paths ?? []).map(normalizedPolicyPath);
   const files: Record<string, string> = {};
   const visit = (absolute: string, relative: string): void => {
+    if (relative && includesPath(excluded, relative)) return;
     const stat = lstatSync(absolute);
     if (stat.isDirectory()) {
       if (relative && IGNORED_DIRECTORIES.has(path.posix.basename(relative))) return;

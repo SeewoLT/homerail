@@ -173,6 +173,15 @@ describe("WorkflowSpec v1", () => {
       workspace_access: { writable_paths: ["repo"], readonly_paths: ["input"] },
     });
 
+    const authorExcluded = structuredClone(workflow);
+    authorExcluded.spec.nodes.execute.workspace_access.snapshot_exclude_paths = ["repo/private"];
+    const authorExcludedResult = compileWorkflowSource(YAML.stringify(authorExcluded));
+    expect(authorExcludedResult.valid).toBe(false);
+    expect(authorExcludedResult.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SCHEMA_INVALID_FIELD",
+      path: "/spec/nodes/execute",
+    }));
+
     workflow.spec.nodes.execute.allowed_builtin_tools = ["Write"];
     const ambiguous = compileWorkflowSource(YAML.stringify(workflow));
     expect(ambiguous.valid).toBe(false);
