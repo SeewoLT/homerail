@@ -57,7 +57,10 @@ predates the runtime and broker support described below.
   original capability.
 - GLM receives no repository/workers/fixers mount. It reads changed or related
   UTF-8 source only through `read_file` bound to the exact current PR head, so
-  local dirty integration state cannot influence the verdict.
+  local dirty integration state cannot influence the verdict. The PR snapshot
+  contains a compact changed-file inventory rather than patch bodies; even a
+  100-file snapshot stays inline instead of being redirected to an unreadable
+  Claude SDK temporary file.
 - Read-only reviewer containers keep `/workspace` read-only and receive one
   nested writable mount only at `/workspace/.homerail-runtime` for trusted
   Worker audit/session telemetry. This prevents audit writer startup from

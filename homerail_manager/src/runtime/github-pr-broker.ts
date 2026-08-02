@@ -60,7 +60,7 @@ const MAX_COMMIT_FILES = 64;
 const MAX_COMMIT_BYTES = 1024 * 1024;
 const MAX_READ_FILE_BYTES = 192 * 1024;
 const MAX_READ_FILE_JSON_BYTES = 224 * 1024;
-const MAX_PATCH_CHARS = 8_000;
+const MAX_PULL_BODY_CHARS = 8_000;
 const MAX_VALIDATION_LOG_CHECKS = 4;
 const MAX_VALIDATION_LOG_DOWNLOAD_BYTES = 512 * 1024;
 const MAX_VALIDATION_LOG_TAIL_BYTES = 64 * 1024;
@@ -589,7 +589,7 @@ export async function githubPullRequestSnapshot(context: CredentialBrokerContext
     repository: `${binding.owner}/${binding.repo}`,
     pull_number: binding.pull_number,
     title: String(pull.title ?? ""),
-    body: String(pull.body ?? "").slice(0, 32_000),
+    body: String(pull.body ?? "").slice(0, MAX_PULL_BODY_CHARS),
     draft: pull.draft === true,
     state: String(pull.state ?? ""),
     url: String(pull.html_url ?? ""),
@@ -603,7 +603,6 @@ export async function githubPullRequestSnapshot(context: CredentialBrokerContext
       additions: Number(file.additions ?? 0),
       deletions: Number(file.deletions ?? 0),
       changes: Number(file.changes ?? 0),
-      patch: typeof file.patch === "string" ? file.patch.slice(0, MAX_PATCH_CHARS) : undefined,
     })),
   };
 }

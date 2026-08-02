@@ -438,7 +438,7 @@ The Manager-side `github_pr` broker implements these first-version actions:
 
 | Action | Purpose |
 | --- | --- |
-| `pull_request_snapshot` | Return bounded immutable PR metadata and diff identity |
+| `pull_request_snapshot` | Return bounded immutable PR metadata and the changed-file inventory |
 | `read_file` | Return bounded UTF-8 file bytes from the exact current head SHA |
 | `checks_snapshot` | Return bounded checks for the current exact head SHA |
 | `required_checks` | Fail unless every immutable required check succeeds on that head |
@@ -482,6 +482,11 @@ The broker must never expose token values or provider error bodies containing
 secrets. A Worker call requires `credential_broker_call` plus the exact
 declared action; a Manager `broker` node receives exactly one projected action
 and has no Worker tool surface.
+The PR snapshot deliberately omits per-file patch bodies and bounds the PR
+description so a 100-file inventory remains inline in Claude Agent SDK instead
+of being redirected to an SDK-private temporary file outside the reviewer's
+read-only workspace. The reviewer obtains trusted source bytes through
+exact-head `read_file` calls for the inventory paths relevant to its decision.
 The tool schema enumerates the credential references and action names actually
 projected into that dispatch, and its description lists the valid
 credential/action pairs. Trusted runtime validation remains authoritative for

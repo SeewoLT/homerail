@@ -93,6 +93,8 @@ describe("bounded GitHub Draft PR credential broker", () => {
   let checkName: string;
   let checkConclusion: string;
   let pullFileCount: number;
+  let pullBody: string;
+  let pullPatch: string;
   let createdTreeSha: string;
   let checkRunsResponses: Array<Array<Record<string, unknown>>> | undefined;
   let workflowRunsResponses: Array<Array<Record<string, unknown>>> | undefined;
@@ -196,6 +198,8 @@ describe("bounded GitHub Draft PR credential broker", () => {
     checkName = "unit";
     checkConclusion = "success";
     pullFileCount = 1;
+    pullBody = "Bound task";
+    pullPatch = "@@ fake";
     createdTreeSha = NEXT_TREE;
     checkRunsResponses = undefined;
     workflowRunsResponses = undefined;
@@ -214,7 +218,7 @@ describe("bounded GitHub Draft PR credential broker", () => {
         return json({
           number: 7,
           title: "WIP autofix",
-          body: "Bound task",
+          body: pullBody,
           draft: true,
           state: pullState,
           html_url: "https://github.example/acme/widget/pull/7",
@@ -233,7 +237,7 @@ describe("bounded GitHub Draft PR credential broker", () => {
           additions: 2,
           deletions: 1,
           changes: 3,
-          patch: "@@ fake",
+          patch: pullPatch,
         })));
       }
       if (method === "GET" && url.pathname === "/repos/acme/widget/contents/src/fix.ts") {
@@ -411,6 +415,23 @@ describe("bounded GitHub Draft PR credential broker", () => {
     pullFileCount = 101;
     await expect(call("reviewer", "pull_request_snapshot", {}, "github-broker-run", "second-page-session"))
       .resolves.toMatchObject({ ok: false, error: expect.stringContaining("exceeds the bounded snapshot") });
+  });
+
+  it("keeps a large PR snapshot inline by omitting per-file patches", async () => {
+    pullFileCount = 100;
+    pullBody = "body".repeat(20_000);
+    pullPatch = "patch".repeat(20_000);
+
+    const snapshot = await call("reviewer", "pull_request_snapshot") as {
+      ok: boolean;
+      result: { body: string; files: Array<Record<string, unknown>> };
+    };
+
+    expect(snapshot.ok).toBe(true);
+    expect(snapshot.result.body.length).toBe(8_000);
+    expect(snapshot.result.files).toHaveLength(100);
+    expect(snapshot.result.files.every((file) => !("patch" in file))).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(snapshot), "utf8")).toBeLessThan(32 * 1024);
   });
 
   it("binds workspace commits to the caller node's sole writable path", async () => {
