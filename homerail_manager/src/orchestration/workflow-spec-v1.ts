@@ -80,6 +80,12 @@ export interface CanonicalWorkflowIR {
   description?: string;
   labels: Record<string, string>;
   annotations: Record<string, string>;
+  /**
+   * Explicit WorkflowSpec capabilities. Only workflows declaring
+   * "runtime_evidence" may reference the reserved ReviewEvidenceState input
+   * contract; the runtime_evidence persistence bridge is gated on this field.
+   */
+  capabilities: string[];
   workspace: { mode: "isolated" | "shared" };
   contracts: Record<string, unknown>;
   artifacts: DAGArtifactDeclaration[];
@@ -146,6 +152,9 @@ interface SourceContext {
   document: Document.Parsed;
   lineCounter: LineCounter;
 }
+
+const RUNTIME_EVIDENCE_CAPABILITY = "runtime_evidence" as const;
+const RUNTIME_EVIDENCE_CONTRACT = "ReviewEvidenceState" as const;
 
 function sourceFormat(source: string): WorkflowSourceFormat {
   return source.trimStart().startsWith("{") ? "json" : "yaml";
@@ -328,6 +337,30 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
         `invalid JSON Schema contract '${contractName}': ${validation.details}`,
       );
     }
+  }
+
+  const declaredCapabilities = [...(workflow.spec.capabilities ?? [])].sort();
+  let runtimeEvidenceInputs = 0;
+  for (const [nodeId, node] of Object.entries(nodes)) {
+    for (const [portName, port] of Object.entries(nodePorts(node, "inputs"))) {
+      if (port.contract !== RUNTIME_EVIDENCE_CONTRACT) continue;
+      runtimeEvidenceInputs += 1;
+      if (!declaredCapabilities.includes(RUNTIME_EVIDENCE_CAPABILITY)) {
+        add(
+          `/spec/nodes/${nodeId}/inputs/${portName}/contract`,
+          "DAG_SEMANTIC_RUNTIME_EVIDENCE_CAPABILITY_REQUIRED",
+          `${RUNTIME_EVIDENCE_CONTRACT} inputs require the explicit '${RUNTIME_EVIDENCE_CAPABILITY}' WorkflowSpec capability`,
+          "declare capabilities: [runtime_evidence] on this workflow before using Manager-owned review evidence",
+        );
+      }
+    }
+  }
+  if (declaredCapabilities.includes(RUNTIME_EVIDENCE_CAPABILITY) && runtimeEvidenceInputs === 0) {
+    add(
+      "/spec/capabilities",
+      "DAG_SEMANTIC_RUNTIME_EVIDENCE_UNUSED",
+      `the '${RUNTIME_EVIDENCE_CAPABILITY}' capability is declared but no node input uses the ${RUNTIME_EVIDENCE_CONTRACT} contract`,
+    );
   }
 
   const artifactNames = new Set<string>();
@@ -979,6 +1012,7 @@ function compileV1(workflow: WorkflowSpecV1): CanonicalWorkflowIR {
     ...(workflow.spec.description ? { description: workflow.spec.description } : {}),
     labels: deepSort(workflow.metadata.labels ?? {}) as Record<string, string>,
     annotations: deepSort(workflow.metadata.annotations ?? {}) as Record<string, string>,
+    capabilities: [...(workflow.spec.capabilities ?? [])].sort(),
     workspace: { mode: workflow.spec.workspace?.mode ?? "isolated" },
     contracts: deepSort(workflow.spec.contracts ?? {}) as Record<string, unknown>,
     artifacts: [...(workflow.spec.artifacts ?? [])]
@@ -1121,6 +1155,7 @@ function compileLegacy(parsed: ParsedDAG): CanonicalWorkflowIR {
     ...(parsed.meta.description ? { description: parsed.meta.description } : {}),
     labels: {},
     annotations: {},
+    capabilities: [],
     workspace: { mode: "isolated" },
     contracts: {},
     artifacts: [],
@@ -1448,6 +1483,9 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
           input_contracts: inputContracts,
           output_contracts: outputContracts,
           output_broker_requirements: outputBrokerRequirements,
+          ...(canonical.capabilities.length > 0
+            ? { capabilities: canonical.capabilities }
+            : {}),
         },
         ...(node.kind === "agent" && node.config ? { agent_runtime: node.config } : {}),
       },
@@ -1476,6 +1514,12 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
         max_corrections_per_node: canonical.policies.max_corrections_per_node,
         max_edge_traversals: canonical.policies.max_edge_traversals,
         max_tool_calls_per_node: canonical.policies.max_tool_calls_per_node,
+        // Runtime enforcement gate: the runtime_evidence bridge reads this
+        // exact workflow-level capability before persisting or injecting
+        // Manager-owned review evidence (see homerail_protocol pr-review).
+        ...(canonical.capabilities.length > 0
+          ? { capabilities: canonical.capabilities }
+          : {}),
       },
       agents,
       pattern: canonical.pattern,
@@ -1663,6 +1707,7 @@ export function canonicalWorkflowToV1Document(canonical: CanonicalWorkflowIR): R
     spec: {
       ...(canonical.description ? { description: canonical.description } : {}),
       workspace: canonical.workspace,
+      ...(canonical.capabilities.length > 0 ? { capabilities: canonical.capabilities } : {}),
       ...(Object.keys(canonical.contracts).length > 0 ? { contracts: canonical.contracts } : {}),
       ...((canonical.artifacts ?? []).length > 0 ? {
         artifacts: canonical.artifacts.map((artifact) => !("archive" in artifact) ? {

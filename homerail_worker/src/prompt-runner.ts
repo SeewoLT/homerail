@@ -10,6 +10,8 @@ import {
   DEFAULT_MANAGER_AGENT_RUNTIME_AGENT_TYPE,
   normalizeManagerAgentRuntimeAgentType,
   validateDagActorSurfaceMediaV1,
+  classifyReviewFailure,
+  sanitizeAttemptDiagnostic,
   type DagActorCheckpointV1,
   type DagAdvisorConfig,
   type DagCredentialBrokerCallRequest,
@@ -18,6 +20,8 @@ import {
   type DagNodeConfig,
   type DagWorkerSkillContextSummaryV1,
   type DagWorkerSkillVisualDataContractV1,
+  type AttemptDiagnosticV1,
+  type ReviewFailureCategory,
 } from "homerail-protocol";
 import { createAgentClient } from "./agent/factory.js";
 import type {
@@ -438,6 +442,8 @@ export async function runPrompt(
   const usageExecutionId = randomUUID();
   let nodeDurationMs: number | undefined;
   let nodeNumTurns: number | undefined;
+  let nodeFinishReason: string | null = null;
+  let nodeOutputTokenLimit: number | null = null;
   let lastUsageEmission: string | undefined;
   let workspaceBefore: WorkspaceSnapshot | undefined;
   let terminalActivityEmitted = false;
@@ -446,6 +452,20 @@ export async function runPrompt(
     reason: "agent turn ended without a successful DAG handoff",
   };
   const toolNamesById = new Map<string, string>();
+
+  function buildAttemptDiagnostics(
+    failureCategory: ReviewFailureCategory,
+  ): AttemptDiagnosticV1 | undefined {
+    return sanitizeAttemptDiagnostic({
+      schema: "attempt-diagnostic-v1",
+      finish_reason: nodeFinishReason,
+      output_tokens: nodeUsage.output_tokens,
+      output_token_limit: nodeOutputTokenLimit,
+      tool_argument_parse_state: dagState.toolArgumentParseState,
+      contract_stage: dagState.contractStage,
+      failure_category: failureCategory,
+    }) ?? undefined;
+  }
 
   activityEmitter.emit("started", {
     session_id: job.dagConfig.session_id ?? job.runId,
@@ -612,12 +632,20 @@ export async function runPrompt(
           // we replace rather than accumulate. Other adapters that emit a
           // single final aggregate behave the same way.
           Object.assign(nodeUsage, event.usage);
+          if (event.finish_reason !== undefined) nodeFinishReason = event.finish_reason ?? null;
+          if (event.output_token_limit !== undefined) {
+            nodeOutputTokenLimit = event.output_token_limit ?? null;
+          }
           emitUsage();
           break;
         case "done":
           if (event.usage) Object.assign(nodeUsage, event.usage);
           if (event.duration_ms !== undefined) nodeDurationMs = event.duration_ms;
           if (event.num_turns !== undefined) nodeNumTurns = event.num_turns;
+          if (event.finish_reason !== undefined) nodeFinishReason = event.finish_reason ?? null;
+          if (event.output_token_limit !== undefined) {
+            nodeOutputTokenLimit = event.output_token_limit ?? null;
+          }
           break;
       }
 
@@ -654,6 +682,7 @@ export async function runPrompt(
       }
       if (workspaceValid && dagState.handoffData) {
         const handoff = dagState.handoffData as Record<string, unknown>;
+        const attemptDiagnostics = buildAttemptDiagnostics("accepted");
         activityEmitter.emit("completed", completedActivityPayloadForHandoff(handoff));
         terminalActivityEmitted = true;
         // This is the authoritative runtime payload, not telemetry. The
@@ -661,7 +690,10 @@ export async function runPrompt(
         sendTerminalMessage(JSON.stringify({
           type: "response",
           session_id: dagState.sessionId,
-          data: dagState.handoffData,
+          data: {
+            ...handoff,
+            ...(attemptDiagnostics ? { attempt_diagnostics: attemptDiagnostics } : {}),
+          },
         }));
         promptResult = { status: "completed" };
       }
@@ -728,6 +760,7 @@ export async function runPrompt(
       nodeId: job.dagConfig.node_id,
       message: redactedMessage,
       session_id: job.dagConfig.session_id ?? job.runId,
+      attempt_diagnostics: buildAttemptDiagnostics(classifyReviewFailure(redactedMessage)),
       ...(job.dagConfig.round_id !== undefined ? { round_id: job.dagConfig.round_id } : {}),
       ...(job.dagConfig.actor_id !== undefined ? { actor_id: job.dagConfig.actor_id } : {}),
       ...(job.dagConfig.generation !== undefined ? { generation: job.dagConfig.generation } : {}),
@@ -758,6 +791,8 @@ export async function runPrompt(
       usage,
       duration_ms: nodeDurationMs,
       num_turns: nodeNumTurns,
+      finish_reason: nodeFinishReason,
+      output_token_limit: nodeOutputTokenLimit,
     });
     if (signature === lastUsageEmission) return;
     lastUsageEmission = signature;
@@ -767,6 +802,8 @@ export async function runPrompt(
       usage,
       duration_ms: nodeDurationMs,
       num_turns: nodeNumTurns,
+      finish_reason: nodeFinishReason,
+      output_token_limit: nodeOutputTokenLimit,
     });
     audit?.transcript.write({
       event: "usage",

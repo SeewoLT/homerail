@@ -114,6 +114,13 @@ describe("prompt runner", () => {
         nodeId: "coder",
         message: "Claude SDK result failed: error_max_turns",
         session_id: "run-node-error",
+        attempt_diagnostics: expect.objectContaining({
+          schema: "attempt-diagnostic-v1",
+          finish_reason: null,
+          tool_argument_parse_state: "unknown",
+          contract_stage: "unknown",
+          failure_category: "unknown",
+        }),
       }),
     }));
     expect(parsed.map((msg) => msg.type)).toContain("SESSION_END");
@@ -194,6 +201,67 @@ describe("prompt runner", () => {
     });
   });
 
+  it("propagates finish reason and output token limit into usage and handoff diagnostics", async () => {
+    const mockAgent: AgentClient = {
+      run(_prompt, tools) {
+        return (async function* () {
+          const handoffTool = tools.find((tool) => tool.name === "handoff")!;
+          await handoffTool.handler({ port: "done", content: "complete" });
+          yield {
+            type: "usage" as const,
+            usage: { output_tokens: 640 },
+            finish_reason: "max_tokens",
+            output_token_limit: 1024,
+          };
+          yield {
+            type: "done" as const,
+            usage: { output_tokens: 640 },
+            finish_reason: "max_tokens",
+            output_token_limit: 1024,
+          };
+        })();
+      },
+    };
+    registerAgentBackend("test-terminal-metadata", () => mockAgent);
+
+    const terminalMessages: string[] = [];
+    const streamed: string[] = [];
+    await runPrompt(
+      {
+        task: "finish metadata",
+        sender: "test",
+        runId: "run-terminal-metadata",
+        dagConfig: makeConfigWith({ session_id: "session-terminal" }),
+      },
+      {
+        wsSend: (data) => streamed.push(data),
+        onTerminalMessage: (data) => terminalMessages.push(data),
+        agentBackend: "test-terminal-metadata",
+      },
+    );
+
+    const usageEvents = streamed
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === "stream" && message.data?.event === "usage");
+    expect(usageEvents.at(-1)?.data).toMatchObject({
+      usage: { output_tokens: 640 },
+      finish_reason: "max_tokens",
+      output_token_limit: 1024,
+    });
+    expect(terminalMessages.map((message) => JSON.parse(message))).toContainEqual(expect.objectContaining({
+      type: "response",
+      data: expect.objectContaining({
+        attempt_diagnostics: expect.objectContaining({
+          schema: "attempt-diagnostic-v1",
+          finish_reason: "max_tokens",
+          output_tokens: 640,
+          output_token_limit: 1024,
+          failure_category: "accepted",
+        }),
+      }),
+    }));
+  });
+
   it("restricts correction turns to the handoff tool and correction system prompt", async () => {
     let observedTools: string[] = [];
     let observedContext: AgentRunContext | undefined;
@@ -233,7 +301,18 @@ describe("prompt runner", () => {
     expect(observedContext?.systemPrompt).toContain("Original reviewer instructions");
     expect(terminalMessages.map((message) => JSON.parse(message))).toContainEqual(expect.objectContaining({
       type: "response",
-      data: expect.objectContaining({ port: "done", content: "corrected" }),
+      data: expect.objectContaining({
+        port: "done",
+        content: "corrected",
+        attempt_diagnostics: expect.objectContaining({
+          schema: "attempt-diagnostic-v1",
+          attempt: 1,
+          finish_reason: null,
+          tool_argument_parse_state: "valid",
+          contract_stage: "tool_arguments",
+          failure_category: "accepted",
+        }),
+      }),
     }));
   });
 
@@ -614,15 +693,19 @@ describe("prompt runner", () => {
 
     expect(sent.map((message) => JSON.parse(message).type)).toContain("SESSION_END");
     expect(sent.map((message) => JSON.parse(message).type)).not.toContain("node_error");
-    expect(terminalMessages.map((message) => JSON.parse(message))).toEqual([{
+    expect(terminalMessages.map((message) => JSON.parse(message))).toEqual([expect.objectContaining({
       type: "node_error",
-      data: {
+      data: expect.objectContaining({
         runId: "run-deferred-node-error",
         nodeId: "coder",
         message: "agent ended without DAG handoff",
         session_id: "session-deferred",
-      },
-    }]);
+        attempt_diagnostics: expect.objectContaining({
+          schema: "attempt-diagnostic-v1",
+          failure_category: "unknown",
+        }),
+      }),
+    })]);
   });
 
   it("binds node_error to the same round transport fence as handoff", async () => {
@@ -658,9 +741,9 @@ describe("prompt runner", () => {
       },
     );
 
-    expect(terminalMessages.map((message) => JSON.parse(message))).toEqual([{
+    expect(terminalMessages.map((message) => JSON.parse(message))).toEqual([expect.objectContaining({
       type: "node_error",
-      data: {
+      data: expect.objectContaining({
         runId: "run-fenced-node-error",
         nodeId: "coder",
         message: "round two failed",
@@ -670,8 +753,12 @@ describe("prompt runner", () => {
         generation: 3,
         lease_generation: 8,
         command_id: "command-2",
-      },
-    }]);
+        attempt_diagnostics: expect.objectContaining({
+          schema: "attempt-diagnostic-v1",
+          failure_category: "unknown",
+        }),
+      }),
+    })]);
   });
 
   it("fails claude-sdk before execution when the protocol is missing", async () => {

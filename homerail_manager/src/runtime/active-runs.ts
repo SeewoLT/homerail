@@ -42,6 +42,8 @@ import {
   isDisabledDirectLlmAgentType,
   normalizeManagerAgentRuntimeAgentType,
   redactTelemetry,
+  sanitizeAttemptDiagnostic,
+  extractReviewEvidence,
   type AgentBuiltinToolName,
   type DagAdvisorConfig,
   type DagAgentToolName,
@@ -138,6 +140,14 @@ import {
   retireDagActorLease,
   writeDagActorCheckpoint,
 } from "../persistence/dag-actor-leases.js";
+import {
+  buildReviewEvidenceProjectionFor,
+  recordAttemptDiagnostic,
+  recordReviewHandoffEvidence,
+  writeReviewEvidenceProjectionFile,
+  type ReviewEvidenceIdentity,
+  type ReviewHandoffEvidenceInput,
+} from "../persistence/dag-review-evidence.js";
 import {
   createDagActorIntervention,
   DagActorInterventionConflictError,
@@ -277,6 +287,8 @@ export interface HandoffTransportFence {
   leaseGeneration?: number;
   commandId?: string;
 }
+
+export interface ReviewEvidenceWriteInput extends ReviewHandoffEvidenceInput {}
 
 export interface NodeSessionState {
   sessionId: string;
@@ -1464,6 +1476,44 @@ export function getCurrentNodeSession(runId: string, nodeId: string): NodeSessio
   return _ensureNodeSession(run, nodeId);
 }
 
+function _reviewEvidenceEnabled(run: ActiveRun, nodeId: string): boolean {
+  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  const workflowSpec = node?.extra?.workflow_spec_v1;
+  if (workflowSpec && typeof workflowSpec === "object" && !Array.isArray(workflowSpec)) {
+    const spec = workflowSpec as Record<string, unknown>;
+    if (spec.review_evidence === true) return true;
+    const capabilities = spec.capabilities;
+    if (Array.isArray(capabilities) && capabilities.includes("runtime_evidence")) return true;
+  }
+  return Boolean(run.contracts?.review_evidence === true);
+}
+
+/** True when this node is declared to own durable review evidence. */
+export function isReviewEvidenceNode(runId: string, nodeId: string): boolean {
+  const run = store.get(runId);
+  return run ? _reviewEvidenceEnabled(run, nodeId) : false;
+}
+
+function _reviewEvidenceContext(
+  run: ActiveRun,
+  nodeId: string,
+  attempt?: number,
+): ReviewEvidenceIdentity | undefined {
+  if (!_reviewEvidenceEnabled(run, nodeId)) return undefined;
+  const actor = getDagActorByNode(run.runId, nodeId);
+  const session = run.nodeSessions.get(nodeId);
+  if (!actor || !session) return undefined;
+  return {
+    runId: run.runId,
+    reviewer: actor.actor_id,
+    nodeId,
+    sessionId: session.sessionId,
+    roundId: run.currentRound.round_id,
+    generation: actor.generation,
+    attempt: attempt ?? (run.counters.corrections[nodeId] ?? 0) + 1,
+  };
+}
+
 export function isCurrentNodeSession(runId: string, nodeId: string, sessionId: string | undefined): boolean {
   if (!sessionId) return true;
   const current = getCurrentNodeSession(runId, nodeId);
@@ -2065,6 +2115,7 @@ export function requestNodeCorrection(
   runId: string,
   nodeId: string,
   reason: string,
+  diagnostics?: unknown,
 ): NodeCorrectionResult {
   const run = store.get(runId);
   if (!run) return { status: "unavailable", reason: `Unknown run: ${runId}` };
@@ -2073,6 +2124,21 @@ export function requestNodeCorrection(
 
   const maxAttempts = run.limits.max_corrections_per_node;
   const previousAttempts = run.counters.corrections[nodeId] ?? 0;
+  const failedAttempt = previousAttempts + 1;
+  const evidenceContext = _reviewEvidenceContext(run, nodeId, failedAttempt);
+  if (evidenceContext) {
+    try {
+      recordAttemptDiagnostic({
+        identity: evidenceContext,
+        diagnostic: sanitizeAttemptDiagnostic(diagnostics, {
+          attempt: evidenceContext.attempt,
+          failure_reason: reason,
+        }),
+      });
+    } catch {
+      // Evidence persistence is best-effort and never blocks correction.
+    }
+  }
   if (previousAttempts >= maxAttempts) {
     return { status: "exhausted", run, attempts: previousAttempts, maxAttempts };
   }
@@ -2110,6 +2176,30 @@ export function requestNodeCorrection(
       _outputBrokerActionRequirements(run, nodeId),
     ));
     mailbox.set("correction", values);
+    if (evidenceContext) {
+      const projection = buildReviewEvidenceProjectionFor(run.runId, evidenceContext.reviewer);
+      if (projection) {
+        mailbox.set("review_evidence", [projection]);
+        writeReviewEvidenceProjectionFile(run.runId, evidenceContext.reviewer);
+        // Deliver the same bounded projection to downstream command nodes
+        // whose ReviewEvidenceState inputs normalize persisted accepted
+        // evidence. Only workflows declaring the runtime_evidence capability
+        // may declare that contract, so this cannot leak into unrelated DAGs.
+        for (const edge of run.dagRun.graph.edges) {
+          if (edge.from_node !== nodeId || !edge.to_node || edge.label === "after_dep") continue;
+          const target = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === edge.to_node);
+          const targetSpec = target?.extra?.workflow_spec_v1;
+          if (!targetSpec || typeof targetSpec !== "object" || Array.isArray(targetSpec)) continue;
+          const inputContracts = (targetSpec as Record<string, unknown>).input_contracts;
+          if (!inputContracts || typeof inputContracts !== "object" || Array.isArray(inputContracts)) continue;
+          for (const [portName, contract] of Object.entries(inputContracts as Record<string, unknown>)) {
+            if (contract !== "ReviewEvidenceState") continue;
+            const targetMailbox = run.dagRun.mailboxes.get(edge.to_node);
+            if (targetMailbox) targetMailbox.set(portName, [projection]);
+          }
+        }
+      }
+    }
   }
   resetSkippedSuccessDescendants(run.dagRun, nodeId);
   run.dagRun.nodeStates.set(nodeId, "READY");
@@ -2310,6 +2400,7 @@ export function handoffActiveRun(
   port: string,
   content: unknown,
   fence?: HandoffTransportFence,
+  evidence?: ReviewEvidenceWriteInput,
 ): ActiveRun | undefined {
   const run = store.get(runId);
   if (!run) return undefined;
@@ -2318,6 +2409,22 @@ export function handoffActiveRun(
   const sourceState = getNodeState(run.dagRun, fromNode);
   if (sourceState === "COMPLETED" || sourceState === "FAILED" || sourceState === "CANCELLED" || sourceState === "SKIPPED") {
     throw new Error(`Node ${fromNode} cannot hand off from terminal state ${sourceState}`);
+  }
+  // Persist bounded accepted findings/coverage before final contract
+  // validation so a later incomplete or contract-invalid handoff cannot erase
+  // evidence that was already accepted. The success path below re-persists
+  // with the authoritative transport diagnostic; both writes are idempotent.
+  const submission = evidence?.submission ?? extractReviewEvidence(content);
+  if (submission) {
+    try {
+      const evidenceContext = _reviewEvidenceContext(run, fromNode);
+      if (evidenceContext) {
+        recordReviewHandoffEvidence(evidenceContext, { submission });
+        writeReviewEvidenceProjectionFile(run.runId, evidenceContext.reviewer);
+      }
+    } catch {
+      // Evidence persistence is best-effort and never blocks handoff processing.
+    }
   }
   _assertHandoffPreconditions(run, fromNode, port, content, true);
   const mutableBefore = _snapshotMutableRun(run);
@@ -2395,6 +2502,13 @@ export function handoffActiveRun(
       }
       const handedOffNode = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === fromNode);
       if (handedOffNode) _recordFanoutChild(run, handedOffNode, port, content);
+      if (evidence) {
+        const evidenceContext = _reviewEvidenceContext(run, fromNode);
+        if (evidenceContext) {
+          recordReviewHandoffEvidence(evidenceContext, evidence);
+          writeReviewEvidenceProjectionFile(run.runId, evidenceContext.reviewer);
+        }
+      }
       writeRunMetadata(runId, serializeRunMetadata(run));
     }).immediate();
   } catch (error) {

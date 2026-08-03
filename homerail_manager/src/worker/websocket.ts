@@ -273,8 +273,13 @@ export function setupWorkerWebSocket(
       let registered = false;
       let pingInterval: ReturnType<typeof setInterval> | null = null;
 
-      const tryCorrectNode = (runId: string, nodeId: string, reason: string): boolean => {
-        const correction = requestNodeCorrection(runId, nodeId, reason);
+      const tryCorrectNode = (
+        runId: string,
+        nodeId: string,
+        reason: string,
+        diagnostics?: unknown,
+      ): boolean => {
+        const correction = requestNodeCorrection(runId, nodeId, reason, diagnostics);
         if (correction.status === "scheduled") {
           options.onHandoffApplied?.(runId);
           return true;
@@ -532,7 +537,12 @@ export function setupWorkerWebSocket(
               );
             }
             if (result.status === "handoff_failed") {
-              tryCorrectNode(result.runId, result.nodeId, result.reason);
+              tryCorrectNode(
+                result.runId,
+                result.nodeId,
+                result.reason,
+                responseData?.attempt_diagnostics,
+              );
             }
           }
           return;
@@ -663,7 +673,7 @@ export function setupWorkerWebSocket(
         }
 
         if (msg.type === "node_error") {
-          const rawData = objectData(objectData(rawMessage)?.data) ?? msg.data;
+          const rawData = objectData(objectData(rawMessage)?.data) ?? (msg.data as Record<string, unknown>);
           if (!isCurrentDagTransport(worker_id, "node_error", rawData, msg.data.session_id)) return;
           if (shouldIgnoreStaleSession(worker_id, "node_error", {
             runId: msg.data.runId,
@@ -685,7 +695,12 @@ export function setupWorkerWebSocket(
             msg.data.session_id,
             rawData,
           );
-          if (tryCorrectNode(msg.data.runId, msg.data.nodeId, msg.data.message)) {
+          if (tryCorrectNode(
+            msg.data.runId,
+            msg.data.nodeId,
+            msg.data.message,
+            rawData?.attempt_diagnostics,
+          )) {
             return;
           }
           const run = failActiveRun(msg.data.runId, msg.data.nodeId, msg.data.message);

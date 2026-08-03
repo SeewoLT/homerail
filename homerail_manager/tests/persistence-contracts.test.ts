@@ -24,6 +24,7 @@ import {
   loadPersistedRunControlState,
   writeRunMetadata,
 } from "../src/persistence/store.js";
+import { recordReviewFinding } from "../src/persistence/dag-review-evidence.js";
 import { assertEpochMs, epochMsFromUnknown, nowEpochMs, nowIso } from "../src/persistence/time.js";
 
 describe("SQLite persistence contracts", () => {
@@ -183,7 +184,7 @@ describe("SQLite persistence contracts", () => {
   it("installs indexes for status filtering and updated-time run ordering", () => {
     const db = getDb();
     expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get())
-      .toEqual({ version: 34 });
+      .toEqual({ version: 35 });
     expect(db.prepare("PRAGMA index_info(idx_dag_runs_updated)").all())
       .toEqual([
         expect.objectContaining({ seqno: 0, name: "updated_at" }),
@@ -207,6 +208,44 @@ describe("SQLite persistence contracts", () => {
       .toEqual({ version: 33 });
     expect(migrated.prepare("PRAGMA index_info(idx_dag_runs_status_updated)").all())
       .toHaveLength(3);
+  });
+
+  it("persists bounded review evidence with strict fencing and append-only protection", () => {
+    const db = getDb();
+    ensureRunDir("run-evidence");
+    recordReviewFinding({
+      identity: {
+        runId: "run-evidence",
+        reviewer: "qwen",
+        nodeId: "qwen_review",
+        sessionId: "session-1",
+        roundId: "round-0001",
+        generation: 1,
+        attempt: 1,
+      },
+      finding: {
+        category: "security",
+        severity: "high",
+        title: "Unchecked response",
+        file: "src/app.ts",
+        line: 12,
+        evidence: "fetch('/api') is not awaited",
+        recommendation: "Await and validate",
+        confidence: "high",
+      },
+    });
+    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get())
+      .toEqual({ version: 35 });
+    expect(db.prepare("PRAGMA index_list(dag_review_evidence)").all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "idx_dag_review_evidence_fence_dedup", unique: 1 }),
+        expect.objectContaining({ name: "idx_dag_review_evidence_run_reviewer", unique: 0 }),
+        expect.objectContaining({ name: "idx_dag_review_evidence_run_node", unique: 0 }),
+      ]),
+    );
+    expect(() => db.exec(`
+      UPDATE dag_review_evidence SET attempt = 99
+    `)).toThrow(/append-only/);
   });
 
   it("appends session transcript JSONL without changing existing entries", () => {
