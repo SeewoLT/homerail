@@ -254,6 +254,42 @@ describe("runtime pattern worker tools", () => {
     }
   });
 
+  it("ignores shared Manager Git writes during parallel fanout without hiding nested Git metadata", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-parallel-git-"));
+    try {
+      fs.mkdirSync(path.join(root, "repo", ".git", "objects"), { recursive: true });
+      fs.mkdirSync(path.join(root, "workers", "own"), { recursive: true });
+      fs.mkdirSync(path.join(root, "workers", "sibling"), { recursive: true });
+      fs.writeFileSync(path.join(root, "repo", "README.md"), "tracked\n");
+      fs.writeFileSync(path.join(root, "repo", ".git", "objects", "before"), "manager-owned\n");
+      fs.writeFileSync(path.join(root, "workers", "own", "code.ts"), "before\n");
+      fs.writeFileSync(path.join(root, "workers", "sibling", "code.ts"), "before\n");
+      const policy = {
+        writable_paths: ["workers/own"],
+        readonly_paths: ["input", "repo"],
+        snapshot_exclude_paths: ["workers/sibling"],
+      };
+      const before = snapshotWorkspace(root, policy);
+
+      fs.writeFileSync(path.join(root, "workers", "own", "code.ts"), "implemented\n");
+      fs.writeFileSync(path.join(root, "workers", "sibling", "code.ts"), "concurrent sibling\n");
+      fs.writeFileSync(path.join(root, "repo", ".git", "objects", "after"), "manager commit\n");
+      let result = verifyWorkspacePolicy(before, snapshotWorkspace(root, policy), policy);
+      expect(result.valid).toBe(true);
+      expect(result.changed_paths).toEqual(["workers/own/code.ts"]);
+
+      fs.mkdirSync(path.join(root, "workers", "own", "nested", ".git"), { recursive: true });
+      fs.writeFileSync(path.join(root, "workers", "own", "nested", ".git", "config"), "created\n");
+      result = verifyWorkspacePolicy(before, snapshotWorkspace(root, policy), policy);
+      expect(result.changed_paths).toEqual([
+        "workers/own/code.ts",
+        "workers/own/nested/.git/config",
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects workspace symlinks that escape the policy root", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-symlink-"));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-outside-"));

@@ -116,7 +116,7 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  function createRun() {
+  function createRun(taskCount = 1) {
     const parsed = parseWorkflowSource(fs.readFileSync(TEMPLATE, "utf8"));
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
     const task = stageDagRunInputArtifact({
@@ -128,13 +128,13 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     const planContent = {
       version: 1,
       task_document_sha256: task.sha256,
-      tasks: [{
-        id: "runtime",
-        title: "Runtime",
-        description: "Implement runtime",
-        files: ["src/runtime.ts"],
+      tasks: Array.from({ length: taskCount }, (_unused, index) => ({
+        id: taskCount === 1 ? "runtime" : `runtime-${index + 1}`,
+        title: `Runtime ${index + 1}`,
+        description: `Implement runtime part ${index + 1}`,
+        files: [`src/runtime-${index + 1}.ts`],
         acceptance: ["passes"],
-      }],
+      })),
       local_tests: [{ id: "focused", command: "npm test -- --run focused", timeout_seconds: 900 }],
       shared: {
         repository_path: "repo",
@@ -451,9 +451,33 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
       .toBeDefined();
     expect(implementer?.workspaceAccess).toMatchObject({
       writable_paths: ["workers/implement/inv_0001/item_0001"],
-      readonly_paths: ["input"],
+      readonly_paths: ["input", "repo"],
       git_metadata_read_only: true,
     });
+  });
+
+  it("isolates three parallel implementers from sibling worktrees and shared Git metadata", () => {
+    const { planContent } = createRun(3);
+    const dispatcher = new RecordingDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", planContent);
+    executor.tick("autofix-v2-run");
+
+    const implementers = dispatcher.dispatched
+      .filter((entry) => entry.nodeId.startsWith("implement__item_"));
+    expect(implementers).toHaveLength(3);
+    for (const [index, implementer] of implementers.entries()) {
+      const ownPath = `workers/implement/inv_0001/item_${String(index + 1).padStart(4, "0")}`;
+      const siblingPaths = [1, 2, 3]
+        .filter((item) => item !== index + 1)
+        .map((item) => `workers/implement/inv_0001/item_${String(item).padStart(4, "0")}`);
+      expect(implementer.workspaceAccess).toMatchObject({
+        writable_paths: [ownPath],
+        readonly_paths: ["input", "repo"],
+        git_metadata_read_only: true,
+        snapshot_exclude_paths: siblingPaths,
+      });
+    }
   });
 
   it.skipIf(process.platform === "win32")(

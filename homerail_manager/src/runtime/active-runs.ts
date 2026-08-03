@@ -4898,6 +4898,12 @@ function _fanoutChildWorkspacePath(node: DAGGraphNode, state: FanoutRuntimeState
   return `${root}/${node.node_id}/inv_${String(state.invocation).padStart(4, "0")}/item_${String(index + 1).padStart(4, "0")}`;
 }
 
+function _fanoutRepositoryPath(node: DAGGraphNode): string {
+  return node.gateway_config?.repository_path === "."
+    ? "."
+    : _fanoutSafeRelativePath(node.gateway_config?.repository_path, "repo");
+}
+
 function _fanoutWorkerRuntime(
   node: DAGGraphNode,
   state: FanoutRuntimeState,
@@ -4924,6 +4930,7 @@ function _fanoutWorkerRuntime(
   const access = rawAccess && typeof rawAccess === "object" && !Array.isArray(rawAccess)
     ? structuredClone(rawAccess as Record<string, unknown>)
     : {};
+  const managerReadOnlyPaths = ["input"];
   if (workspacePath) {
     const declaredWritablePaths = Array.isArray(access.writable_paths)
       ? access.writable_paths.filter((entry): entry is string => typeof entry === "string")
@@ -4941,11 +4948,19 @@ function _fanoutWorkerRuntime(
         ? undefined
         : _fanoutChildWorkspacePath(node, state, siblingIndex))
       .filter((entry): entry is string => typeof entry === "string");
+    const repositoryPath = _fanoutRepositoryPath(node);
+    // The primary checkout is Manager-owned and shares its common Git object
+    // store with every linked worktree. Marking it read-only also causes the
+    // Worker snapshotter to ignore only that checkout's root `.git` directory,
+    // so a sibling's Manager-owned commit cannot look like a worker mutation.
+    // Nested `.git` directories created inside this child's writable worktree
+    // remain visible to the snapshot policy.
+    if (repositoryPath !== ".") managerReadOnlyPaths.push(repositoryPath);
   } else {
     access.writable_paths = Array.isArray(access.writable_paths) ? access.writable_paths.map(replacePath) : [];
   }
   access.readonly_paths = Array.from(new Set([
-    "input",
+    ...managerReadOnlyPaths,
     ...(Array.isArray(access.readonly_paths) ? access.readonly_paths.map(replacePath).filter((entry): entry is string => typeof entry === "string") : []),
   ])).sort();
   policy.workspace_access = access;
@@ -5045,9 +5060,7 @@ function _prepareFanoutGitWorktree(
   const resolved = _commandGatewayCwd(run, RUN_WORKSPACE_CWD);
   if ("error" in resolved) throw new Error(resolved.error);
   const runWorkspace = resolved.cwd;
-  const repositoryPath = node.gateway_config?.repository_path === "."
-    ? "."
-    : _fanoutSafeRelativePath(node.gateway_config?.repository_path, "repo");
+  const repositoryPath = _fanoutRepositoryPath(node);
   const repository = path.resolve(runWorkspace, repositoryPath);
   const target = path.resolve(runWorkspace, workspacePath);
   if (!_pathIsWithin(runWorkspace, repository) || !_pathIsWithin(runWorkspace, target)) {
