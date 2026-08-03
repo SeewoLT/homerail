@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -19,7 +18,17 @@ import {
   validateReviewEvidenceProjection,
   type ReviewFindingV1,
 } from "../src/pr-review.js";
-import { reviewFindingDedupKey } from "../src/sha256.js";
+import { reviewFindingDedupKey, sha256Hex } from "../src/sha256.js";
+
+describe("sha256Hex", () => {
+  it.each([
+    ["", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+    ["abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"],
+    ["你好, HomeRail 🚆", "77e1142f9cd5d2c09653fd522f8a553215f20a3732835364701f32fccb666110"],
+  ])("matches the fixed SHA-256 vector for %j", (input, digest) => {
+    expect(sha256Hex(input)).toBe(digest);
+  });
+});
 
 describe("isFullGitRevision", () => {
   it("accepts full SHA-1 and SHA-256 revisions only", () => {
@@ -44,15 +53,14 @@ describe("canonical changed-file coverage", () => {
 
   it("pins the canonical digest to sorted unique newline-joined paths", () => {
     const canonical = changedFileCoverageDigest(["c/d.txt", "b.txt", "a.txt", "b.txt", ""]);
-    const expected = createHash("sha256")
-      .update(["a.txt", "b.txt", "c/d.txt"].join("\n"))
-      .digest("hex");
-    expect(canonical).toEqual({ digest: expected, count: 3 });
+    expect(canonical).toEqual({
+      digest: "420e2782dc08d01733c663074b910ed3ab02961fe14a875eb96618bd8aa3175f",
+      count: 3,
+    });
     // The divergent Git-order JSON.stringify algorithm must not be reintroduced.
-    const legacy = createHash("sha256")
-      .update(JSON.stringify(["c/d.txt", "b.txt", "a.txt", "b.txt", ""]))
-      .digest("hex");
-    expect(canonical.digest).not.toBe(legacy);
+    expect(canonical.digest).not.toBe(
+      "6ec9ab82dd890249284be894353a06b9f1f3b6ea65bc54c187e60950e3922b29",
+    );
   });
 
   it("produces a compact attestation and validates it strictly", () => {
