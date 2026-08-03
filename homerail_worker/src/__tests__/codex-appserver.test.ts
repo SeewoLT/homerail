@@ -269,16 +269,18 @@ describe("CodexAppServerAdapter", () => {
   }, 15000);
 
   it("preloads the configured non-dumpable guard into provider-backed Linux Codex", async () => {
+    const guard = "/usr/local/lib/homerail-codex-secret-guard.so";
+    const existsSync = vi.fn((candidate: unknown) => String(candidate) === guard);
     vi.doMock("node:fs", async () => {
       const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
-      return { ...actual, existsSync: vi.fn().mockReturnValue(true) };
+      return { ...actual, existsSync };
     });
     const { _guardedCodexSpawnCommandForTest } = await import("../agent/codex-appserver.js");
     expect(_guardedCodexSpawnCommandForTest(
       "/app/codex",
       ["app-server"],
       { HOMERAIL_CODEX_API_KEY: "provider-secret" },
-      "/usr/local/lib/homerail-codex-secret-guard.so",
+      guard,
       "linux",
     )).toEqual({
       bin: "/app/codex",
@@ -288,11 +290,13 @@ describe("CodexAppServerAdapter", () => {
         LD_PRELOAD: "/usr/local/lib/homerail-codex-secret-guard.so",
       },
     });
+    expect(existsSync).toHaveBeenCalledTimes(1);
+    expect(existsSync).toHaveBeenCalledWith(guard);
     expect(_guardedCodexSpawnCommandForTest(
       "/app/codex",
       ["app-server"],
       {},
-      "/usr/local/lib/homerail-codex-secret-guard.so",
+      guard,
       "linux",
     )).toEqual({ bin: "/app/codex", args: ["app-server"], env: {} });
   });

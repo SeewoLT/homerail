@@ -301,7 +301,7 @@ function guardedSpawnCommand(
   if (!env.HOMERAIL_CODEX_API_KEY || platform !== "linux") return { bin, args, env: spawnEnv };
   const guard = configuredGuard?.trim();
   if (!guard) throw new Error("Codex provider secret guard is required on Linux");
-  const resolved = findExistingBinary(guard);
+  const resolved = findExistingBinary(guard, platform);
   if (!resolved) throw new Error(`Configured Codex secret guard not found: ${guard}`);
   spawnEnv.LD_PRELOAD = resolved;
   return { bin, args, env: spawnEnv };
@@ -336,8 +336,8 @@ function executableCandidates(command: string, platform = process.platform): str
     .concat(command);
 }
 
-function findExistingBinary(command: string): string | null {
-  for (const candidate of executableCandidates(command)) {
+function findExistingBinary(command: string, platform = process.platform): string | null {
+  for (const candidate of executableCandidates(command, platform)) {
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;
