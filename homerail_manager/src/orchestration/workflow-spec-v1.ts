@@ -714,6 +714,16 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       const resultBrokerRequirements = node.config.result_required_broker_actions ?? [];
       const resultWorkspaceFiles = node.config.result_required_workspace_files ?? [];
       if (
+        (resultBrokerRequirements.length > 0 || resultWorkspaceFiles.length > 0)
+        && !node.config.result_contract
+      ) {
+        add(
+          `${nodePath}/config/result_contract`,
+          "DAG_SEMANTIC_FANOUT_RESULT_CONTRACT_REQUIRED",
+          "fanout result evidence requirements require result_contract",
+        );
+      }
+      if (
         workerPolicy?.workspace_access?.git_metadata_read_only === true
         && (
           workerPolicy.workspace_access.writable_paths.length !== 1

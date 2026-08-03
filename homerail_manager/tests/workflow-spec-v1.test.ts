@@ -683,6 +683,51 @@ spec:
     ]));
   });
 
+  it("requires a dynamic fan-out result contract when evidence is required", () => {
+    const result = compileWorkflowSource(`
+api_version: homerail.ai/v1
+kind: Workflow
+metadata: { id: fanout-evidence-contract, name: Fanout Evidence Contract }
+spec:
+  contracts:
+    Items: { type: array }
+    Report: { type: object }
+  agents: { worker: { system: Work. } }
+  nodes:
+    fan:
+      kind: fanout
+      inputs: { items: { contract: Items } }
+      outputs: { passed: {}, failed: {} }
+      config:
+        input: items
+        worker_agent: worker
+        worker_policy:
+          workspace_access: { writable_paths: [work], readonly_paths: [input] }
+          allowed_dag_tools: [handoff]
+        max_items: 2
+        max_parallelism: 1
+        completion: all
+        result_required_workspace_files:
+          - { path_field: report.path, sha256_field: report.sha256, contract: Report }
+        result_port: passed
+        failed_port: failed
+    done: { kind: terminal, outcome: success, inputs: { result: {} } }
+    failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+  edges:
+    - { from: $run.input, to: fan.items }
+    - { from: fan.passed, to: done.result }
+    - { from: fan.failed, to: failed.result, condition: on_failure }
+`);
+
+    expect(result.valid).toBe(false);
+    expect(result.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DAG_SEMANTIC_FANOUT_RESULT_CONTRACT_REQUIRED",
+        path: "/spec/nodes/fan/config/result_contract",
+      }),
+    ]));
+  });
+
   it("requires isolated fanout workers to declare their injected writable worktree", () => {
     const source = `
 api_version: homerail.ai/v1

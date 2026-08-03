@@ -911,6 +911,57 @@ edges:
       .toThrow("not active");
   });
 
+  it("fails closed when fanout evidence requirements lack a result contract at runtime", () => {
+    const parsed = parseWorkflowSource(yaml("fanout-evidence-contract-runtime", `
+contracts:
+  Items: { type: array }
+  WorkerResult: { type: object }
+  Report: { type: object }
+agents:
+  worker: { system: Process one item. }
+nodes:
+  fan:
+    kind: fanout
+    inputs: { items: { contract: Items } }
+    outputs: { passed: {}, failed: {} }
+    config:
+      input: items
+      worker_agent: worker
+      worker_policy:
+        workspace_access: { writable_paths: [work], readonly_paths: [input] }
+        allowed_dag_tools: [handoff]
+      max_items: 2
+      max_parallelism: 1
+      completion: all
+      result_contract: WorkerResult
+      result_required_workspace_files:
+        - { path_field: report.path, sha256_field: report.sha256, contract: Report }
+      result_port: passed
+      failed_port: failed
+  done: { kind: terminal, outcome: success, inputs: { result: {} } }
+  failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+edges:
+  - { from: $run.input, to: fan.items }
+  - { from: fan.passed, to: done.result }
+  - { from: fan.failed, to: failed.result, condition: on_failure }
+`));
+    const fan = parsed.graph.nodes.find((node) => node.node_id === "fan");
+    expect(fan?.gateway_config).toBeDefined();
+    delete fan!.gateway_config!.result_contract;
+
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    executor.createRun("fanout-evidence-contract-runtime-run", parsed, JSON.stringify([]));
+    executor.tick("fanout-evidence-contract-runtime-run");
+
+    const run = getActiveRun("fanout-evidence-contract-runtime-run");
+    expect(run?.status).toBe("failed");
+    expect(run?.dagRun.nodeStates.get("fan")).toBe("FAILED");
+    expect(run?.counters.abort_reason).toContain("DAG_FANOUT_RESULT_CONTRACT_REQUIRED");
+    expect(run?.dagRun.graph.nodes.some((node) => node.node_id.startsWith("fan__item_"))).toBe(false);
+    expect(dispatcher.dispatched).toEqual([]);
+  });
+
   it("uses unique child ids and rejects stale children when fanout is entered again", () => {
     const parsed = parseWorkflowSource(yaml("reentered-fanout", `
 contracts:

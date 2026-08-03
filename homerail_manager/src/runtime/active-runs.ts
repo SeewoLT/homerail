@@ -5180,6 +5180,18 @@ function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutR
 
 function _startFanout(run: ActiveRun, node: DAGGraphNode): boolean {
   const config = node.gateway_config;
+  const resultEvidenceConfigured = (
+    (Array.isArray(config?.result_required_broker_actions) && config.result_required_broker_actions.length > 0)
+    || (Array.isArray(config?.result_required_workspace_files) && config.result_required_workspace_files.length > 0)
+  );
+  if (resultEvidenceConfigured && !config?.result_contract) {
+    abortActiveRun(
+      run.runId,
+      "DAG_FANOUT_RESULT_CONTRACT_REQUIRED fanout result evidence requirements require result_contract",
+      node.node_id,
+    );
+    return false;
+  }
   const inputs = _nodeInputs(run.dagRun, node.node_id);
   const raw = inputs[config?.input || "items"]?.at(-1) ?? _firstInputValue(inputs);
   const selected = _fieldValue(raw, config?.item_field);
