@@ -5653,6 +5653,7 @@ function _workspaceAccess(node: DAGGraphNode): DagWorkspaceAccess | undefined {
   return {
     writable_paths: writable,
     ...(readonly ? { readonly_paths: readonly } : {}),
+    ...(value.git_metadata_read_only === true ? { git_metadata_read_only: true } : {}),
     ...(typeof value.max_snapshot_files === "number" ? { max_snapshot_files: value.max_snapshot_files } : {}),
     ...(snapshotExclude ? { snapshot_exclude_paths: snapshotExclude } : {}),
   };

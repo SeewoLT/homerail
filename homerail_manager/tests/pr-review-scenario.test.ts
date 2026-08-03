@@ -392,6 +392,37 @@ describe("PR Review scenario assets", () => {
       .toMatchObject({ report: { status: "pass" }, quorum: { passed: true, successes: 3 } });
   });
 
+  it("completes with retained findings when two models approve and one requests changes", async () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-finding-veto-runtime";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    handoffActiveRun(runId, "qwen_review", "voted", modelReview("qwen"));
+    handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi"));
+    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm", "request_changes"));
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+
+    const decision = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "decide" && handoff.port === "decided",
+    )?.content;
+    expect(decision).toMatchObject({
+      report: { status: "findings", actionable_count: 1 },
+      quorum: { passed: false, successes: 2, total: 3, threshold: 2 },
+    });
+    expect(getActiveRun(runId)?.status).toBe("cancelled");
+    expect(getActiveRun(runId)?.dagRun.nodeStates.get("decision_failed")).not.toBe("COMPLETED");
+    expect(await finalizeRunArtifacts(runId, "failure")).toEqual([
+      expect.objectContaining({ name: "pr-review.json", status: "ready", publish: "always" }),
+    ]);
+    expect(JSON.parse(fs.readFileSync(getRunArtifactBlobPath(runId, "pr-review.json")!, "utf8")))
+      .toMatchObject({ report: { status: "findings" }, quorum: { passed: false, successes: 2 } });
+  });
+
   it("turns one failed model into abstain while retaining another model's finding", () => {
     const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";

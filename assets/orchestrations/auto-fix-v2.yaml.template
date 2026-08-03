@@ -1114,7 +1114,7 @@ spec:
     - { from: fix_request_join.ready, to: fix_round_gate.state }
     - { from: fix_request_join.missing, to: decision_missing.join }
     - { from: fix_round_gate.fix, to: fix.review }
-    - { from: fix_round_gate.unexpected_clean, to: decision_missing.unexpected_clean, condition: on_failure }
+    - { from: fix_round_gate.unexpected_clean, to: decision_missing.unexpected_clean }
     - { from: fix_round_gate.exhausted, to: needs_human.exhausted }
     - { from: fix.fixed, to: review_revision.fixes }
     - { from: fix.failed, to: needs_human.fix, condition: on_failure }
@@ -1134,11 +1134,11 @@ spec:
       to: fix_round_gate.state
       max_traversals: 4
     - { from: initial_confirmation_pair.ready, to: final_confirmation_pair.initial }
-    - { from: initial_confirmation_pair.invalid, to: decision_missing.initial_confirmation, condition: on_failure }
+    - { from: initial_confirmation_pair.invalid, to: decision_missing.initial_confirmation }
     - { from: revision_confirmation_pair.ready, to: final_confirmation_pair.revision }
-    - { from: revision_confirmation_pair.invalid, to: decision_missing.revision_confirmation, condition: on_failure }
+    - { from: revision_confirmation_pair.invalid, to: decision_missing.revision_confirmation }
     - { from: final_confirmation_pair.ready, to: verify_confirmation.reviews }
-    - { from: final_confirmation_pair.invalid, to: decision_missing.final_confirmation, condition: on_failure }
+    - { from: final_confirmation_pair.invalid, to: decision_missing.final_confirmation }
     - { from: verify_confirmation.ready, to: finalize_ready.decision }
     - { from: verify_confirmation.failed, to: decision_missing.confirmation, condition: on_failure }
     - { from: finalize_ready.ready, to: ready_for_ci.result }

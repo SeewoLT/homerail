@@ -284,6 +284,25 @@ spec:
                   passed: { const: false }
         - if:
             properties:
+              report:
+                type: object
+                required: [actionable_count]
+                properties:
+                  actionable_count: { type: integer, minimum: 1 }
+          then:
+            properties:
+              quorum:
+                type: object
+                required: [passed]
+                properties:
+                  passed: { const: false }
+        - if:
+            properties:
+              report:
+                type: object
+                required: [actionable_count]
+                properties:
+                  actionable_count: { const: 0 }
               quorum:
                 type: object
                 required: [successes]
@@ -296,8 +315,6 @@ spec:
                 required: [passed]
                 properties:
                   passed: { const: true }
-
-
   artifacts:
     - name: pr-review.json
       source: { type: handoff, node: decide, port: decided }

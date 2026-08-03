@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { DAGDispatcher, DispatchEnvelope } from "../src/orchestration/dag-dispatcher.js";
+import { edgeMatchesHandoff } from "../src/orchestration/dag-engine.js";
 import { GraphExecutor } from "../src/orchestration/graph-executor.js";
 import { validateJsonContract } from "../src/orchestration/json-contract.js";
 import { parseWorkflowSource } from "../src/orchestration/workflow-spec-v1.js";
@@ -404,6 +405,18 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
         unwrap_single_join_value: true,
         field: "quality.status",
       });
+    for (const [fromNode, fromPort] of [
+      ["fix_round_gate", "unexpected_clean"],
+      ["initial_confirmation_pair", "invalid"],
+      ["revision_confirmation_pair", "invalid"],
+      ["final_confirmation_pair", "invalid"],
+    ] as const) {
+      const edge = parsed.graph.edges.find((candidate) => (
+        candidate.from_node === fromNode && candidate.from_port === fromPort
+      ));
+      expect(edge).toBeDefined();
+      expect(edgeMatchesHandoff(edge!, fromPort)).toBe(true);
+    }
     expect(validateJsonContract(parsed.meta.contracts?.TaskPlan, {
       version: 1,
       task_document_sha256: "a".repeat(64),
@@ -418,6 +431,23 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
       local_tests: [{ id: "unbounded", command: "npm test" }],
       shared: { repository_path: "repo", task_document: "input/task.md", task_plan: "input/task-plan.json", pr_context: "input/pr-context.json" },
     })).toMatchObject({ valid: false });
+  });
+
+  it("projects the read-only git metadata policy into real dispatch envelopes", () => {
+    const { parsed, planContent } = createRun();
+    const dispatcher = new RecordingDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", planContent);
+    executor.tick("autofix-v2-run");
+
+    const implementer = dispatcher.dispatched.find((entry) => entry.nodeId === "implement__item_0001");
+    expect(parsed.graph.nodes.find((node) => node.node_id === "implement")?.extra?.workflow_spec_v1)
+      .toBeDefined();
+    expect(implementer?.workspaceAccess).toMatchObject({
+      writable_paths: ["workers/implement/inv_0001/item_0001"],
+      readonly_paths: ["input"],
+      git_metadata_read_only: true,
+    });
   });
 
   it("requires a valid report, runs a second real fixer, then converges after two fresh clean reviews", async () => {
