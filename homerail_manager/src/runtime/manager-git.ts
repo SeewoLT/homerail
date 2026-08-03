@@ -34,7 +34,11 @@ function managerGitEnv(): NodeJS.ProcessEnv {
   return {
     ...env,
     GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: devNull,
+    // Git for Windows rejects Node's `os.devNull` value (`\\.\nul`) as a
+    // config-file path, even though Node itself accepts that device spelling.
+    // The native DOS device name keeps the global config empty without
+    // weakening the fixed `-c` policy below.
+    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : devNull,
     GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
     GIT_ASKPASS: "",
