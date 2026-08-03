@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   getActiveRun: vi.fn(),
   getDagActorByNode: vi.fn(),
   getDagActorCommand: vi.fn(),
+  getDagActorLiveCommand: vi.fn(),
   acquireDagActorLease: vi.fn(),
   assessDagActorLease: vi.fn(),
   recordAttemptDiagnostic: vi.fn(),
@@ -20,6 +21,10 @@ vi.mock("../src/runtime/active-runs.js", () => ({
 vi.mock("../src/persistence/dag-actors.js", () => ({
   getDagActorByNode: mocks.getDagActorByNode,
   getDagActorCommand: mocks.getDagActorCommand,
+}));
+
+vi.mock("../src/persistence/dag-actor-live-commands.js", () => ({
+  getDagActorLiveCommand: mocks.getDagActorLiveCommand,
 }));
 
 vi.mock("../src/persistence/dag-actor-leases.js", () => ({
@@ -61,6 +66,8 @@ describe("response bridge transport fence", () => {
       target_generation: 3,
       status: "delivered",
     });
+    mocks.getDagActorLiveCommand.mockReset();
+    mocks.getDagActorLiveCommand.mockReturnValue(undefined);
     mocks.assessDagActorLease.mockReset();
     mocks.assessDagActorLease.mockReturnValue({ current: true, lease: {} });
     mocks.acquireDagActorLease.mockReset();
