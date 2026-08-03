@@ -616,9 +616,10 @@ spec:
         If input:correction exists, do not re-analyze the repository, re-read
         diff evidence, or reserialize any changed-file list. Use the
         correction's accepted evidence and exact diagnostics; resubmit only the
-        missing or invalid fields (the exact coverage attestation and any
-        missing or invalid findings), preserving every already accepted
-        finding. Call no tool except handoff.
+        missing or invalid fields. Include the exact coverage attestation, but
+        do not repeat accepted findings: findings contains only missing or new
+        findings, and the Manager merges the accepted set monotonically. Call
+        no tool except handoff.
 
     kimi_reviewer:
       system: |
@@ -653,9 +654,10 @@ spec:
         If input:correction exists, do not re-analyze the repository, re-read
         diff evidence, or reserialize any changed-file list. Use the
         correction's accepted evidence and exact diagnostics; resubmit only the
-        missing or invalid fields (the exact coverage attestation and any
-        missing or invalid findings), preserving every already accepted
-        finding. Call no tool except handoff.
+        missing or invalid fields. Include the exact coverage attestation, but
+        do not repeat accepted findings: findings contains only missing or new
+        findings, and the Manager merges the accepted set monotonically. Call
+        no tool except handoff.
 
     glm_reviewer:
       system: |
@@ -688,9 +690,10 @@ spec:
         If input:correction exists, do not re-analyze the repository, re-read
         diff evidence, or reserialize any changed-file list. Use the
         correction's accepted evidence and exact diagnostics; resubmit only the
-        missing or invalid fields (the exact coverage attestation and any
-        missing or invalid findings), preserving every already accepted
-        finding. Call no tool except handoff.
+        missing or invalid fields. Include the exact coverage attestation, but
+        do not repeat accepted findings: findings contains only missing or new
+        findings, and the Manager merges the accepted set monotonically. Call
+        no tool except handoff.
 
 
   nodes:
@@ -1061,7 +1064,8 @@ spec:
               const candidateFindings=candidate&&Array.isArray(candidate.findings)?candidate.findings.filter(validFinding):[];
               for(const finding of candidateFindings){const key=findingKey(finding);if(!seen.has(key)){seen.add(key);findings.push(finding)}}
               const lastAttempt=attempts[attempts.length-1];
-              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||candidate.vote==='request_changes')&&coverageValid&&((candidate.vote==='approve'&&candidateFindings.length===0)||(candidate.vote==='request_changes'&&candidateFindings.length>0)));
+              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||candidate.vote==='request_changes')&&coverageValid);
+              const resolvedVote=complete&&findings.length>0?'request_changes':candidate&&candidate.vote;
               const explicitAbstain=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='failed'&&candidate.vote==='abstain');
               const category=complete?'accepted':(lastAttempt&&typeof lastAttempt.failure_category==='string')?lastAttempt.failure_category:explicitAbstain?'reviewer_abstained':'unknown';
               const failureCategories=new Set(['provider_output_truncated','handoff_arguments_invalid','contract_validation_failed','transport_failed','unknown']);
@@ -1070,7 +1074,7 @@ spec:
               const diagnostics=(attempts.length>0?attempts.slice(0,8):[{attempt:1,failure_category:category}]).map(d=>({attempt:d.attempt,category:d.failure_category??d.category??category,finish_reason:d.finish_reason??null,output_tokens:d.output_tokens??null,output_token_limit:d.output_token_limit??null,tool_arguments_parse_state:parseState(d.tool_argument_parse_state),contract_validation_stage:contractStage(d.contract_stage),message:d.message??null}));
               if(complete&&(diagnostics.at(-1)?.category||'')!=='accepted'&&diagnostics.length<8)diagnostics.push({attempt:(Number(diagnostics.at(-1)?.attempt)||0)+1,category:'accepted',finish_reason:null,output_tokens:null,output_token_limit:null,tool_arguments_parse_state:null,contract_validation_stage:null,message:null});
               const summary=(complete||explicitAbstain)?bounded(candidate&&candidate.summary?candidate.summary:'',12000):`${reviewer} reviewer did not complete a valid vote (${category})`+(message?': '+bounded(message,300):'');
-              process.stdout.write(JSON.stringify({reviewer,status:complete?'complete':'failed',vote:complete?candidate.vote:'abstain',summary,coverage:attestation||trusted.coverage,reviewed_files:coverageValid?changed:[],unreviewed_files:coverageValid?[]:changed,evidence_truncated:evidenceTruncated,findings:complete&&candidate.vote==='approve'?[]:findings.slice(0,50).map(publicFinding),diagnostics}));
+              process.stdout.write(JSON.stringify({reviewer,status:complete?'complete':'failed',vote:complete?resolvedVote:'abstain',summary,coverage:attestation||trusted.coverage,reviewed_files:coverageValid?changed:[],unreviewed_files:coverageValid?[]:changed,evidence_truncated:evidenceTruncated,findings:complete&&resolvedVote==='approve'?[]:findings.slice(0,50).map(publicFinding),diagnostics}));
             });
           - qwen
           - qwen_review
@@ -1125,7 +1129,8 @@ spec:
               const candidateFindings=candidate&&Array.isArray(candidate.findings)?candidate.findings.filter(validFinding):[];
               for(const finding of candidateFindings){const key=findingKey(finding);if(!seen.has(key)){seen.add(key);findings.push(finding)}}
               const lastAttempt=attempts[attempts.length-1];
-              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||candidate.vote==='request_changes')&&coverageValid&&((candidate.vote==='approve'&&candidateFindings.length===0)||(candidate.vote==='request_changes'&&candidateFindings.length>0)));
+              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||candidate.vote==='request_changes')&&coverageValid);
+              const resolvedVote=complete&&findings.length>0?'request_changes':candidate&&candidate.vote;
               const explicitAbstain=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='failed'&&candidate.vote==='abstain');
               const category=complete?'accepted':(lastAttempt&&typeof lastAttempt.failure_category==='string')?lastAttempt.failure_category:explicitAbstain?'reviewer_abstained':'unknown';
               const failureCategories=new Set(['provider_output_truncated','handoff_arguments_invalid','contract_validation_failed','transport_failed','unknown']);
@@ -1134,7 +1139,7 @@ spec:
               const diagnostics=(attempts.length>0?attempts.slice(0,8):[{attempt:1,failure_category:category}]).map(d=>({attempt:d.attempt,category:d.failure_category??d.category??category,finish_reason:d.finish_reason??null,output_tokens:d.output_tokens??null,output_token_limit:d.output_token_limit??null,tool_arguments_parse_state:parseState(d.tool_argument_parse_state),contract_validation_stage:contractStage(d.contract_stage),message:d.message??null}));
               if(complete&&(diagnostics.at(-1)?.category||'')!=='accepted'&&diagnostics.length<8)diagnostics.push({attempt:(Number(diagnostics.at(-1)?.attempt)||0)+1,category:'accepted',finish_reason:null,output_tokens:null,output_token_limit:null,tool_arguments_parse_state:null,contract_validation_stage:null,message:null});
               const summary=(complete||explicitAbstain)?bounded(candidate&&candidate.summary?candidate.summary:'',12000):`${reviewer} reviewer did not complete a valid vote (${category})`+(message?': '+bounded(message,300):'');
-              process.stdout.write(JSON.stringify({reviewer,status:complete?'complete':'failed',vote:complete?candidate.vote:'abstain',summary,coverage:attestation||trusted.coverage,reviewed_files:coverageValid?changed:[],unreviewed_files:coverageValid?[]:changed,evidence_truncated:evidenceTruncated,findings:complete&&candidate.vote==='approve'?[]:findings.slice(0,50).map(publicFinding),diagnostics}));
+              process.stdout.write(JSON.stringify({reviewer,status:complete?'complete':'failed',vote:complete?resolvedVote:'abstain',summary,coverage:attestation||trusted.coverage,reviewed_files:coverageValid?changed:[],unreviewed_files:coverageValid?[]:changed,evidence_truncated:evidenceTruncated,findings:complete&&resolvedVote==='approve'?[]:findings.slice(0,50).map(publicFinding),diagnostics}));
             });
           - kimi
           - kimi_review
@@ -1189,7 +1194,8 @@ spec:
               const candidateFindings=candidate&&Array.isArray(candidate.findings)?candidate.findings.filter(validFinding):[];
               for(const finding of candidateFindings){const key=findingKey(finding);if(!seen.has(key)){seen.add(key);findings.push(finding)}}
               const lastAttempt=attempts[attempts.length-1];
-              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||candidate.vote==='request_changes')&&coverageValid&&((candidate.vote==='approve'&&candidateFindings.length===0)||(candidate.vote==='request_changes'&&candidateFindings.length>0)));
+              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||candidate.vote==='request_changes')&&coverageValid);
+              const resolvedVote=complete&&findings.length>0?'request_changes':candidate&&candidate.vote;
               const explicitAbstain=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='failed'&&candidate.vote==='abstain');
               const category=complete?'accepted':(lastAttempt&&typeof lastAttempt.failure_category==='string')?lastAttempt.failure_category:explicitAbstain?'reviewer_abstained':'unknown';
               const failureCategories=new Set(['provider_output_truncated','handoff_arguments_invalid','contract_validation_failed','transport_failed','unknown']);
@@ -1198,7 +1204,7 @@ spec:
               const diagnostics=(attempts.length>0?attempts.slice(0,8):[{attempt:1,failure_category:category}]).map(d=>({attempt:d.attempt,category:d.failure_category??d.category??category,finish_reason:d.finish_reason??null,output_tokens:d.output_tokens??null,output_token_limit:d.output_token_limit??null,tool_arguments_parse_state:parseState(d.tool_argument_parse_state),contract_validation_stage:contractStage(d.contract_stage),message:d.message??null}));
               if(complete&&(diagnostics.at(-1)?.category||'')!=='accepted'&&diagnostics.length<8)diagnostics.push({attempt:(Number(diagnostics.at(-1)?.attempt)||0)+1,category:'accepted',finish_reason:null,output_tokens:null,output_token_limit:null,tool_arguments_parse_state:null,contract_validation_stage:null,message:null});
               const summary=(complete||explicitAbstain)?bounded(candidate&&candidate.summary?candidate.summary:'',12000):`${reviewer} reviewer did not complete a valid vote (${category})`+(message?': '+bounded(message,300):'');
-              process.stdout.write(JSON.stringify({reviewer,status:complete?'complete':'failed',vote:complete?candidate.vote:'abstain',summary,coverage:attestation||trusted.coverage,reviewed_files:coverageValid?changed:[],unreviewed_files:coverageValid?[]:changed,evidence_truncated:evidenceTruncated,findings:complete&&candidate.vote==='approve'?[]:findings.slice(0,50).map(publicFinding),diagnostics}));
+              process.stdout.write(JSON.stringify({reviewer,status:complete?'complete':'failed',vote:complete?resolvedVote:'abstain',summary,coverage:attestation||trusted.coverage,reviewed_files:coverageValid?changed:[],unreviewed_files:coverageValid?[]:changed,evidence_truncated:evidenceTruncated,findings:complete&&resolvedVote==='approve'?[]:findings.slice(0,50).map(publicFinding),diagnostics}));
             });
           - glm
           - glm_review

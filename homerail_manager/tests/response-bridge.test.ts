@@ -375,6 +375,8 @@ describe("response bridge transport fence", () => {
         finish_reason: "end_turn",
         output_tokens: 123,
         tool_argument_parse_state: "valid",
+        contract_stage: "tool_arguments",
+        failure_category: "accepted",
       },
     }, source);
 
@@ -396,6 +398,7 @@ describe("response bridge transport fence", () => {
         finish_reason: "end_turn",
         output_tokens: 123,
         failure_category: "contract_validation_failed",
+        contract_stage: "contract_validation",
       }),
     }));
   });

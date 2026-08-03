@@ -328,6 +328,7 @@ export function applyResponseHandoff(
             diagnostic: sanitizeAttemptDiagnostic(obj.attempt_diagnostics, {
               attempt,
               failure_reason: reason,
+              contract_stage: "contract_validation",
             }),
           });
         }

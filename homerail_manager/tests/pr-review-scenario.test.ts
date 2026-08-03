@@ -741,6 +741,41 @@ describe("PR Review scenario assets", () => {
     });
   });
 
+  it("keeps accepted findings monotonic when a correction submits an empty approval", () => {
+    const { code, args } = commandCode("normalize_qwen_review");
+    const preserved = { ...finding, title: "Preserved accepted finding" };
+    const result = spawnSync(process.execPath, ["-e", code, ...args], {
+      encoding: "utf8",
+      input: JSON.stringify({
+        trusted: [trustedContext()],
+        evidence: [{
+          reviewer: "qwen_review",
+          attempt_diagnostics: [{ attempt: 1, failure_category: "contract_validation_failed" }],
+          accepted_findings: [preserved],
+        }],
+        success: [{
+          reviewer: "qwen",
+          status: "complete",
+          vote: "approve",
+          summary: "Corrected only the missing coverage field.",
+          coverage,
+          findings: [],
+        }],
+        failure: [],
+      }),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      reviewer: "qwen",
+      status: "complete",
+      vote: "request_changes",
+      reviewed_files: ["src/run.ts"],
+      unreviewed_files: [],
+      evidence_truncated: false,
+      findings: [preserved],
+    });
+  });
+
   it("executes the compact graph with exactly three model calls", async () => {
     const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";

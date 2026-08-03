@@ -180,6 +180,23 @@ describe("attempt diagnostic classification and sanitization", () => {
     expect(JSON.stringify(diagnostic)).not.toContain("sk-secret");
     expect(sanitizeAttemptDiagnostic("not an object")).toBeUndefined();
   });
+
+  it("lets a Manager rejection override a Worker-side accepted classification", () => {
+    expect(sanitizeAttemptDiagnostic({
+      finish_reason: "end_turn",
+      tool_argument_parse_state: "valid",
+      contract_stage: "tool_arguments",
+      failure_category: "accepted",
+    }, {
+      attempt: 1,
+      failure_reason: "DAG_HANDOFF_CONTRACT_VIOLATION qwen_review.voted",
+      contract_stage: "contract_validation",
+    })).toMatchObject({
+      attempt: 1,
+      failure_category: "contract_validation_failed",
+      contract_stage: "contract_validation",
+    });
+  });
 });
 
 describe("review evidence submission and projection", () => {

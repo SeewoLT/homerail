@@ -326,6 +326,7 @@ export function sanitizeAttemptDiagnostic(
     : options.failure_reason;
   const declaredCategory = enumOrFallback(diagnostic.failure_category, REVIEW_FAILURE_CATEGORIES, "unknown");
   const failureCategory = declaredCategory === "unknown"
+    || (declaredCategory === "accepted" && options.failure_reason !== undefined)
     ? classifyReviewFailure(failureReason ?? diagnostic.finish_reason ?? "")
     : declaredCategory;
   const diagnosticValue: AttemptDiagnosticV1 = {
