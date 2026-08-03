@@ -145,6 +145,20 @@ function fingerprintFixture(): string {
         "../homerail_protocol": { name: "homerail-protocol", version: "0.1.0-alpha.1" },
       },
     }),
+    "agent-ui/package.json": JSON.stringify({
+      name: "homerail-agent-ui",
+      version: "0.1.0-alpha.1",
+      dependencies: { "homerail-protocol": "file:../homerail_protocol" },
+    }),
+    "agent-ui/package-lock.json": JSON.stringify({
+      name: "homerail-agent-ui",
+      version: "0.1.0-alpha.1",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "homerail-agent-ui", version: "0.1.0-alpha.1" },
+        "../homerail_protocol": { name: "homerail-protocol", version: "0.1.0-alpha.1" },
+      },
+    }),
   };
   for (const [relativePath, content] of Object.entries(files)) {
     const target = path.join(repoRoot, relativePath);
@@ -213,6 +227,8 @@ it("ignores release-only package metadata in the Worker source fingerprint", () 
     "homerail_node/package-lock.json",
     "homerail_cli/package.json",
     "homerail_cli/package-lock.json",
+    "agent-ui/package.json",
+    "agent-ui/package-lock.json",
   ]) {
     const filePath = path.join(repoRoot, relativePath);
     const metadata = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
@@ -265,6 +281,19 @@ it("changes the Worker source fingerprint when projected Node dependencies chang
     dependencies: Record<string, string>;
   };
   metadata.dependencies.dockerode = "^6.0.0";
+  fs.writeFileSync(packagePath, JSON.stringify(metadata), "utf8");
+
+  expect(dagWorkerSourceFingerprint(repoRoot)).not.toBe(original);
+});
+
+it("changes the Worker source fingerprint when projected Agent UI dependencies change", () => {
+  const repoRoot = fingerprintFixture();
+  const original = dagWorkerSourceFingerprint(repoRoot);
+  const packagePath = path.join(repoRoot, "agent-ui", "package.json");
+  const metadata = JSON.parse(fs.readFileSync(packagePath, "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+  metadata.dependencies.vue = "^4.0.0";
   fs.writeFileSync(packagePath, JSON.stringify(metadata), "utf8");
 
   expect(dagWorkerSourceFingerprint(repoRoot)).not.toBe(original);
