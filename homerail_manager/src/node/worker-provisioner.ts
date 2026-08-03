@@ -23,6 +23,7 @@ export interface ProvisionerOptions {
   workspace?: Record<string, unknown>;
   workspaceReadOnly?: boolean;
   workspaceWritableSubpath?: string;
+  workspaceGitMetadataReadOnly?: boolean;
   workspaceInputs?: DagWorkspaceInputProjection[];
   /** Request the fixed Docker profile required by Codex's inner bwrap sandbox. */
   codexNestedSandbox?: boolean;
@@ -44,6 +45,7 @@ export interface ProvisionerOptions {
       workspace?: Record<string, unknown>;
       workspaceReadOnly?: boolean;
       workspaceWritableSubpath?: string;
+      workspaceGitMetadataReadOnly?: boolean;
       workspaceInputs?: DagWorkspaceInputProjection[];
       codexNestedSandbox?: boolean;
       env?: Record<string, string>;
@@ -142,6 +144,7 @@ export async function provisionWorkerContainer(
     workspace: options?.workspace,
     workspaceReadOnly: options?.workspaceReadOnly,
     workspaceWritableSubpath: options?.workspaceWritableSubpath,
+    workspaceGitMetadataReadOnly: options?.workspaceGitMetadataReadOnly,
     workspaceInputs: options?.workspaceInputs,
     codexNestedSandbox: options?.codexNestedSandbox,
     env: options?.env,

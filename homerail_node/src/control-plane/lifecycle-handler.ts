@@ -163,6 +163,7 @@ async function dispatchOperation(
           workspaceWritableSubpath: typeof spec.workspace_writable_subpath === "string"
             ? spec.workspace_writable_subpath
             : undefined,
+          workspaceGitMetadataReadOnly: spec.workspace_git_metadata_read_only === true,
           workspaceInputsReadOnly: inputCount > 0,
         });
         return info as unknown as Record<string, unknown>;

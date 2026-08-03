@@ -255,6 +255,34 @@ describe("WorkflowSpec v1", () => {
     }));
   });
 
+  it("requires one explicit writable root for a read-only Git metadata overlay", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.execute.workspace_access = {
+      writable_paths: ["repo"],
+      readonly_paths: ["input"],
+      git_metadata_read_only: true,
+    };
+
+    const valid = compileWorkflowSource(YAML.stringify(workflow));
+    expect(valid.valid, valid.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+    expect(valid.canonical?.nodes.find((node) => node.id === "execute")?.config.workspace_access)
+      .toMatchObject({ git_metadata_read_only: true });
+
+    workflow.spec.nodes.execute.workspace_access.writable_paths = [];
+    const missingRoot = compileWorkflowSource(YAML.stringify(workflow));
+    expect(missingRoot.valid).toBe(false);
+    expect(missingRoot.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_GIT_METADATA_WRITE_BOUNDARY_REQUIRED",
+    }));
+
+    workflow.spec.nodes.execute.workspace_access.writable_paths = ["."];
+    const wholeWorkspace = compileWorkflowSource(YAML.stringify(workflow));
+    expect(wholeWorkspace.valid).toBe(false);
+    expect(wholeWorkspace.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_GIT_METADATA_WRITE_BOUNDARY_REQUIRED",
+    }));
+  });
+
   it("canonicalizes explicit Codex sandbox policy and rejects maximum access for read-only nodes", () => {
     const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
     workflow.spec.nodes.execute.builtin_tool_policy = "backend_native";

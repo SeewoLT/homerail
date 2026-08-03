@@ -201,6 +201,7 @@ const WorkspaceAccess = Type.Object({
     uniqueItems: true,
     maxItems: 128,
   })),
+  git_metadata_read_only: Type.Optional(Type.Boolean()),
   max_snapshot_files: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })),
 }, { additionalProperties: false });
 

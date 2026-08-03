@@ -92,6 +92,7 @@ export interface WorkerCreateOptions {
   workspace?: Record<string, unknown>;
   workspaceReadOnly?: boolean;
   workspaceWritableSubpath?: string;
+  workspaceGitMetadataReadOnly?: boolean;
   workspaceInputs?: DagWorkspaceInputProjection[];
   /** Allow Codex's inner bwrap sandbox to create its namespace. */
   codexNestedSandbox?: boolean;
@@ -116,6 +117,7 @@ export function sendWorkerCreateRequest(
       workspace: options.workspace,
       workspace_read_only: options.workspaceReadOnly === true,
       workspace_writable_subpath: options.workspaceWritableSubpath,
+      workspace_git_metadata_read_only: options.workspaceGitMetadataReadOnly === true,
       workspace_inputs: options.workspaceInputs,
       codex_nested_sandbox: options.codexNestedSandbox === true,
     },

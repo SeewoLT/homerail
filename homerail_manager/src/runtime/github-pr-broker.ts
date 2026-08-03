@@ -1,5 +1,4 @@
 import { createHash, sign } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -14,6 +13,7 @@ import {
   setActiveRunBrokerState,
 } from "./active-runs.js";
 import type { CredentialBrokerContext } from "./credential-broker.js";
+import { spawnManagerGitSync } from "./manager-git.js";
 import { runWorkspacePath } from "./workspace-retention.js";
 
 interface GithubPullRequestContext {
@@ -940,7 +940,7 @@ export async function githubAssessReview(context: CredentialBrokerContext): Prom
     String(jsonRecord(value, "assess_review actionable finding").recommendation)
   ));
   const reviewDecision = {
-    verdict: converged ? "approve" as const : "changes_requested" as const,
+    verdict: converged ? "clean" as const : "changes_requested" as const,
     head_sha: expectedHead,
     summary: converged
       ? "Manager assessment found no actionable defects."
@@ -1397,11 +1397,9 @@ function isPathInside(root: string, target: string): boolean {
 }
 
 function git(workspace: string, args: string[], maxBuffer = 2 * 1024 * 1024): string {
-  const result = spawnSync("git", ["-C", workspace, ...args], {
-    encoding: "utf8",
+  const result = spawnManagerGitSync(workspace, args, {
     timeout: 30_000,
     maxBuffer,
-    shell: false,
   });
   if (result.status !== 0 || result.error) {
     const detail = String(result.stderr || result.error?.message || "unknown error").trim().slice(0, 1_000);

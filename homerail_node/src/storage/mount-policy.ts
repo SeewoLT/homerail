@@ -96,9 +96,13 @@ export function workerAllowedMounts(
   readOnly = false,
   readOnlyInputs = false,
   writableSubpath?: string,
+  gitMetadataReadOnly = false,
 ): MountEntry[] {
   if (writableSubpath !== undefined && !readOnly) {
     throw new Error("writableSubpath requires a read-only workspace root");
+  }
+  if (gitMetadataReadOnly && writableSubpath === undefined) {
+    throw new Error("read-only Git metadata requires writableSubpath");
   }
   const normalizedWritableSubpath = writableSubpath === undefined
     ? undefined
@@ -138,6 +142,13 @@ export function workerAllowedMounts(
       container: `/workspace/${normalizedWritableSubpath}`,
       mode: "rw",
     });
+    if (gitMetadataReadOnly) {
+      mounts.push({
+        host: `${homerailWorkerWorkspacePath(`${workspaceId}/${normalizedWritableSubpath}`)}/.git`,
+        container: `/workspace/${normalizedWritableSubpath}/.git`,
+        mode: "ro",
+      });
+    }
   }
   return mounts;
 }

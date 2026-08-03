@@ -7,6 +7,21 @@ function invariant(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+const findingFields = [
+  "category",
+  "severity",
+  "title",
+  "file",
+  "line",
+  "evidence",
+  "recommendation",
+  "confidence",
+];
+
+function findingKey(finding) {
+  return findingFields.map((field) => JSON.stringify(finding?.[field] ?? null)).join("\u0000");
+}
+
 export function validatePrReviewArtifacts(command, publication, markdown) {
   invariant(command && typeof command === "object" && !Array.isArray(command), "command.json root is not an object");
   invariant(
@@ -36,7 +51,7 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
   invariant(quorum.total === 3 && quorum.threshold === 2, "JSON quorum is not the declared 2-of-3 vote");
   invariant(Number.isInteger(quorum.successes) && quorum.successes >= 0 && quorum.successes <= 3, "invalid quorum successes");
   invariant(typeof quorum.passed === "boolean", "invalid quorum passed flag");
-  invariant(quorum.passed === (quorum.successes >= quorum.threshold), "quorum passed flag contradicts successes");
+  invariant(!quorum.passed || quorum.successes >= quorum.threshold, "a passed quorum lacks enough approvals");
 
   if (quorum.passed) {
     invariant(command.status === "completed", "a passed quorum did not produce a completed run");
@@ -56,6 +71,7 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
     "report does not contain three model reviewer results",
   );
   const reviewerNames = new Set();
+  const reviewerFindingKeys = new Set();
   let approvals = 0;
   let changesRequested = 0;
   for (const reviewer of report.reviewer_results) {
@@ -86,18 +102,30 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
         invariant(reviewer.vote === "request_changes", `${reviewer.reviewer} completed without a decisive vote`);
         changesRequested++;
         invariant(reviewer.findings.length > 0, `${reviewer.reviewer} requested changes without findings`);
+        for (const finding of reviewer.findings) reviewerFindingKeys.add(findingKey(finding));
       }
     } else {
       invariant(reviewer.vote === "abstain", `${reviewer.reviewer} failed without abstaining`);
       invariant(reviewer.evidence_truncated === true, `${reviewer.reviewer} failed without marking incomplete evidence`);
+      invariant(reviewer.reviewed_files.length === 0, `${reviewer.reviewer} failed while claiming reviewed files`);
+      invariant(reviewer.findings.length === 0, `${reviewer.reviewer} failed while retaining unverified findings`);
     }
   }
   invariant(reviewerNames.size === 3, "model reviewer identities are not distinct");
+  const completeReviews = approvals + changesRequested;
+  const expectedConfidence = completeReviews === 3 ? "high" : completeReviews === 2 ? "medium" : "low";
+  invariant(report.confidence === expectedConfidence, "report confidence does not match complete reviewer evidence");
+  const reportedFindingKeys = new Set(report.findings.map(findingKey));
+  invariant(
+    reviewerFindingKeys.size === reportedFindingKeys.size && [...reviewerFindingKeys].every((key) => reportedFindingKeys.has(key)),
+    "published findings do not preserve the complete deduplicated reviewer finding set",
+  );
   invariant(quorum.successes === approvals, "published quorum does not match the model approval votes");
+  invariant(quorum.passed === (approvals >= 2 && report.actionable_count === 0), "quorum pass must require two approvals and zero retained findings");
   if (report.status === "pass") invariant(approvals >= 2, "passing report lacks two model approvals");
-  if (report.status === "findings") invariant(changesRequested >= 2, "findings report lacks two request-changes votes");
+  if (report.status === "findings") invariant(changesRequested >= 1, "findings report lacks a request-changes vote");
   if (report.status === "inconclusive") {
-    invariant(approvals < 2 && changesRequested < 2, "inconclusive report has a two-model consensus");
+    invariant(approvals < 2 && report.actionable_count === 0, "inconclusive report has enough approvals or retained findings");
   }
 
   const runIdLine = `**HomeRail Run ID:** \`${command.run_id}\``;

@@ -19,6 +19,7 @@ import {
   getRunArtifactBlobPath,
   listRunArtifacts,
 } from "../src/persistence/run-artifacts.js";
+import { finalizeRunArtifacts } from "../src/runtime/run-artifact-service.js";
 import {
   _clearActiveRuns,
   createActiveRun,
@@ -73,12 +74,15 @@ async function tickUntil(
 describe("Auto Fix v2 local-test convergence architecture", () => {
   let home: string;
   let previousHome: string | undefined;
+  let previousCommandAllowlist: string | undefined;
   let head: string;
 
   beforeEach(() => {
     previousHome = process.env.HOMERAIL_HOME;
+    previousCommandAllowlist = process.env.HOMERAIL_DAG_COMMAND_ALLOWLIST;
     home = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-autofix-v2-"));
     process.env.HOMERAIL_HOME = home;
+    process.env.HOMERAIL_DAG_COMMAND_ALLOWLIST = "node";
     closeDb();
     _clearActiveRuns();
     createCredential({
@@ -104,6 +108,8 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     closeDb();
     if (previousHome === undefined) delete process.env.HOMERAIL_HOME;
     else process.env.HOMERAIL_HOME = previousHome;
+    if (previousCommandAllowlist === undefined) delete process.env.HOMERAIL_DAG_COMMAND_ALLOWLIST;
+    else process.env.HOMERAIL_DAG_COMMAND_ALLOWLIST = previousCommandAllowlist;
     const inputRoot = path.join(home, "workspace", "autofix-v2-run", "input");
     if (fs.existsSync(inputRoot)) fs.chmodSync(inputRoot, 0o700);
     fs.rmSync(home, { recursive: true, force: true });
@@ -195,7 +201,12 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     return { path: relative, sha256: createHash("sha256").update(bytes).digest("hex"), status };
   }
 
-  function recordReviewEvidence(nodeId: string, sessionId: string, decision: Record<string, unknown>) {
+  function recordReviewEvidence(
+    nodeId: string,
+    sessionId: string,
+    decision: Record<string, unknown>,
+    evidenceHead = head,
+  ) {
     const quality = decision.quality as Record<string, unknown>;
     recordActiveRunBrokerActionSuccess({
       run_id: "autofix-v2-run",
@@ -204,7 +215,7 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
       credential_ref: "github-autofix",
       broker: "github_pr",
       action: "pull_request_snapshot",
-      result: { head_sha: head },
+      result: { head_sha: evidenceHead },
     });
     recordActiveRunBrokerActionSuccess({
       run_id: "autofix-v2-run",
@@ -235,7 +246,7 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
       recommendation: "Add the guard and its focused test.",
     }];
     return {
-      verdict: clean ? "approve" : "changes_requested",
+      verdict: clean ? "clean" : "changes_requested",
       head_sha: head,
       summary: clean ? "No actionable defects remain." : "One actionable defect remains.",
       findings,
@@ -387,7 +398,7 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
           contract: "TestReport",
         }],
       });
-    expect(parsed.graph.nodes.find((node) => node.node_id === "review_gate")?.gateway_config)
+    expect(parsed.graph.nodes.find((node) => node.node_id === "fix_round_gate")?.gateway_config)
       .toMatchObject({
         max_iterations: 4,
         unwrap_single_join_value: true,
@@ -587,6 +598,48 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     expect(new Set([initial.sessionId, firstRevision.sessionId, revision.sessionId, confirmation.sessionId]).size).toBe(4);
     expect(getActiveRun("autofix-v2-run")?.counters.fanout_invocations).toMatchObject({ implement: 1, fix: 2 });
     expect(getActiveRun("autofix-v2-run")?.status).toBe("completed");
+    const artifacts = await finalizeRunArtifacts("autofix-v2-run", "success");
+    const finalResult = artifacts.find((artifact) => artifact.name === "autofix-result.json");
+    expect(finalResult?.error).toBeUndefined();
+    expect(finalResult).toMatchObject({ status: "ready" });
+    expect(JSON.parse(fs.readFileSync(getRunArtifactBlobPath("autofix-v2-run", "autofix-result.json")!, "utf8")))
+      .toMatchObject({
+        version: 1,
+        status: "ready_for_ci",
+        repository: "acme/widget",
+        pull_number: 172,
+        head_sha: head,
+        review_confirmation_count: 2,
+        quality_score: 100,
+      });
+  }, 30_000);
+
+  it("rejects two clean reviews when their exact heads differ", async () => {
+    const dispatcher = new RecordingDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const { initial, testReportSha } = await reachInitialReview(executor, dispatcher);
+    const clean = reviewDecision(testReportSha, true);
+    recordReviewEvidence("review_initial", initial.sessionId!, clean);
+    handoffActiveRun("autofix-v2-run", "review_initial", "reviewed", clean);
+
+    await tickUntil(
+      executor,
+      () => dispatcher.dispatched.some((entry) => entry.nodeId === "confirm_initial"),
+      "confirmation review was not dispatched",
+    );
+    const confirmation = dispatcher.dispatched.find((entry) => entry.nodeId === "confirm_initial")!;
+    const driftedHead = "c".repeat(40);
+    const drifted = { ...clean, head_sha: driftedHead };
+    recordReviewEvidence("confirm_initial", confirmation.sessionId!, drifted, driftedHead);
+    handoffActiveRun("autofix-v2-run", "confirm_initial", "reviewed", drifted);
+
+    await tickUntil(
+      executor,
+      () => getActiveRun("autofix-v2-run")?.status === "failed",
+      "mismatched clean review heads did not fail closed",
+    );
+    expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("verify_confirmation")).toBe("FAILED");
+    expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("finalize_ready")).not.toBe("COMPLETED");
   }, 30_000);
 
   it("runs four real fixers before exhausting to needs_human", async () => {
@@ -620,8 +673,8 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
       implement: 1,
       fix: 4,
     });
-    expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("review_gate")).toBe("CANCELLED");
-    expect(getActiveRun("autofix-v2-run")?.counters.gateway_iterations.review_gate).toBe(4);
+    expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("fix_round_gate")).toBe("CANCELLED");
+    expect(getActiveRun("autofix-v2-run")?.counters.gateway_iterations.fix_round_gate).toBe(4);
     expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.some((node) => node.node_id.includes("inv_0005"))).toBe(false);
   }, 30_000);
 });

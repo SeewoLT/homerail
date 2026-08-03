@@ -619,6 +619,9 @@ export class WsDispatchAdapter implements DAGDispatcher {
       workspaceReadOnly: writablePaths !== undefined
         && (writablePaths.length === 0 || workspaceWritableSubpath !== undefined),
       ...(workspaceWritableSubpath === undefined ? {} : { workspaceWritableSubpath }),
+      ...(workspaceWritableSubpath === undefined || envelope.workspaceAccess?.git_metadata_read_only !== true
+        ? {}
+        : { workspaceGitMetadataReadOnly: true }),
       codexNestedSandbox,
       ...(workspaceInputs.length > 0 ? { workspaceInputs } : {}),
       env: {

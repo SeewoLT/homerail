@@ -163,6 +163,71 @@ describe("runtime pattern worker tools", () => {
     }
   });
 
+  it("rejects policy roots that enter reserved metadata directories", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-reserved-"));
+    try {
+      fs.mkdirSync(path.join(root, "repo", ".git"), { recursive: true });
+      fs.writeFileSync(path.join(root, "repo", ".git", "config"), "unsafe");
+      expect(() => snapshotWorkspace(root, { writable_paths: ["repo/.git"] }))
+        .toThrow(/reserved segment \.git/);
+      expect(() => snapshotWorkspace(root, { writable_paths: ["repo/node_modules/pkg"] }))
+        .toThrow(/reserved segment node_modules/);
+      expect(() => snapshotWorkspace(root, { writable_paths: ["repo/.homerail-runtime"] }))
+        .toThrow(/reserved segment \.homerail-runtime/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not hide nested model-created Git metadata from snapshots", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-nested-git-"));
+    try {
+      fs.mkdirSync(path.join(root, "repo"));
+      const policy = { writable_paths: ["repo"], readonly_paths: [] };
+      const before = snapshotWorkspace(root, policy);
+      fs.mkdirSync(path.join(root, "repo", "nested", ".git"), { recursive: true });
+      fs.writeFileSync(path.join(root, "repo", "nested", ".git", "config"), "created");
+      const result = verifyWorkspacePolicy(before, snapshotWorkspace(root, policy), policy);
+      expect(result.changed_paths).toEqual(["repo/nested/.git/config"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores only the declared repository root Git metadata", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-root-git-"));
+    try {
+      fs.mkdirSync(path.join(root, "repo", ".git"), { recursive: true });
+      fs.writeFileSync(path.join(root, "repo", ".git", "config"), "manager-owned");
+      fs.writeFileSync(path.join(root, "repo", "code.ts"), "tracked");
+      const snapshot = snapshotWorkspace(root, {
+        writable_paths: ["repo"],
+        readonly_paths: [],
+        git_metadata_read_only: true,
+      });
+      expect(snapshot.files).toEqual({
+        "repo/code.ts": expect.any(String),
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("audits repository Git metadata when the physical overlay was not requested", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-writable-git-"));
+    try {
+      fs.mkdirSync(path.join(root, "repo", ".git"), { recursive: true });
+      fs.writeFileSync(path.join(root, "repo", ".git", "config"), "before");
+      const policy = { writable_paths: ["repo"], readonly_paths: [] };
+      const before = snapshotWorkspace(root, policy);
+      fs.writeFileSync(path.join(root, "repo", ".git", "config"), "after");
+      expect(verifyWorkspacePolicy(before, snapshotWorkspace(root, policy), policy).changed_paths)
+        .toEqual(["repo/.git/config"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("ignores Manager-declared concurrent paths without hiding other unauthorized mutations", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-concurrent-"));
     try {

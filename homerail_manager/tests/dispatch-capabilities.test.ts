@@ -610,7 +610,7 @@ nodes:
       last_heartbeat: Date.now(),
       pending_requests: new Map(),
     });
-    const requested: Array<{ readOnly?: boolean; subpath?: string }> = [];
+    const requested: Array<{ readOnly?: boolean; subpath?: string; gitMetadataReadOnly?: boolean }> = [];
     new WsDispatchAdapter({
       managerBaseUrl: "http://127.0.0.1:19191",
       provisioner: {
@@ -618,6 +618,7 @@ nodes:
           requested.push({
             readOnly: opts.workspaceReadOnly,
             subpath: opts.workspaceWritableSubpath,
+            gitMetadataReadOnly: opts.workspaceGitMetadataReadOnly,
           });
           return { status: "success", resource_data: { id: "isolated-container" } };
         },
@@ -630,6 +631,7 @@ nodes:
       workspaceAccess: {
         writable_paths: ["fixers/fix/inv_0001/item_0001"],
         readonly_paths: ["input"],
+        git_metadata_read_only: true,
       },
     }));
 
@@ -637,6 +639,7 @@ nodes:
       expect(requested).toEqual([{
         readOnly: true,
         subpath: "fixers/fix/inv_0001/item_0001",
+        gitMetadataReadOnly: true,
       }]);
     });
   });

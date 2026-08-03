@@ -181,6 +181,42 @@ describe("mount-policy", () => {
       ]);
     });
 
+    it("overlays Git metadata read-only inside the isolated writable subtree", () => {
+      expect(workerAllowedMounts(
+        "run-1",
+        true,
+        true,
+        "repo",
+        true,
+      )).toEqual([
+        {
+          host: "/home/user/.homerail/workspace/run-1",
+          container: "/workspace",
+          mode: "ro",
+        },
+        {
+          host: "/home/user/.homerail/workspace/run-1/.homerail-runtime",
+          container: "/workspace/.homerail-runtime",
+          mode: "rw",
+        },
+        {
+          host: "/home/user/.homerail/workspace/run-1/input",
+          container: "/workspace/input",
+          mode: "ro",
+        },
+        {
+          host: "/home/user/.homerail/workspace/run-1/repo",
+          container: "/workspace/repo",
+          mode: "rw",
+        },
+        {
+          host: "/home/user/.homerail/workspace/run-1/repo/.git",
+          container: "/workspace/repo/.git",
+          mode: "ro",
+        },
+      ]);
+    });
+
     it("rejects unsafe or protected writable subtrees", () => {
       expect(() => workerAllowedMounts("run-1", true, false, "../sibling"))
         .toThrow(/unsafe path segment/);
@@ -194,6 +230,8 @@ describe("mount-policy", () => {
         .toThrow(/protected workspace mount/);
       expect(() => workerAllowedMounts("run-1", false, false, "repo"))
         .toThrow(/requires a read-only workspace root/);
+      expect(() => workerAllowedMounts("run-1", true, false, undefined, true))
+        .toThrow(/requires writableSubpath/);
     });
 
     it("supports run/node workspace IDs", () => {

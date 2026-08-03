@@ -52,6 +52,7 @@ import {
   type DagRunInputBinding,
 } from "homerail-protocol";
 import { resolveAgentRuntimeConfig } from "./agent-runtime-resolver.js";
+import { spawnManagerGitSync } from "./manager-git.js";
 import {
   writeRunMetadata,
   appendHandoff,
@@ -4987,10 +4988,8 @@ function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): 
   writeFileSync(worktreeGitFile, `gitdir: ${_portableGitMetadataPath(target, adminGitDir)}\n`, { mode: 0o600 });
   writeFileSync(adminBackPointer, `${_portableGitMetadataPath(adminGitDir, worktreeGitFile)}\n`, { mode: 0o600 });
 
-  const verified = spawnSync("git", ["-C", target, "rev-parse", "--is-inside-work-tree"], {
-    encoding: "utf8",
+  const verified = spawnManagerGitSync(target, ["rev-parse", "--is-inside-work-tree"], {
     timeout: 10_000,
-    shell: false,
   });
   if (verified.status !== 0 || verified.error || String(verified.stdout).trim() !== "true") {
     const detail = String(verified.stderr || verified.error?.message || "unknown error").trim().slice(0, 1_000);
@@ -5018,10 +5017,8 @@ function _prepareFanoutGitWorktree(
     throw new Error("fanout git worktree path escaped the run workspace");
   }
   mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  const existing = spawnSync("git", ["-C", target, "rev-parse", "--is-inside-work-tree"], {
-    encoding: "utf8",
+  const existing = spawnManagerGitSync(target, ["rev-parse", "--is-inside-work-tree"], {
     timeout: 10_000,
-    shell: false,
   });
   if (existing.status === 0 && String(existing.stdout).trim() === "true") {
     _makeFanoutGitWorktreeRelocatable(repository, target);
@@ -5034,17 +5031,13 @@ function _prepareFanoutGitWorktree(
     ? selectedRevision.toLowerCase()
     : "HEAD";
   if (revision !== "HEAD") {
-    const local = spawnSync("git", ["-C", repository, "cat-file", "-e", `${revision}^{commit}`], {
-      encoding: "utf8",
+    const local = spawnManagerGitSync(repository, ["cat-file", "-e", `${revision}^{commit}`], {
       timeout: 10_000,
-      shell: false,
     });
     if (local.status !== 0) {
-      const fetched = spawnSync("git", ["-C", repository, "fetch", "--no-tags", "origin", revision], {
-        encoding: "utf8",
+      const fetched = spawnManagerGitSync(repository, ["fetch", "--no-tags", "origin", revision], {
         timeout: 60_000,
         maxBuffer: 256_000,
-        shell: false,
       });
       if (fetched.status !== 0 || fetched.error) {
         const detail = String(fetched.stderr || fetched.error?.message || "unknown error").trim().slice(0, 1_000);
@@ -5052,11 +5045,9 @@ function _prepareFanoutGitWorktree(
       }
     }
   }
-  const created = spawnSync("git", ["-C", repository, "worktree", "add", "--detach", target, revision], {
-    encoding: "utf8",
+  const created = spawnManagerGitSync(repository, ["worktree", "add", "--detach", target, revision], {
     timeout: 60_000,
     maxBuffer: 256_000,
-    shell: false,
   });
   if (created.status !== 0 || created.error) {
     const detail = String(created.stderr || created.error?.message || "unknown error").trim().slice(0, 1_000);
@@ -5204,11 +5195,9 @@ function _fanoutGitResultContext(
     ? "."
     : _fanoutSafeRelativePath(parent.gateway_config?.repository_path, "repo");
   const repository = path.resolve(runWorkspace, repositoryPath);
-  const git = (args: string[], timeout = 10_000) => spawnSync("git", ["-C", workspace, ...args], {
-    encoding: "utf8",
+  const git = (args: string[], timeout = 10_000) => spawnManagerGitSync(workspace, args, {
     timeout,
     maxBuffer: 256_000,
-    shell: false,
   });
   const topLevel = git(["rev-parse", "--show-toplevel"]);
   const commonDir = git(["rev-parse", "--path-format=absolute", "--git-common-dir"]);

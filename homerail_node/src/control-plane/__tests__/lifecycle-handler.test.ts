@@ -528,6 +528,77 @@ describe("handleLifecycleRequest", () => {
       ]));
     });
 
+    it("create worker overlays declared Git metadata read-only", async () => {
+      const previousHome = process.env.HOMERAIL_HOME;
+      const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-node-git-mount-"));
+      process.env.HOMERAIL_HOME = tempHome;
+      fs.mkdirSync(path.join(tempHome, "workspace", "run-git", "repo", ".git"), { recursive: true });
+      const provider = new MockProvider();
+      const responses: LifecycleResponse[] = [];
+      try {
+        await handleLifecycleRequest(
+          makeRequest({
+            resource_type: "worker",
+            operation: "create",
+            spec: {
+              workspace_id: "run-git",
+              workspace_read_only: true,
+              workspace_writable_subpath: "repo",
+              workspace_git_metadata_read_only: true,
+            },
+          }),
+          provider,
+          (message) => responses.push(message),
+        );
+
+        expect(responses[0]!.status).toBe("success");
+        const container = provider.containers.get(String(responses[0]!.resource_data!.id));
+        expect(container!.config.mounts).toEqual(expect.arrayContaining([
+          expect.objectContaining({ container: "/workspace/repo", mode: "rw" }),
+          expect.objectContaining({ container: "/workspace/repo/.git", mode: "ro" }),
+        ]));
+      } finally {
+        if (previousHome === undefined) delete process.env.HOMERAIL_HOME;
+        else process.env.HOMERAIL_HOME = previousHome;
+        fs.rmSync(tempHome, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a symbolic-link Git metadata mount source", async () => {
+      const previousHome = process.env.HOMERAIL_HOME;
+      const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-node-git-symlink-"));
+      process.env.HOMERAIL_HOME = tempHome;
+      const repository = path.join(tempHome, "workspace", "run-git", "repo");
+      fs.mkdirSync(repository, { recursive: true });
+      fs.symlinkSync(tempHome, path.join(repository, ".git"));
+      const responses: LifecycleResponse[] = [];
+      try {
+        await handleLifecycleRequest(
+          makeRequest({
+            resource_type: "worker",
+            operation: "create",
+            spec: {
+              workspace_id: "run-git",
+              workspace_read_only: true,
+              workspace_writable_subpath: "repo",
+              workspace_git_metadata_read_only: true,
+            },
+          }),
+          new MockProvider(),
+          (message) => responses.push(message),
+        );
+
+        expect(responses[0]).toMatchObject({
+          status: "error",
+          error: { message: expect.stringContaining("regular file or directory") },
+        });
+      } finally {
+        if (previousHome === undefined) delete process.env.HOMERAIL_HOME;
+        else process.env.HOMERAIL_HOME = previousHome;
+        fs.rmSync(tempHome, { recursive: true, force: true });
+      }
+    });
+
     it("create worker without workspace_id -> error", async () => {
       const provider = new MockProvider();
       const responses: LifecycleResponse[] = [];

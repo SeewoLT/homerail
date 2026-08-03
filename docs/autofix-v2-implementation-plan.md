@@ -66,6 +66,10 @@ Deliver a manual `auto-fix-v2` workflow in which:
   least-privilege Manager broker;
 - the successful outcome remains a Draft PR marked `ready_for_ci` in HomeRail,
   not approved, marked ready, or merged on GitHub.
+- a trusted finalizer publishes `autofix-result.json` with the exact head,
+  immutable task/plan digests, final review/test digests, and quality score;
+- explicit model inability and exhausted fix rounds end as `needs_human`
+  instead of being mislabeled as infrastructure success or merge approval.
 
 ## Delivery Rules
 

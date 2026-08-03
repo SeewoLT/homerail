@@ -470,6 +470,19 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       add(`${nodePath}/agent`, "DAG_SEMANTIC_UNKNOWN_AGENT", `unknown agent '${node.agent}'`);
     }
     if (node.kind === "agent") {
+      if (
+        node.workspace_access?.git_metadata_read_only === true
+        && (
+          node.workspace_access.writable_paths.length !== 1
+          || node.workspace_access.writable_paths[0] === "."
+        )
+      ) {
+        add(
+          `${nodePath}/workspace_access/git_metadata_read_only`,
+          "DAG_SEMANTIC_GIT_METADATA_WRITE_BOUNDARY_REQUIRED",
+          "read-only Git metadata requires exactly one non-root writable workspace path",
+        );
+      }
       if (node.builtin_tool_policy !== undefined && node.allowed_builtin_tools !== undefined) {
         add(
           `${nodePath}/builtin_tool_policy`,
@@ -670,6 +683,19 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       const workerPolicy = node.config.worker_policy;
       const resultBrokerRequirements = node.config.result_required_broker_actions ?? [];
       const resultWorkspaceFiles = node.config.result_required_workspace_files ?? [];
+      if (
+        workerPolicy?.workspace_access?.git_metadata_read_only === true
+        && (
+          workerPolicy.workspace_access.writable_paths.length !== 1
+          || workerPolicy.workspace_access.writable_paths[0] === "."
+        )
+      ) {
+        add(
+          `${nodePath}/config/worker_policy/workspace_access/git_metadata_read_only`,
+          "DAG_SEMANTIC_GIT_METADATA_WRITE_BOUNDARY_REQUIRED",
+          "read-only Git metadata requires exactly one non-root fanout worker writable path",
+        );
+      }
       if (workerPolicy?.builtin_tool_policy !== undefined && workerPolicy.allowed_builtin_tools !== undefined) {
         add(
           `${nodePath}/config/worker_policy/builtin_tool_policy`,

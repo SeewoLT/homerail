@@ -247,7 +247,7 @@ The WorkflowSpec should define these bounded contracts:
 | `ReviewVerdict` | reviewed head, structured findings, Manager-computed coverage/load/score/status |
 | `FixResult` | previous/current head, manifest, summary, TestReport reference |
 | `LoopState` | task SHA, current PR head, round, candidate and evidence digests |
-| `AutoFixV2Result` | ready_for_ci/needs_human/blocked and complete provenance |
+| `AutoFixV2Result` | exact final head, task/plan digests, two-review confirmation, findings/test digests, score, and `ready_for_ci` |
 
 Every finding must have a stable id, severity, file, optional line, evidence,
 and a concrete expected correction. The fixer reports which finding ids it
@@ -331,10 +331,14 @@ Its semantics are:
   their concurrent Manager-owned changes;
 - with `commit_mode: manager`, Git metadata remains read-only to the model. A
   successful child reports its exact worktree with intended file changes;
-  Manager validates the binding, stages and commits those changes under a
-  deterministic identity, enriches the result with the new exact HEAD, and
-  verifies that the worktree is clean before aggregation. A no-op or a
-  fabricated workspace is rejected;
+  `workspace_access.git_metadata_read_only: true` makes Node apply a final
+  read-only nested mount over that worktree's `.git`, and
+  Manager runs Git with host/global configuration disabled plus hooks, signing,
+  credential helpers, non-HTTPS transports, fsmonitor, and external diff
+  commands forced off. Manager then validates the binding, stages and commits
+  those changes under a deterministic identity, enriches the result with the
+  new exact HEAD, and verifies that the worktree is clean before aggregation.
+  A no-op or a fabricated workspace is rejected;
 - child corrections retain the same policy and cannot broaden it;
 - runtime events expose the effective policy digest for audit.
 
@@ -386,9 +390,9 @@ status. A reusable WorkflowSpec `required_workspace_files` rule makes Manager:
 - copy the accepted bytes into a content-addressed `workspace_evidence` run
   artifact in the same Manager transaction as the handoff.
 
-The persisted artifact is the review and audit source of truth. Worker
+The persisted TestReport artifact is the review and audit source of truth. Worker
 workspace retention can therefore expire without deleting the evidence used to
-approve the exact head, and the report remains retrievable through the normal
+assess the exact head, and the report remains retrievable through the normal
 run-artifact API. It is never added to the Draft PR.
 
 Review quality is also Manager-computed. Each fresh GLM returns structured
@@ -407,10 +411,18 @@ clean = defect_load == 0 && diff_coverage == 1.0 && test_report == passed
 
 A single clean result is not convergence. A second GLM dispatch with a fresh
 provider session must independently return clean for the same unchanged head.
-Any fixer mutation resets confirmation. Four exhausted fixer iterations end in
-`needs_human`. Once converged, the caller may start the repository's normal CI;
-CI failure is new evidence for a later run rather than an event polled by this
-completed DAG.
+A trusted confirmation node rejects the pair unless both exact head and
+Manager-verified TestReport digest match. Any fixer mutation resets
+confirmation. Four exhausted fixer iterations end in `needs_human`. Once
+converged, the caller may start the repository's normal CI; CI failure is new
+evidence for a later run rather than an event polled by this completed DAG.
+
+On success, a trusted deterministic finalizer emits `autofix-result.json` with
+`status: ready_for_ci`, the exact PR head, immutable task and plan digests, the
+two-review confirmation count, final findings digest, exact TestReport digest,
+and quality score. Model inability (`cannot_implement` or `cannot_fix`) and fix
+exhaustion end as `needs_human`; policy violations and invalid trusted evidence
+remain hard failures.
 
 ## Fresh-Context Review And Fix Rounds
 

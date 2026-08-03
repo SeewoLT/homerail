@@ -196,7 +196,7 @@ spec:
       additionalProperties: false
       required: [verdict, head_sha, summary, findings, feedback, fix_tasks, quality]
       properties:
-        verdict: { type: string, enum: [approve, changes_requested] }
+        verdict: { type: string, enum: [clean, changes_requested] }
         head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
         summary: { type: string, minLength: 1, maxLength: 12000 }
         findings:
@@ -263,7 +263,7 @@ spec:
                 properties: { status: { const: clean } }
           then:
             properties:
-              verdict: { const: approve }
+              verdict: { const: clean }
               feedback: { type: array, maxItems: 0 }
               fix_tasks: { type: array, maxItems: 0 }
           else:
@@ -304,6 +304,61 @@ spec:
                 required: [status]
                 properties: { status: { const: passed } }
 
+    AutoFixV2Result:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - status
+        - repository
+        - pull_number
+        - head_sha
+        - task_document_sha256
+        - task_plan_sha256
+        - review_confirmation_count
+        - findings
+        - findings_sha256
+        - test_report_sha256
+        - quality_score
+        - review_summary
+      properties:
+        version: { type: integer, const: 1 }
+        status: { type: string, const: ready_for_ci }
+        repository: { type: string, pattern: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' }
+        pull_number: { type: integer, minimum: 1 }
+        head_sha: { type: string, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' }
+        task_document_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        task_plan_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        review_confirmation_count: { type: integer, const: 2 }
+        findings:
+          type: array
+          maxItems: 30
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, severity, category, actionable, evidence, recommendation]
+            properties:
+              id: { type: string, pattern: '^[a-z][a-z0-9_-]{0,127}$' }
+              severity: { type: string, enum: [critical, high, medium, low] }
+              category: { type: string, minLength: 1, maxLength: 128 }
+              actionable: { type: boolean }
+              advisory_reason: { type: string, enum: [preexisting, out_of_scope, optional_preference] }
+              path: { type: string, minLength: 1, maxLength: 1000 }
+              line: { type: integer, minimum: 1 }
+              evidence: { type: string, minLength: 1, maxLength: 4000 }
+              recommendation: { type: string, minLength: 1, maxLength: 4000 }
+            allOf:
+              - if:
+                  required: [actionable]
+                  properties: { actionable: { const: false } }
+                then:
+                  required: [advisory_reason]
+                  properties: { advisory_reason: {} }
+        findings_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        test_report_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        quality_score: { type: integer, minimum: 0, maximum: 100 }
+        review_summary: { type: string, minLength: 1, maxLength: 12000 }
+
   artifacts:
     - name: task-plan.json
       source: { type: handoff, node: prepare_repository, port: ready }
@@ -317,6 +372,12 @@ spec:
       contract: Candidate
       required: false
       publish: always
+    - name: autofix-result.json
+      source: { type: handoff, node: finalize_ready, port: ready }
+      media_type: application/json
+      contract: AutoFixV2Result
+      required: true
+      publish: success
 
   agents:
     implementer:
@@ -434,7 +495,7 @@ spec:
         different findings array. The Manager weights
         critical/high/medium/low as 16/8/3/1 and
         also verifies complete diff coverage plus the exact-head TestReport.
-        quality.status clean means approve with empty feedback and fix_tasks;
+        quality.status clean means verdict clean with empty feedback and fix_tasks;
         needs_fix means changes_requested with clear feedback and exactly one
         fix_tasks item containing all actionable findings. Do not calculate or
         alter the score yourself.
@@ -539,7 +600,7 @@ spec:
           builtin_tool_policy: backend_native
           codex_sandbox: danger-full-access
           allowed_dag_tools: [handoff]
-          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
+          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input], git_metadata_read_only: true }
         workspace_strategy: isolated_git_worktree
         workspace_root: workers
         repository_path: repo
@@ -561,7 +622,7 @@ spec:
       kind: agent
       agent: aggregator
       session_scope: dispatch
-      workspace_access: { writable_paths: [repo], readonly_paths: [input, workers] }
+      workspace_access: { writable_paths: [repo], readonly_paths: [input, workers], git_metadata_read_only: true }
       builtin_tool_policy: backend_native
       codex_sandbox: danger-full-access
       allowed_dag_tools: [handoff, credential_broker_call]
@@ -723,7 +784,7 @@ spec:
         routes: { clean: clean, needs_fix: fix }
         default: fix
 
-    fix_decision_join:
+    fix_request_join:
       kind: join
       inputs: { initial: {}, initial_confirmation: {} }
       outputs: { ready: {}, missing: {} }
@@ -734,17 +795,17 @@ spec:
         passed_port: ready
         failed_port: missing
 
-    review_gate:
+    fix_round_gate:
       kind: while
       inputs: { state: {} }
-      outputs: { fix: {}, approved: {}, exhausted: {} }
+      outputs: { fix: {}, unexpected_clean: {}, exhausted: {} }
       config:
         unwrap_single_join_value: true
         field: quality.status
         operator: eq
         value: clean
         continue_port: fix
-        done_port: approved
+        done_port: unexpected_clean
         exhausted_port: exhausted
         max_iterations: 4
 
@@ -762,7 +823,7 @@ spec:
           builtin_tool_policy: backend_native
           codex_sandbox: danger-full-access
           allowed_dag_tools: [handoff, credential_broker_call]
-          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input] }
+          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: [input], git_metadata_read_only: true }
           credentials:
             - credential_ref: github-autofix
               purpose: apply one bounded review revision to the Draft PR
@@ -808,7 +869,7 @@ spec:
     review_revision:
       kind: agent
       agent: reviewer
-      depends_on: [review_gate]
+      depends_on: [fix_round_gate]
       session_scope: dispatch
       workspace_access: { writable_paths: [], readonly_paths: [input] }
       allowed_builtin_tools: [Glob, Grep, LS, Read]
@@ -871,7 +932,7 @@ spec:
     confirm_revision:
       kind: agent
       agent: reviewer
-      depends_on: [review_gate]
+      depends_on: [fix_round_gate]
       session_scope: dispatch
       workspace_access: { writable_paths: [], readonly_paths: [input] }
       allowed_builtin_tools: [Glob, Grep, LS, Read]
@@ -931,61 +992,161 @@ spec:
         routes: { clean: clean, needs_fix: fix }
         default: fix
 
-    ready_for_ci_initial: { kind: terminal, outcome: success, inputs: { result: {} } }
-    ready_for_ci_loop: { kind: terminal, outcome: success, inputs: { result: {} } }
-    ready_for_ci_revision: { kind: terminal, outcome: success, inputs: { result: {} } }
+    initial_confirmation_pair:
+      kind: join
+      inputs:
+        prior: { contract: ReviewDecision }
+        confirmation: { contract: ReviewDecision }
+      outputs: { ready: {}, invalid: {} }
+      config:
+        mode: all
+        field: quality.status
+        success_values: [clean]
+        passed_port: ready
+        failed_port: invalid
+
+    revision_confirmation_pair:
+      kind: join
+      inputs:
+        prior: { contract: ReviewDecision }
+        confirmation: { contract: ReviewDecision }
+      outputs: { ready: {}, invalid: {} }
+      config:
+        mode: all
+        field: quality.status
+        success_values: [clean]
+        passed_port: ready
+        failed_port: invalid
+
+    final_confirmation_pair:
+      kind: join
+      inputs: { initial: {}, revision: {} }
+      outputs: { ready: {}, invalid: {} }
+      config:
+        mode: any
+        field: passed
+        success_values: [true]
+        passed_port: ready
+        failed_port: invalid
+
+    verify_confirmation:
+      kind: command
+      inputs: { reviews: {} }
+      outputs: { ready: { contract: ReviewDecision }, failed: {} }
+      config:
+        command:
+          - node
+          - -e
+          - >-
+            let s='';const fail=m=>{throw new Error(m)},last=(inputs,key)=>Array.isArray(inputs[key])?inputs[key].at(-1):undefined;process.stdin.on('data',d=>s+=d).on('end',()=>{const inputs=JSON.parse(s),selected=last(inputs,'reviews'),pair=Array.isArray(selected?.values)?selected.values[0]:undefined,reviews=Array.isArray(pair?.values)?pair.values:[],prior=reviews[0],confirmation=reviews[1];if(reviews.length!==2||!prior||!confirmation||prior.verdict!=='clean'||confirmation.verdict!=='clean'||prior?.quality?.status!=='clean'||confirmation?.quality?.status!=='clean')fail('two clean reviews are required');if(prior.head_sha!==confirmation.head_sha)fail('clean reviews do not bind the same head');if(prior.quality.test_report_sha256!==confirmation.quality.test_report_sha256)fail('clean reviews do not bind the same test report');process.stdout.write(JSON.stringify(confirmation))});
+        cwd: $run_workspace
+        stdin_field: $inputs
+        timeout_ms: 30000
+        parse_stdout: json
+        result_payload: value
+        success_port: ready
+        failure_port: failed
+
+    finalize_ready:
+      kind: command
+      inputs: { decision: {} }
+      outputs: { ready: { contract: AutoFixV2Result }, failed: {} }
+      config:
+        command:
+          - node
+          - -e
+          - >-
+            const fs=require('fs'),crypto=require('crypto');let s='';const fail=m=>{throw new Error(m)};process.stdin.on('data',d=>s+=d).on('end',()=>{const inputs=JSON.parse(s),review=Array.isArray(inputs.decision)?inputs.decision.at(-1):undefined;if(!review||review.verdict!=='clean'||review?.quality?.status!=='clean')fail('final clean review is missing');const task=fs.readFileSync(process.argv[1]),planBytes=fs.readFileSync(process.argv[2]),plan=JSON.parse(planBytes),pr=JSON.parse(fs.readFileSync(process.argv[3],'utf8')),sha=b=>crypto.createHash('sha256').update(b).digest('hex'),taskSha=sha(task),planSha=sha(planBytes);if(plan.task_document_sha256!==taskSha||pr.task_document_sha256!==taskSha)fail('final task identity mismatch');process.stdout.write(JSON.stringify({version:1,status:'ready_for_ci',repository:`${pr.owner}/${pr.repo}`,pull_number:pr.pull_number,head_sha:review.head_sha,task_document_sha256:taskSha,task_plan_sha256:planSha,review_confirmation_count:2,findings:review.findings,findings_sha256:review.quality.findings_sha256,test_report_sha256:review.quality.test_report_sha256,quality_score:review.quality.score,review_summary:review.summary}))});
+          - $run_input/task_document
+          - $run_input/task_plan
+          - $run_input/pr_context
+        cwd: $run_workspace
+        stdin_field: $inputs
+        timeout_ms: 30000
+        parse_stdout: json
+        result_payload: value
+        success_port: ready
+        failure_port: failed
+
+    ready_for_ci: { kind: terminal, outcome: success, inputs: { result: { contract: AutoFixV2Result } } }
     preparation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
-    implementation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     aggregation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     initial_review_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     initial_confirmation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     revision_review_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
     revision_confirmation_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
-    fix_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
-    decision_missing: { kind: terminal, outcome: failure, inputs: { result: {} } }
-    needs_human: { kind: terminal, outcome: cancelled, inputs: { result: {} } }
+    finalization_failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+    decision_missing:
+      kind: terminal
+      outcome: failure
+      inputs:
+        join: {}
+        unexpected_clean: {}
+        initial_confirmation: {}
+        revision_confirmation: {}
+        final_confirmation: {}
+        confirmation: {}
+    needs_human:
+      kind: terminal
+      outcome: cancelled
+      inputs:
+        exhausted: {}
+        implementation: {}
+        fix: {}
 
   edges:
     - { from: $run.input, to: prepare_repository.start }
     - { from: prepare_repository.ready, to: implement.plan }
     - { from: prepare_repository.failed, to: preparation_failed.result, condition: on_failure }
     - { from: implement.implemented, to: aggregate.workers }
-    - { from: implement.failed, to: implementation_failed.result, condition: on_failure }
+    - { from: implement.failed, to: needs_human.implementation, condition: on_failure }
     - { from: aggregate.candidate, to: review_initial.candidate }
     - { from: aggregate.failed, to: aggregation_failed.result, condition: on_failure }
     - { from: review_initial.reviewed, to: initial_quality_gate.review }
     - { from: review_initial.failed, to: initial_review_failed.result, condition: on_failure }
     - { from: initial_quality_gate.clean, to: confirm_initial.prior }
-    - { from: initial_quality_gate.fix, to: fix_decision_join.initial }
+    - { from: initial_quality_gate.clean, to: initial_confirmation_pair.prior }
+    - { from: initial_quality_gate.fix, to: fix_request_join.initial }
     - { from: confirm_initial.reviewed, to: initial_confirmation_gate.review }
     - { from: confirm_initial.failed, to: initial_confirmation_failed.result, condition: on_failure }
-    - { from: initial_confirmation_gate.clean, to: ready_for_ci_initial.result }
-    - { from: initial_confirmation_gate.fix, to: fix_decision_join.initial_confirmation }
-    - { from: fix_decision_join.ready, to: review_gate.state }
-    - { from: fix_decision_join.missing, to: decision_missing.result }
-    - { from: review_gate.fix, to: fix.review }
-    - { from: review_gate.approved, to: ready_for_ci_loop.result }
-    - { from: review_gate.exhausted, to: needs_human.result }
+    - { from: initial_confirmation_gate.clean, to: initial_confirmation_pair.confirmation }
+    - { from: initial_confirmation_gate.fix, to: fix_request_join.initial_confirmation }
+    - { from: fix_request_join.ready, to: fix_round_gate.state }
+    - { from: fix_request_join.missing, to: decision_missing.join }
+    - { from: fix_round_gate.fix, to: fix.review }
+    - { from: fix_round_gate.unexpected_clean, to: decision_missing.unexpected_clean, condition: on_failure }
+    - { from: fix_round_gate.exhausted, to: needs_human.exhausted }
     - { from: fix.fixed, to: review_revision.fixes }
-    - { from: fix.failed, to: fix_failed.result, condition: on_failure }
+    - { from: fix.failed, to: needs_human.fix, condition: on_failure }
     - { from: review_revision.reviewed, to: revision_quality_gate.review }
     - { from: review_revision.failed, to: revision_review_failed.result, condition: on_failure }
     - { from: revision_quality_gate.clean, to: confirm_revision.prior }
+    - { from: revision_quality_gate.clean, to: revision_confirmation_pair.prior }
     - kind: feedback
       from: revision_quality_gate.fix
-      to: review_gate.state
+      to: fix_round_gate.state
       max_traversals: 4
     - { from: confirm_revision.reviewed, to: revision_confirmation_gate.review }
     - { from: confirm_revision.failed, to: revision_confirmation_failed.result, condition: on_failure }
-    - { from: revision_confirmation_gate.clean, to: ready_for_ci_revision.result }
+    - { from: revision_confirmation_gate.clean, to: revision_confirmation_pair.confirmation }
     - kind: feedback
       from: revision_confirmation_gate.fix
-      to: review_gate.state
+      to: fix_round_gate.state
       max_traversals: 4
+    - { from: initial_confirmation_pair.ready, to: final_confirmation_pair.initial }
+    - { from: initial_confirmation_pair.invalid, to: decision_missing.initial_confirmation, condition: on_failure }
+    - { from: revision_confirmation_pair.ready, to: final_confirmation_pair.revision }
+    - { from: revision_confirmation_pair.invalid, to: decision_missing.revision_confirmation, condition: on_failure }
+    - { from: final_confirmation_pair.ready, to: verify_confirmation.reviews }
+    - { from: final_confirmation_pair.invalid, to: decision_missing.final_confirmation, condition: on_failure }
+    - { from: verify_confirmation.ready, to: finalize_ready.decision }
+    - { from: verify_confirmation.failed, to: decision_missing.confirmation, condition: on_failure }
+    - { from: finalize_ready.ready, to: ready_for_ci.result }
+    - { from: finalize_ready.failed, to: finalization_failed.result, condition: on_failure }
 
   policies:
     max_nodes: 40
-    max_edges: 32
+    max_edges: 44
     max_parallelism: 4
     max_dispatches: 32
     max_handoffs: 48
