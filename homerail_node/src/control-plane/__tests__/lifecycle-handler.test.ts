@@ -498,6 +498,36 @@ describe("handleLifecycleRequest", () => {
       });
     });
 
+    it("create worker mounts only the declared subtree writable", async () => {
+      process.env["HOMERAIL_HOME"] = "/home/user/.homerail";
+      const provider = new MockProvider();
+      const responses: LifecycleResponse[] = [];
+
+      await handleLifecycleRequest(
+        makeRequest({
+          resource_type: "worker",
+          operation: "create",
+          spec: {
+            workspace_id: "run-isolated",
+            workspace_read_only: true,
+            workspace_writable_subpath: "fixers/fix/inv_0001/item_0001",
+          },
+        }),
+        provider,
+        (message) => responses.push(message),
+      );
+
+      expect(responses[0]!.status).toBe("success");
+      const container = provider.containers.get(String(responses[0]!.resource_data!.id));
+      expect(container!.config.mounts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ container: "/workspace", mode: "ro" }),
+        expect.objectContaining({
+          container: "/workspace/fixers/fix/inv_0001/item_0001",
+          mode: "rw",
+        }),
+      ]));
+    });
+
     it("create worker without workspace_id -> error", async () => {
       const provider = new MockProvider();
       const responses: LifecycleResponse[] = [];

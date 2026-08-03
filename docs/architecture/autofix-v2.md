@@ -325,6 +325,10 @@ Its semantics are:
 - only `handoff` is available unless DAG tools are declared explicitly;
 - each child has a unique logical actor, provider session, and isolated
   worktree based on the same immutable source SHA;
+- when a dispatch declares exactly one writable path, Node mounts the run
+  workspace read-only and overlays only that exact subtree read-write. Sibling
+  worktrees remain physically read-only even though Worker snapshots exclude
+  their concurrent Manager-owned changes;
 - with `commit_mode: manager`, Git metadata remains read-only to the model. A
   successful child reports its exact worktree with intended file changes;
   Manager validates the binding, stages and commits those changes under a

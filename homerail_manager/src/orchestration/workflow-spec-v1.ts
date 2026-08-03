@@ -1814,6 +1814,7 @@ function authoringNode(node: CanonicalNode, canonical: CanonicalWorkflowIR): Rec
       ...(config.field ? { field: config.field } : {}),
       operator: configString(config, "operator", "eq"),
       ...(config.value !== undefined ? { value: config.value } : {}),
+      ...(config.unwrap_single_join_value === true ? { unwrap_single_join_value: true } : {}),
       continue_port: continuePort,
       done_port: donePort,
       exhausted_port: exhaustedPort,

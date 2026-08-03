@@ -739,7 +739,8 @@ spec:
       inputs: { state: {} }
       outputs: { fix: {}, approved: {}, exhausted: {} }
       config:
-        field: values.0.quality.status
+        unwrap_single_join_value: true
+        field: quality.status
         operator: eq
         value: clean
         continue_port: fix
@@ -753,8 +754,8 @@ spec:
       outputs: { fixed: {}, failed: {} }
       config:
         input: review
-        item_field: input.values.0.fix_tasks
-        context_field: input.values.0
+        item_field: input.fix_tasks
+        context_field: input
         worker_agent: fixer
         worker_policy:
           session_scope: dispatch

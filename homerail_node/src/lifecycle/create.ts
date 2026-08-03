@@ -43,6 +43,7 @@ export interface CreateWorkerOptions {
   provider: ExecutionProvider;
   workspaceId: string;
   workspaceReadOnly?: boolean;
+  workspaceWritableSubpath?: string;
   workspaceInputsReadOnly?: boolean;
   mountPolicy?: MountPolicyOptions;
 }
@@ -55,6 +56,7 @@ export async function createWorkerContainer(opts: CreateWorkerOptions): Promise<
     provider,
     workspaceId,
     workspaceReadOnly = false,
+    workspaceWritableSubpath,
     workspaceInputsReadOnly = false,
     mountPolicy,
   } = opts;
@@ -67,7 +69,12 @@ export async function createWorkerContainer(opts: CreateWorkerOptions): Promise<
 
   const mounts: NonNullable<ContainerConfig["mounts"]> = [];
 
-  const defaultMounts = workerAllowedMounts(workspaceId, workspaceReadOnly, workspaceInputsReadOnly);
+  const defaultMounts = workerAllowedMounts(
+    workspaceId,
+    workspaceReadOnly,
+    workspaceInputsReadOnly,
+    workspaceWritableSubpath,
+  );
   for (const dm of defaultMounts) {
     if (!mounts.some((m) => m.container === dm.container)) {
       mounts.push({ host: dm.host, container: dm.container, mode: dm.mode });

@@ -74,11 +74,43 @@ export function allowedMounts(volumeId: string): MountEntry[] {
   ];
 }
 
+function safeWorkerWritableSubpath(value: string): string {
+  const normalized = value.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!normalized || normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) {
+    throw new Error("writableSubpath must be a non-empty relative workspace path");
+  }
+  const segments = normalized.split("/");
+  for (const segment of segments) {
+    if (!segment || segment === "." || segment === "..") {
+      throw new Error("writableSubpath contains an unsafe path segment");
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(segment)) {
+      throw new Error("writableSubpath contains unsupported characters");
+    }
+  }
+  return segments.join("/");
+}
+
 export function workerAllowedMounts(
   workspaceId: string,
   readOnly = false,
   readOnlyInputs = false,
+  writableSubpath?: string,
 ): MountEntry[] {
+  if (writableSubpath !== undefined && !readOnly) {
+    throw new Error("writableSubpath requires a read-only workspace root");
+  }
+  const normalizedWritableSubpath = writableSubpath === undefined
+    ? undefined
+    : safeWorkerWritableSubpath(writableSubpath);
+  if (
+    normalizedWritableSubpath === "input"
+    || normalizedWritableSubpath?.startsWith("input/")
+    || normalizedWritableSubpath === ".homerail-runtime"
+    || normalizedWritableSubpath?.startsWith(".homerail-runtime/")
+  ) {
+    throw new Error("writableSubpath conflicts with a protected workspace mount");
+  }
   const mounts: MountEntry[] = [
     {
       host: homerailWorkerWorkspacePath(workspaceId),
@@ -98,6 +130,13 @@ export function workerAllowedMounts(
       host: `${homerailWorkerWorkspacePath(workspaceId)}/input`,
       container: "/workspace/input",
       mode: "ro",
+    });
+  }
+  if (normalizedWritableSubpath) {
+    mounts.push({
+      host: homerailWorkerWorkspacePath(`${workspaceId}/${normalizedWritableSubpath}`),
+      container: `/workspace/${normalizedWritableSubpath}`,
+      mode: "rw",
     });
   }
   return mounts;

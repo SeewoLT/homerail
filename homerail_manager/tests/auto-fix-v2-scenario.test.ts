@@ -253,6 +253,109 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     };
   }
 
+  function recordMutationEvidence(nodeId: string, sessionId: string) {
+    for (const [action, result] of [
+      ["pull_request_snapshot", { head_sha: head }],
+      ["commit_workspace", { head_sha: head, manifest_sha256: MANIFEST_SHA256 }],
+    ] as const) {
+      recordActiveRunBrokerActionSuccess({
+        run_id: "autofix-v2-run",
+        node_id: nodeId,
+        session_id: sessionId,
+        credential_ref: "github-autofix",
+        broker: "github_pr",
+        action,
+        result,
+      });
+    }
+  }
+
+  async function reachInitialReview(executor: GraphExecutor, dispatcher: RecordingDispatcher) {
+    const { planContent } = createRun();
+    handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", planContent);
+    executor.tick("autofix-v2-run");
+    const implementer = dispatcher.dispatched.find((entry) => entry.nodeId === "implement__item_0001")!;
+    const workerPath = "workers/implement/inv_0001/item_0001";
+    fs.writeFileSync(
+      path.join(home, "workspace", "autofix-v2-run", workerPath, "worker.txt"),
+      "implemented\n",
+    );
+    handoffActiveRun("autofix-v2-run", implementer.nodeId, "result", {
+      status: "implemented",
+      task_id: "runtime",
+      workspace_path: workerPath,
+      summary: "implemented",
+      tests: ["focused"],
+    });
+    await tickUntil(
+      executor,
+      () => dispatcher.dispatched.some((entry) => entry.nodeId === "aggregate"),
+      "aggregate was not dispatched",
+    );
+    const aggregate = dispatcher.dispatched.find((entry) => entry.nodeId === "aggregate")!;
+    recordMutationEvidence("aggregate", aggregate.sessionId!);
+    const report = writeReport(
+      path.join(home, "workspace", "autofix-v2-run", "repo"),
+      "aggregate",
+      "passed",
+    );
+    handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
+      head_sha: head,
+      manifest_sha256: MANIFEST_SHA256,
+      summary: "candidate",
+      test_report: report,
+    });
+    await tickUntil(
+      executor,
+      () => dispatcher.dispatched.some((entry) => entry.nodeId === "review_initial"),
+      "initial review was not dispatched",
+    );
+    return {
+      initial: dispatcher.dispatched.find((entry) => entry.nodeId === "review_initial")!,
+      testReportSha: report.sha256,
+    };
+  }
+
+  async function completeFixRound(
+    executor: GraphExecutor,
+    dispatcher: RecordingDispatcher,
+    invocation: number,
+  ) {
+    const fixerId = invocation === 1
+      ? "fix__item_0001"
+      : `fix__inv_${String(invocation).padStart(4, "0")}__item_0001`;
+    await tickUntil(
+      executor,
+      () => dispatcher.dispatched.some((entry) => entry.nodeId === fixerId),
+      `fixer invocation ${invocation} was not dispatched`,
+    );
+    const fixer = dispatcher.dispatched.find((entry) => entry.nodeId === fixerId)!;
+    recordMutationEvidence(fixer.nodeId, fixer.sessionId!);
+    const fixPath = `fixers/fix/inv_${String(invocation).padStart(4, "0")}/item_0001`;
+    const report = writeReport(
+      path.join(home, "workspace", "autofix-v2-run", fixPath),
+      "fix",
+      "passed",
+    );
+    handoffActiveRun("autofix-v2-run", fixer.nodeId, "result", {
+      status: "fixed",
+      previous_head_sha: head,
+      head_sha: head,
+      manifest_sha256: MANIFEST_SHA256,
+      summary: `fixed round ${invocation}`,
+      test_report: report,
+    });
+    await tickUntil(
+      executor,
+      () => dispatcher.dispatched.filter((entry) => entry.nodeId === "review_revision").length === invocation,
+      `revision review ${invocation} was not dispatched`,
+    );
+    return {
+      revision: dispatcher.dispatched.filter((entry) => entry.nodeId === "review_revision").at(-1)!,
+      testReportSha: report.sha256,
+    };
+  }
+
   it("compiles without online-CI nodes and declares Manager-verified local reports", () => {
     const source = fs.readFileSync(TEMPLATE, "utf8");
     const parsed = parseWorkflowSource(source);
@@ -285,7 +388,11 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
         }],
       });
     expect(parsed.graph.nodes.find((node) => node.node_id === "review_gate")?.gateway_config)
-      .toMatchObject({ max_iterations: 4, field: "values.0.quality.status" });
+      .toMatchObject({
+        max_iterations: 4,
+        unwrap_single_join_value: true,
+        field: "quality.status",
+      });
     expect(validateJsonContract(parsed.meta.contracts?.TaskPlan, {
       version: 1,
       task_document_sha256: "a".repeat(64),
@@ -302,7 +409,7 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     })).toMatchObject({ valid: false });
   });
 
-  it("requires a valid report, fixes one review, then converges after two fresh clean reviews", async () => {
+  it("requires a valid report, runs a second real fixer, then converges after two fresh clean reviews", async () => {
     const { planContent } = createRun();
     const dispatcher = new RecordingDispatcher();
     const executor = new GraphExecutor(dispatcher);
@@ -418,8 +525,53 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
       .toMatchObject({ sha256: fixReport.sha256 });
 
     await tickUntil(executor, () => dispatcher.dispatched.some((entry) => entry.nodeId === "review_revision"), "revision review was not dispatched");
-    const revision = dispatcher.dispatched.find((entry) => entry.nodeId === "review_revision")!;
-    const clean = reviewDecision(fixReport.sha256, true);
+    const firstRevision = dispatcher.dispatched.find((entry) => entry.nodeId === "review_revision")!;
+    const stillRequested = reviewDecision(fixReport.sha256, false);
+    recordReviewEvidence("review_revision", firstRevision.sessionId!, stillRequested);
+    handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", stillRequested);
+
+    await tickUntil(
+      executor,
+      () => dispatcher.dispatched.some((entry) => entry.nodeId === "fix__inv_0002__item_0001"),
+      "second fixer was not dispatched",
+    );
+    const secondFixer = dispatcher.dispatched.find((entry) => entry.nodeId === "fix__inv_0002__item_0001")!;
+    const secondFixPath = "fixers/fix/inv_0002/item_0001";
+    for (const [action, result] of [
+      ["pull_request_snapshot", { head_sha: head }],
+      ["commit_workspace", { head_sha: head, manifest_sha256: MANIFEST_SHA256 }],
+    ] as const) {
+      recordActiveRunBrokerActionSuccess({
+        run_id: "autofix-v2-run",
+        node_id: secondFixer.nodeId,
+        session_id: secondFixer.sessionId!,
+        credential_ref: "github-autofix",
+        broker: "github_pr",
+        action,
+        result,
+      });
+    }
+    const secondFixReport = writeReport(
+      path.join(home, "workspace", "autofix-v2-run", secondFixPath),
+      "fix",
+      "passed",
+    );
+    handoffActiveRun("autofix-v2-run", secondFixer.nodeId, "result", {
+      status: "fixed",
+      previous_head_sha: head,
+      head_sha: head,
+      manifest_sha256: MANIFEST_SHA256,
+      summary: "fixed again",
+      test_report: secondFixReport,
+    });
+
+    await tickUntil(
+      executor,
+      () => dispatcher.dispatched.filter((entry) => entry.nodeId === "review_revision").length === 2,
+      "second revision review was not dispatched",
+    );
+    const revision = dispatcher.dispatched.filter((entry) => entry.nodeId === "review_revision").at(-1)!;
+    const clean = reviewDecision(secondFixReport.sha256, true);
     recordReviewEvidence("review_revision", revision.sessionId!, clean);
     handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", clean);
 
@@ -432,8 +584,44 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
       return `run did not converge: status=${run?.status} states=${JSON.stringify(Object.fromEntries(run?.dagRun.nodeStates ?? []))}`;
     });
 
-    expect(new Set([initial.sessionId, revision.sessionId, confirmation.sessionId]).size).toBe(3);
-    expect(getActiveRun("autofix-v2-run")?.counters.fanout_invocations).toMatchObject({ implement: 1, fix: 1 });
+    expect(new Set([initial.sessionId, firstRevision.sessionId, revision.sessionId, confirmation.sessionId]).size).toBe(4);
+    expect(getActiveRun("autofix-v2-run")?.counters.fanout_invocations).toMatchObject({ implement: 1, fix: 2 });
     expect(getActiveRun("autofix-v2-run")?.status).toBe("completed");
+  }, 30_000);
+
+  it("runs four real fixers before exhausting to needs_human", async () => {
+    const dispatcher = new RecordingDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const { initial, testReportSha } = await reachInitialReview(executor, dispatcher);
+    const initialDecision = reviewDecision(testReportSha, false);
+    recordReviewEvidence("review_initial", initial.sessionId!, initialDecision);
+    handoffActiveRun("autofix-v2-run", "review_initial", "reviewed", initialDecision);
+
+    const reviewSessions = [initial.sessionId!];
+    for (let invocation = 1; invocation <= 4; invocation++) {
+      const { revision, testReportSha: fixReportSha } = await completeFixRound(
+        executor,
+        dispatcher,
+        invocation,
+      );
+      reviewSessions.push(revision.sessionId!);
+      const requested = reviewDecision(fixReportSha, false);
+      recordReviewEvidence("review_revision", revision.sessionId!, requested);
+      handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", requested);
+    }
+
+    await tickUntil(
+      executor,
+      () => getActiveRun("autofix-v2-run")?.status === "cancelled",
+      "run did not exhaust to needs_human",
+    );
+    expect(new Set(reviewSessions).size).toBe(5);
+    expect(getActiveRun("autofix-v2-run")?.counters.fanout_invocations).toMatchObject({
+      implement: 1,
+      fix: 4,
+    });
+    expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("review_gate")).toBe("CANCELLED");
+    expect(getActiveRun("autofix-v2-run")?.counters.gateway_iterations.review_gate).toBe(4);
+    expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.some((node) => node.node_id.includes("inv_0005"))).toBe(false);
   }, 30_000);
 });

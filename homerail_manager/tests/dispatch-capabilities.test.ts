@@ -598,6 +598,49 @@ nodes:
     });
   });
 
+  it("mounts a sole writable path without making sibling worktrees writable", async () => {
+    const nodeSocket = makeSocket();
+    registerNode({
+      node_id: "docker-node",
+      project_id: "p1",
+      socket: nodeSocket,
+      status: "connected",
+      capabilities: ["docker-cli"],
+      registered_at: Date.now(),
+      last_heartbeat: Date.now(),
+      pending_requests: new Map(),
+    });
+    const requested: Array<{ readOnly?: boolean; subpath?: string }> = [];
+    new WsDispatchAdapter({
+      managerBaseUrl: "http://127.0.0.1:19191",
+      provisioner: {
+        createFn: async (_nodeId, _workspaceId, opts) => {
+          requested.push({
+            readOnly: opts.workspaceReadOnly,
+            subpath: opts.workspaceWritableSubpath,
+          });
+          return { status: "success", resource_data: { id: "isolated-container" } };
+        },
+        startFn: async () => ({ status: "success" }),
+        runtimeStatusFn: async () => ({
+          worker_ids: ["provisioned-run-capabilities-diagnose"],
+        }),
+      },
+    }).dispatch(makeEnvelope({
+      workspaceAccess: {
+        writable_paths: ["fixers/fix/inv_0001/item_0001"],
+        readonly_paths: ["input"],
+      },
+    }));
+
+    await vi.waitFor(() => {
+      expect(requested).toEqual([{
+        readOnly: true,
+        subpath: "fixers/fix/inv_0001/item_0001",
+      }]);
+    });
+  });
+
   it("requests the nested sandbox profile only for backend-native Codex Workers", async () => {
     const nodeSocket = makeSocket();
     registerNode({

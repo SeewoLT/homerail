@@ -518,6 +518,7 @@ const WhileNode = Type.Object({
       Type.Literal("falsy"),
     ]),
     value: Type.Optional(JsonValue),
+    unwrap_single_join_value: Type.Optional(Type.Boolean()),
     continue_port: Identifier,
     done_port: Identifier,
     exhausted_port: Type.Optional(Identifier),

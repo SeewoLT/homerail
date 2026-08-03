@@ -91,6 +91,9 @@ dispatcher separately when checking graph behavior.
 - `condition.config.field` and `while.config.field` are optional. Omit `field`
   to route or compare the complete handoff payload; set it to a dotted path to
   inspect one nested value.
+- Set `while.config.unwrap_single_join_value: true` when the first entry comes
+  from a single-value `join` but feedback entries carry that value directly.
+  The while predicate and emitted `input` then use one stable payload shape.
 - Ports declare interfaces. Connections exist only in `spec.edges`.
 - A data edge carries a payload and implies a completion dependency.
 - `depends_on` is only for a completion barrier that carries no payload.

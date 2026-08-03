@@ -4402,13 +4402,30 @@ function _terminateLoopSource(run: ActiveRun, nodeId: string): void {
   run.dagRun.loopSources.delete(nodeId);
 }
 
+function _unwrapSingleJoinValue(input: unknown): unknown {
+  const structured = _structuredGatewayValue(input);
+  if (!structured || typeof structured !== "object" || Array.isArray(structured)) return structured;
+  const envelope = structured as Record<string, unknown>;
+  if (
+    !Array.isArray(envelope.values)
+    || envelope.values.length !== 1
+    || envelope.total !== 1
+    || typeof envelope.passed !== "boolean"
+    || (envelope.mode !== "all" && envelope.mode !== "any" && envelope.mode !== "n_of_m")
+  ) return structured;
+  return envelope.values[0];
+}
+
 function _whileGatewayResult(
   run: ActiveRun,
   node: DAGGraphNode,
   input: unknown,
 ): { port: string; payload: Record<string, unknown> } {
   const config = node.gateway_config;
-  const selected = _fieldValue(input, config?.field);
+  const normalizedInput = config?.unwrap_single_join_value === true
+    ? _unwrapSingleJoinValue(input)
+    : input;
+  const selected = _fieldValue(normalizedInput, config?.field);
   const matched = _gatewayComparison(selected, config?.operator, config?.value);
   const iteration = run.counters.gateway_iterations[node.node_id] ?? 0;
   const maxIterations = Math.max(1, Math.floor(config?.max_iterations ?? 3));
@@ -4416,20 +4433,20 @@ function _whileGatewayResult(
     _terminateLoopSource(run, node.node_id);
     return {
       port: config?.done_port || "done",
-      payload: { input, iteration, max_iterations: maxIterations, matched: true },
+      payload: { input: normalizedInput, iteration, max_iterations: maxIterations, matched: true },
     };
   }
   if (iteration >= maxIterations) {
     _terminateLoopSource(run, node.node_id);
     return {
       port: config?.exhausted_port || "exhausted",
-      payload: { input, iteration, max_iterations: maxIterations, matched: false, exhausted: true },
+      payload: { input: normalizedInput, iteration, max_iterations: maxIterations, matched: false, exhausted: true },
     };
   }
   run.counters.gateway_iterations[node.node_id] = iteration + 1;
   return {
     port: config?.continue_port || "continue",
-    payload: { input, iteration: iteration + 1, max_iterations: maxIterations, matched: false },
+    payload: { input: normalizedInput, iteration: iteration + 1, max_iterations: maxIterations, matched: false },
   };
 }
 

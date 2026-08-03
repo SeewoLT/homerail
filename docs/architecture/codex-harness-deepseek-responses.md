@@ -69,7 +69,10 @@ in depth, the production Worker image preloads
 launcher processes. Its constructor marks those processes non-dumpable after
 `exec` (ordinary `exec` resets this Linux flag), protecting the Worker's relay
 closure as well as launcher environments. Linux provider dispatch fails closed
-when the configured guard is absent or cannot be loaded. Provider-backed Codex
+when the configured guard is absent. Because the dynamic loader does not report
+an ignored preload for a static or secure-exec launcher, the relay credential
+boundary remains the primary control when guard loading cannot be observed.
+Provider-backed Codex
 also disables ambient apps, plugins, remote plugin sharing, Skill search/install,
 and native multi-agent features.
 

@@ -29,7 +29,9 @@ predates the runtime and broker support described below.
   writable coding roles explicitly select `danger-full-access` for Codex's
   command layer so test subprocesses and loopback listeners behave normally;
   Docker mounts, cgroups, the disposable-container lifecycle, and HomeRail's
-  post-turn path verification remain active.
+  post-turn path verification remain active. The run workspace is mounted
+  read-only and only the dispatch's sole declared worktree is overlaid
+  read-write, so a fan-out child cannot alter a sibling worktree.
 - The Worker image contains an immutable dependency cache for Agent UI and the
   HomeRail protocol, plugin SDK, Manager, Worker, Node, and CLI packages. Before
   a writable Codex dispatch, Worker compares each worktree's dependency-relevant normalized

@@ -69,6 +69,7 @@ export interface DAGGatewayConfig {
   success_values?: unknown[];
   operator?: "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "truthy" | "falsy" | string;
   value?: unknown;
+  unwrap_single_join_value?: boolean;
   max_iterations?: number;
   max_items?: number;
   command?: string[];

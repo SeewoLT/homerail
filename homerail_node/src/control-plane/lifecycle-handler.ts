@@ -160,6 +160,9 @@ async function dispatchOperation(
           provider,
           workspaceId,
           workspaceReadOnly: spec.workspace_read_only === true,
+          workspaceWritableSubpath: typeof spec.workspace_writable_subpath === "string"
+            ? spec.workspace_writable_subpath
+            : undefined,
           workspaceInputsReadOnly: inputCount > 0,
         });
         return info as unknown as Record<string, unknown>;
