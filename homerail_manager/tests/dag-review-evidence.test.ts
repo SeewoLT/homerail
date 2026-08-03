@@ -25,6 +25,7 @@ import {
   recordReviewFinding,
   reviewEvidenceProjectionPath,
   writeReviewEvidenceProjectionFile,
+  type ReviewEvidenceFence,
   type ReviewEvidenceIdentity,
 } from "../src/persistence/dag-review-evidence.js";
 import { reviewFindingDedupKey } from "homerail-protocol";
@@ -38,6 +39,18 @@ function identity(overrides: Partial<ReviewEvidenceIdentity> = {}): ReviewEviden
     roundId: "round-0001",
     generation: 1,
     attempt: 1,
+    ...overrides,
+  };
+}
+
+function fence(overrides: Partial<ReviewEvidenceFence> = {}): ReviewEvidenceFence {
+  return {
+    runId: "run-1",
+    reviewer: "qwen",
+    nodeId: "qwen_review",
+    sessionId: "session-1",
+    roundId: "round-0001",
+    generation: 1,
     ...overrides,
   };
 }
@@ -97,11 +110,23 @@ describe("durable DAG review evidence", () => {
       identity: identity({ attempt: 1 }),
       diagnostic: { finish_reason: "max_tokens", output_tokens: 900 },
     });
+    recordAttemptDiagnostic({
+      identity: identity({ attempt: 2 }),
+      diagnostic: { finish_reason: "end_turn" },
+    });
 
     const loaded = loadReviewEvidence("run-1", "qwen");
     expect(loaded.findings.map((item) => item.title)).toEqual(["Unchecked response", "Second issue"]);
-    expect(loaded.diagnostics).toHaveLength(1);
-    expect(loaded.diagnostics[0]?.failure_category).toBe("provider_output_truncated");
+    expect(loaded.diagnostics.map((item) => item.attempt)).toEqual([1, 2]);
+
+    // The same dispatch accumulates both attempts, while a fresh generation
+    // starts with an empty projection.
+    const current = loadReviewEvidence("run-1", "qwen", fence());
+    expect(current.findings.map((item) => item.title)).toEqual(["Unchecked response", "Second issue"]);
+    expect(current.diagnostics.map((item) => item.attempt)).toEqual([1, 2]);
+    const fresh = loadReviewEvidence("run-1", "qwen", fence({ generation: 2 }));
+    expect(fresh.findings).toHaveLength(0);
+    expect(fresh.diagnostics).toHaveLength(0);
   });
 
   it("fences evidence to the exact run/reviewer/session/generation/attempt", () => {
@@ -133,6 +158,81 @@ describe("durable DAG review evidence", () => {
     })).toThrow(/attempt/);
   });
 
+  it("deduplicates same-fence redelivery while fresh sessions/generations stay independent", () => {
+    expect(recordReviewFinding({ identity: identity(), finding: finding() }).status).toBe("inserted");
+    // Redelivery on a later attempt of the same logical dispatch deduplicates.
+    expect(recordReviewFinding({ identity: identity({ attempt: 2 }), finding: finding() }).status).toBe("deduplicated");
+    // The same finding id is independently durable in every fresh fence
+    // component: generation, session, round, and node.
+    expect(recordReviewFinding({ identity: identity({ generation: 2 }), finding: finding() }).status).toBe("inserted");
+    expect(recordReviewFinding({ identity: identity({ sessionId: "session-2" }), finding: finding() }).status).toBe("inserted");
+    expect(recordReviewFinding({ identity: identity({ roundId: "round-0002" }), finding: finding() }).status).toBe("inserted");
+    expect(recordReviewFinding({ identity: identity({ nodeId: "qwen_review_2" }), finding: finding() }).status).toBe("inserted");
+    expect(listReviewEvidenceRecords("run-1", "qwen")).toHaveLength(5);
+
+    for (const selected of [
+      fence(),
+      fence({ generation: 2 }),
+      fence({ sessionId: "session-2" }),
+      fence({ roundId: "round-0002" }),
+      fence({ nodeId: "qwen_review_2" }),
+    ]) {
+      expect(loadReviewEvidence("run-1", "qwen", selected).findings).toHaveLength(1);
+    }
+
+    const current = buildReviewEvidenceProjectionFor("run-1", "qwen", fence());
+    const fresh = buildReviewEvidenceProjectionFor("run-1", "qwen", fence({ generation: 2 }));
+    expect(current?.accepted_findings).toHaveLength(1);
+    expect(fresh?.accepted_findings).toHaveLength(1);
+    expect(fresh?.accepted_findings[0]?.id).toBe(current?.accepted_findings[0]?.id);
+  });
+
+  it("stores attempt 1 diagnostics independently across fresh fences", () => {
+    const diagnostic = { finish_reason: "max_tokens", output_tokens: 700 };
+    expect(recordAttemptDiagnostic({
+      identity: identity({ attempt: 1, generation: 1 }),
+      diagnostic,
+    }).status).toBe("inserted");
+    expect(recordAttemptDiagnostic({
+      identity: identity({ attempt: 1, generation: 2 }),
+      diagnostic,
+    }).status).toBe("inserted");
+    expect(recordAttemptDiagnostic({
+      identity: identity({ attempt: 1, sessionId: "session-2" }),
+      diagnostic,
+    }).status).toBe("inserted");
+    expect(listReviewEvidenceRecords("run-1", "qwen")).toHaveLength(3);
+
+    const first = loadReviewEvidence("run-1", "qwen", fence());
+    expect(first.diagnostics).toHaveLength(1);
+    expect(first.diagnostics[0]?.attempt).toBe(1);
+    const second = loadReviewEvidence("run-1", "qwen", fence({ generation: 2 }));
+    expect(second.diagnostics).toHaveLength(1);
+    expect(second.diagnostics[0]?.attempt).toBe(1);
+    const third = loadReviewEvidence("run-1", "qwen", fence({ sessionId: "session-2" }));
+    expect(third.diagnostics).toHaveLength(1);
+    expect(third.diagnostics[0]?.attempt).toBe(1);
+  });
+
+  it("fails closed on invalid fence identity components", () => {
+    expect(() => recordReviewFinding({
+      identity: identity({ nodeId: "" }),
+      finding: finding(),
+    })).toThrow(/node_id/);
+    expect(() => recordReviewFinding({
+      identity: identity({ sessionId: "   " }),
+      finding: finding(),
+    })).toThrow(/session_id/);
+    expect(() => recordReviewFinding({
+      identity: identity({ roundId: "r".repeat(257) }),
+      finding: finding(),
+    })).toThrow(/round_id/);
+    expect(() => loadReviewEvidence("run-1", "qwen", fence({ generation: 0 }))).toThrow(/generation/);
+    expect(() => buildReviewEvidenceProjectionFor("run-1", "qwen", fence({ sessionId: "" }))).toThrow(/session_id/);
+    expect(() => loadReviewEvidence("run-2", "qwen", fence())).toThrow(/does not match/);
+    expect(() => loadReviewEvidence("run-1", "kimi", fence())).toThrow(/does not match/);
+  });
+
   it("stores compact coverage per round and rebuilds a projection", () => {
     const attestation = {
       schema: "changed-file-coverage-v1",
@@ -143,7 +243,7 @@ describe("durable DAG review evidence", () => {
     expect(recordReviewCoverage({ identity: identity(), attestation }).status).toBe("deduplicated");
     recordReviewFinding({ identity: identity(), finding: finding() });
 
-    const projection = buildReviewEvidenceProjectionFor("run-1", "qwen");
+    const projection = buildReviewEvidenceProjectionFor("run-1", "qwen", fence());
     expect(projection?.reviewer).toBe("qwen");
     expect(projection?.accepted_findings).toHaveLength(1);
     expect(projection?.coverage_attestation).toEqual(attestation);
@@ -202,6 +302,42 @@ describe("durable DAG review evidence", () => {
     const loaded = loadReviewEvidence("run-1", "qwen");
     expect(loaded.findings).toHaveLength(1);
     expect(loaded.diagnostics).toHaveLength(1);
+  });
+
+  it("excludes stale fences and keeps all attempts of the current dispatch after reopen", () => {
+    recordReviewFinding({ identity: identity({ attempt: 1 }), finding: finding() });
+    recordReviewFinding({ identity: identity({ attempt: 2 }), finding: finding({ title: "Second issue" }) });
+    recordAttemptDiagnostic({
+      identity: identity({ attempt: 1 }),
+      diagnostic: { finish_reason: "max_tokens" },
+    });
+    recordAttemptDiagnostic({
+      identity: identity({ attempt: 2 }),
+      diagnostic: { finish_reason: "end_turn" },
+    });
+    // Same finding id and attempt number in a stale generation must never be
+    // selected by the current projection after reopen.
+    recordReviewFinding({ identity: identity({ generation: 2 }), finding: finding() });
+    recordAttemptDiagnostic({
+      identity: identity({ generation: 2 }),
+      diagnostic: { finish_reason: "end_turn" },
+    });
+
+    closeDb();
+    getDb();
+
+    const current = loadReviewEvidence("run-1", "qwen", fence());
+    expect(current.findings.map((item) => item.title)).toEqual(["Unchecked response", "Second issue"]);
+    expect(current.diagnostics.map((item) => item.attempt)).toEqual([1, 2]);
+
+    const projection = buildReviewEvidenceProjectionFor("run-1", "qwen", fence());
+    expect(projection?.accepted_findings).toHaveLength(2);
+    expect(projection?.attempt_diagnostics).toHaveLength(2);
+
+    const stale = loadReviewEvidence("run-1", "qwen", fence({ generation: 2 }));
+    expect(stale.findings.map((item) => item.title)).toEqual(["Unchecked response"]);
+    expect(stale.diagnostics.map((item) => item.attempt)).toEqual([1]);
+    expect(listReviewEvidenceRecords("run-1", "qwen")).toHaveLength(6);
   });
 
   it("injects persisted accepted evidence into the correction input projection", () => {

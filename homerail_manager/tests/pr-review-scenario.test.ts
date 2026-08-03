@@ -19,7 +19,11 @@ import {
   compileWorkflowSource,
   parseWorkflowSource,
 } from "../src/orchestration/workflow-spec-v1.js";
-import { closeDb } from "../src/persistence/db.js";
+import { closeDb, getDb } from "../src/persistence/db.js";
+import {
+  advanceDagActorGeneration,
+  getDagActorByNode,
+} from "../src/persistence/dag-actors.js";
 import { getRunArtifactBlobPath } from "../src/persistence/run-artifacts.js";
 import { loadRunSnapshot } from "../src/persistence/store.js";
 import {
@@ -947,6 +951,269 @@ describe("PR Review scenario assets", () => {
       ]),
     });
   }, 60_000);
+
+  it.runIf(process.platform !== "win32")(
+    "isolates interleaved three-reviewer projection files and survives database reopen",
+    () => {
+      const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+      for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+      installPrepareCommandStub(parsed);
+      const dispatcher = new FakeDAGDispatcher();
+      const executor = new GraphExecutor(dispatcher);
+      const runId = "pr-review-three-isolated-projections";
+      executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+      executor.tick(runId);
+
+      const workspace = path.join(tmpHome, "workspace", runId);
+      const reviews: Array<[ModelId, string]> = [
+        ["qwen", "Qwen isolated projection finding"],
+        ["glm", "GLM isolated projection finding"],
+        ["kimi", "Kimi isolated projection finding"],
+      ];
+      const handoff = (reviewer: ModelId, title: string) => {
+        handoffActiveRun(runId, `${reviewer}_review`, "voted", modelReview(reviewer, "request_changes", {
+          findings: [{ ...finding, title }],
+        }));
+      };
+      const projectionFiles = (): string[] => {
+        const files: string[] = [];
+        const walk = (dir: string): void => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              walk(full);
+            } else if (entry.name.endsWith(".json")) {
+              try {
+                const parsed = JSON.parse(fs.readFileSync(full, "utf8")) as { schema?: string };
+                if (parsed.schema === "review-evidence-projection-v1") files.push(full);
+              } catch {
+                // Non-projection JSON in the workspace is irrelevant.
+              }
+            }
+          }
+        };
+        walk(workspace);
+        return files.sort();
+      };
+
+      handoff("qwen", reviews[0]![1]);
+      handoff("glm", reviews[1]![1]);
+      handoff("kimi", reviews[2]![1]);
+
+      const initial = projectionFiles();
+      expect(initial).toHaveLength(3);
+      const relativePaths = initial.map((file) => path.relative(workspace, file).split(path.sep).join("/"));
+      expect(relativePaths).not.toContain("review-evidence/projection.json");
+      for (const segments of initial.map((file) => path.relative(workspace, file).split(path.sep))) {
+        for (const segment of segments) {
+          expect(segment).toMatch(/^[A-Za-z0-9._-]+$/);
+        }
+      }
+
+      const byReviewer = new Map(initial.map((file) => {
+        const content = JSON.parse(fs.readFileSync(file, "utf8")) as {
+          reviewer: string;
+          accepted_findings: Array<{ title: string }>;
+        };
+        return [content.reviewer, { file, content }] as const;
+      }));
+      expect(Array.from(byReviewer.keys()).sort()).toEqual(["glm_review", "kimi_review", "qwen_review"]);
+      for (const [reviewer, title] of reviews) {
+        const entry = byReviewer.get(`${reviewer}_review`);
+        expect(entry?.content.accepted_findings.map((item) => item.title)).toEqual([title]);
+        const serialized = JSON.stringify(entry?.content);
+        for (const [otherReviewer, otherTitle] of reviews) {
+          if (otherReviewer !== reviewer) {
+            expect(serialized).not.toContain(otherTitle);
+          }
+        }
+        expect(fs.statSync(entry!.file).mode & 0o777).toBe(0o600);
+      }
+      expect(new Set(initial.map((file) => fs.readFileSync(file, "utf8"))).size).toBe(3);
+
+      const bytesBefore = new Map(initial.map((file) => [file, fs.readFileSync(file)]));
+      expect(requestNodeCorrection(
+        runId,
+        "qwen_review",
+        "DAG_HANDOFF_CONTRACT_VIOLATION qwen_review.voted",
+        { finish_reason: "max_tokens", output_tokens: 900 },
+      ).status).toBe("scheduled");
+      const afterUpdate = projectionFiles();
+      expect(afterUpdate).toHaveLength(3);
+      for (const file of afterUpdate) {
+        const content = JSON.parse(fs.readFileSync(file, "utf8")) as {
+          reviewer: string;
+          attempt_diagnostics: unknown[];
+        };
+        if (content.reviewer === "qwen_review") {
+          expect(content.attempt_diagnostics).toHaveLength(1);
+        } else {
+          expect(fs.readFileSync(file)).toEqual(bytesBefore.get(file));
+        }
+      }
+
+      closeDb();
+      getDb();
+      expect(projectionFiles().map((file) => fs.readFileSync(file, "utf8")))
+        .toEqual(afterUpdate.map((file) => fs.readFileSync(file, "utf8")));
+    },
+    60_000,
+  );
+
+  it("injects only the current session/generation projection into correction mailboxes", () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-fresh-fence-correction";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    const nodeId = "qwen_review";
+    const sameIdFinding = (evidence: string, recommendation: string) => ({
+      ...finding,
+      title: "Finding id reused across dispatch fences",
+      evidence,
+      recommendation,
+    });
+    const staleFinding = sameIdFinding("stale dispatch evidence", "stale dispatch fix");
+    const freshFinding = sameIdFinding("fresh dispatch evidence", "fresh dispatch fix");
+    const incomplete = (reviewer: ModelId, findings: Array<Record<string, unknown>>) => ({
+      reviewer,
+      status: "complete",
+      vote: "request_changes",
+      summary: "Incomplete handoff",
+      findings,
+    });
+
+    expect(() => handoffActiveRun(runId, nodeId, "voted", incomplete("qwen", [staleFinding])))
+      .toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
+    expect(requestNodeCorrection(
+      runId,
+      nodeId,
+      "DAG_HANDOFF_CONTRACT_VIOLATION qwen_review.voted",
+      { finish_reason: "max_tokens", output_tokens: 900 },
+    ).status).toBe("scheduled");
+
+    const run = getActiveRun(runId)!;
+    const sessionBefore = run.nodeSessions.get(nodeId)!;
+    const actor = getDagActorByNode(runId, nodeId)!;
+    const freshSessionId = `${sessionBefore.sessionId}-fresh`;
+    run.nodeSessions.set(nodeId, {
+      ...sessionBefore,
+      sessionId: freshSessionId,
+      attempt: sessionBefore.attempt + 1,
+      status: "active",
+    });
+    advanceDagActorGeneration({
+      run_id: runId,
+      actor_id: actor.actor_id,
+      expected_generation: actor.generation,
+      expected_version: actor.version,
+      session_id: freshSessionId,
+      attempt: sessionBefore.attempt + 1,
+    });
+    run.counters.corrections[nodeId] = 0;
+    run.dagRun.nodeStates.set(nodeId, "READY");
+    run.dagRun.handoffedNodes.delete(nodeId);
+    expect(() => handoffActiveRun(runId, nodeId, "voted", incomplete("qwen", [freshFinding])))
+      .toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
+    expect(requestNodeCorrection(
+      runId,
+      nodeId,
+      "DAG_HANDOFF_CONTRACT_VIOLATION qwen_review.voted",
+      { finish_reason: "end_turn", output_tokens: 700 },
+    ).status).toBe("scheduled");
+
+    const injected = getActiveRun(runId)?.dagRun.mailboxes
+      .get("normalize_qwen_review")?.get("evidence")?.[0] as Record<string, unknown>;
+    expect(injected).toMatchObject({
+      schema: "review-evidence-projection-v1",
+      reviewer: "qwen_review",
+    });
+    expect((injected.accepted_findings as Array<Record<string, unknown>>).map((item) => item.evidence))
+      .toEqual(["fresh dispatch evidence"]);
+    expect(injected.attempt_diagnostics).toEqual([
+      expect.objectContaining({
+        attempt: 1,
+        failure_category: "contract_validation_failed",
+        finish_reason: "end_turn",
+        output_tokens: 700,
+      }),
+    ]);
+  });
+
+  it("rejects a stale transport handoff without altering the current projection or mailbox", () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-stale-handoff-isolation";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    const accepted = { ...finding, title: "Current accepted projection finding" };
+    expect(() => handoffActiveRun(runId, "qwen_review", "voted", {
+      reviewer: "qwen",
+      status: "complete",
+      vote: "request_changes",
+      summary: "Incomplete handoff",
+      findings: [accepted],
+    })).toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
+    expect(requestNodeCorrection(
+      runId,
+      "qwen_review",
+      "DAG_HANDOFF_CONTRACT_VIOLATION qwen_review.voted",
+      { finish_reason: "end_turn", output_tokens: 600 },
+    ).status).toBe("scheduled");
+
+    const workspace = path.join(tmpHome, "workspace", runId);
+    const projectionFiles = (): string[] => {
+      const files: string[] = [];
+      const walk = (dir: string): void => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            walk(full);
+          } else if (entry.name.endsWith(".json")) {
+            try {
+              const parsed = JSON.parse(fs.readFileSync(full, "utf8")) as { schema?: string };
+              if (parsed.schema === "review-evidence-projection-v1") files.push(full);
+            } catch {
+              // Non-projection JSON in the workspace is irrelevant.
+            }
+          }
+        }
+      };
+      walk(workspace);
+      return files.sort();
+    };
+    const currentProjection = projectionFiles();
+    expect(currentProjection).toHaveLength(1);
+    const mailboxBefore = getActiveRun(runId)?.dagRun.mailboxes
+      .get("normalize_qwen_review")?.get("evidence");
+    const bytesBefore = fs.readFileSync(currentProjection[0]!);
+
+    expect(() => handoffActiveRun(
+      runId,
+      "qwen_review",
+      "voted",
+      { reviewer: "qwen", status: "complete", vote: "approve", summary: "stale transport", coverage, findings: [] },
+      {
+        transport: true,
+        roundId: "round-0000",
+        actorId: "qwen_review",
+        generation: 1,
+        leaseGeneration: 1,
+      },
+    )).toThrow(/DAG_HANDOFF_ROUND_CONFLICT/);
+
+    expect(getActiveRun(runId)?.dagRun.mailboxes
+      .get("normalize_qwen_review")?.get("evidence")).toEqual(mailboxBefore);
+    expect(fs.readFileSync(currentProjection[0]!)).toEqual(bytesBefore);
+  });
 
   it("publishes repeated ~50-file success runs deterministically", () => {
     const files = Array.from({ length: 50 }, (_, index) => `src/file-${String(index + 1).padStart(2, "0")}.ts`);

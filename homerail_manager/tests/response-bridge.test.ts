@@ -393,7 +393,7 @@ describe("response bridge transport fence", () => {
     }));
   });
 
-  it("never persists diagnostics for stale or invalid payloads", () => {
+  it("never persists diagnostics or touches handoff state for stale evidence payloads", () => {
     mocks.isReviewEvidenceNode.mockReturnValue(true);
     mocks.getActiveRun.mockReturnValue({
       status: "active",
@@ -407,13 +407,33 @@ describe("response bridge transport fence", () => {
       runId: "run-2",
       nodeId: "actor-node",
       port: "done",
-      content: "late",
+      content: {
+        reviewer: "qwen",
+        status: "complete",
+        evidence: {
+          schema: "review-evidence-v1",
+          reviewer: "qwen",
+          findings: [{
+            category: "security",
+            severity: "high",
+            title: "Stale finding",
+            file: "src/app.ts",
+            line: 12,
+            evidence: "must never overwrite the current projection",
+            recommendation: "ignore stale transport payloads",
+            confidence: "high",
+          }],
+        },
+      },
       round_id: "round-0001",
       actor_id: "actor-1",
       generation: 3,
       lease_generation: 7,
       command_id: "command-2",
-      attempt_diagnostics: { finish_reason: "max_tokens" },
+      attempt_diagnostics: {
+        finish_reason: "max_tokens",
+        output_tokens: 900,
+      },
     }, source)).toMatchObject({ status: "handoff_ignored", disposition: "stale" });
     expect(mocks.recordAttemptDiagnostic).not.toHaveBeenCalled();
     expect(mocks.handoffActiveRun).not.toHaveBeenCalled();

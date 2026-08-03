@@ -86,7 +86,10 @@ spec:
       #   JSON.stringify(changed_files) in git order; count equals length.
       # - The Manager persists ReviewEvidenceState fenced by run/reviewer/
       #   session/generation/attempt and injects it into the normalize node's
-      #   `evidence` input before the final vote is normalized.
+      #   `evidence` input before the final vote is normalized. Each reviewer's
+      #   projection is mirrored to a deterministic, traversal-safe,
+      #   reviewer/fence-scoped path under review-evidence/ using atomic file
+      #   replacement; reviewers never share or overwrite projection.json.
       # - Attempt categories are the shared failure categories; absent provider
       #   metadata stays null/omitted and is never guessed.
       type: object

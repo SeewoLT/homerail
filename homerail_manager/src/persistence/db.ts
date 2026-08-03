@@ -2011,8 +2011,24 @@ function validateDagReviewEvidenceSchemaV35(db: SqliteDatabase): void {
     name: string;
     unique: number;
   }>).map((index) => [index.name, index]));
+  // Migration 36 supersedes the legacy run/reviewer/kind/dedup unique index
+  // with the complete logical-dispatch fence. Accept either state here so a
+  // database that already ran migration 36 remains valid on reopen.
+  const legacyFenceIndex = indexes.get("idx_dag_review_evidence_fence_dedup");
+  const logicalFenceIndex = indexes.get("idx_dag_review_evidence_logical_fence_dedup");
+  if (legacyFenceIndex) {
+    if (legacyFenceIndex.unique !== 1) {
+      throw new Error("Schema migration 35 is incomplete: index idx_dag_review_evidence_fence_dedup uniqueness mismatch");
+    }
+    const columns = (db.prepare(`PRAGMA index_info(idx_dag_review_evidence_fence_dedup)`).all() as Array<{ name: string }>)
+      .map((row) => row.name);
+    if (columns.join(",") !== "run_id,reviewer,kind,dedup_key") {
+      throw new Error("Schema migration 35 is incomplete: index idx_dag_review_evidence_fence_dedup columns mismatch");
+    }
+  } else if (!logicalFenceIndex) {
+    throw new Error("Schema migration 35 is incomplete: missing dedup fence index");
+  }
   for (const [name, unique, expectedColumns] of [
-    ["idx_dag_review_evidence_fence_dedup", 1, ["run_id", "reviewer", "kind", "dedup_key"]],
     ["idx_dag_review_evidence_run_reviewer", 0, ["run_id", "reviewer", "generation", "attempt", "seq"]],
     ["idx_dag_review_evidence_run_node", 0, ["run_id", "node_id", "attempt", "seq"]],
   ] as const) {
@@ -2028,6 +2044,60 @@ function validateDagReviewEvidenceSchemaV35(db: SqliteDatabase): void {
     if (columns.join(",") !== expectedColumns.join(",")) {
       throw new Error(`Schema migration 35 is incomplete: index ${name} columns mismatch`);
     }
+  }
+}
+
+function validateDagReviewEvidenceSchemaV36(db: SqliteDatabase): void {
+  if (!hasTable(db, "dag_review_evidence")) {
+    throw new Error("Schema migration 36 is incomplete: missing table dag_review_evidence");
+  }
+  for (const column of [
+    "seq",
+    "schema_version",
+    "run_id",
+    "reviewer",
+    "node_id",
+    "session_id",
+    "round_id",
+    "generation",
+    "attempt",
+    "kind",
+    "dedup_key",
+    "payload_json",
+    "created_at",
+  ]) {
+    if (!hasColumn(db, "dag_review_evidence", column)) {
+      throw new Error(`Schema migration 36 is incomplete: dag_review_evidence is missing column ${column}`);
+    }
+  }
+  const indexes = new Map((db.prepare(`PRAGMA index_list(dag_review_evidence)`).all() as Array<{
+    name: string;
+    unique: number;
+  }>).map((index) => [index.name, index]));
+  if (indexes.has("idx_dag_review_evidence_fence_dedup")) {
+    throw new Error("Schema migration 36 is incomplete: legacy dedup index idx_dag_review_evidence_fence_dedup was not superseded");
+  }
+  for (const [name, unique, expectedColumns] of [
+    ["idx_dag_review_evidence_logical_fence_dedup", 1, ["run_id", "reviewer", "node_id", "session_id", "round_id", "generation", "kind", "dedup_key"]],
+    ["idx_dag_review_evidence_run_reviewer", 0, ["run_id", "reviewer", "generation", "attempt", "seq"]],
+    ["idx_dag_review_evidence_run_node", 0, ["run_id", "node_id", "attempt", "seq"]],
+  ] as const) {
+    const index = indexes.get(name);
+    if (!index) {
+      throw new Error(`Schema migration 36 is incomplete: missing index ${name}`);
+    }
+    if (index.unique !== unique) {
+      throw new Error(`Schema migration 36 is incomplete: index ${name} uniqueness mismatch`);
+    }
+    const columns = (db.prepare(`PRAGMA index_info(${name})`).all() as Array<{ name: string }>)
+      .map((row) => row.name);
+    if (columns.join(",") !== expectedColumns.join(",")) {
+      throw new Error(`Schema migration 36 is incomplete: index ${name} columns mismatch`);
+    }
+  }
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?")
+    .get("trg_dag_review_evidence_no_update")) {
+    throw new Error("Schema migration 36 is incomplete: append-only trigger is missing");
   }
 }
 
@@ -4299,6 +4369,17 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
     validate: validateDagReviewEvidenceSchemaV35,
+  },
+  {
+    version: 36,
+    up: (db) => db.exec(`
+      DROP INDEX IF EXISTS idx_dag_review_evidence_fence_dedup;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_dag_review_evidence_logical_fence_dedup
+        ON dag_review_evidence(
+          run_id, reviewer, node_id, session_id, round_id, generation, kind, dedup_key
+        );
+    `),
+    validate: validateDagReviewEvidenceSchemaV36,
   },
 ];
 

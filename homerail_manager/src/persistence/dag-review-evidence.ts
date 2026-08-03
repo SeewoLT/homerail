@@ -3,14 +3,17 @@
  *
  * Accepted findings, compact coverage attestations, and provider-neutral
  * attempt diagnostics are stored append-only in the Manager DB, fenced to the
- * exact run/reviewer/session/generation/attempt. Re-delivery is idempotent:
- * findings deduplicate by deterministic finding id, diagnostics deduplicate
- * per attempt, and coverage deduplicates per round. A bounded redacted
- * projection is mirrored into the run workspace for deterministic command
- * normalizers.
+ * exact run/reviewer/node/session/round/generation while attempts accumulate
+ * inside that fence. Re-delivery within one fence is idempotent: findings
+ * deduplicate by deterministic finding id, diagnostics deduplicate per
+ * attempt, and coverage deduplicates per round. Loaders and projections can
+ * select one exact fence so evidence from a stale session/generation is never
+ * aggregated into the current dispatch. A bounded redacted projection is
+ * mirrored into the run workspace for deterministic command normalizers.
  * @version 0.1.0
  */
 
+import { randomBytes, createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getHomerailHome } from "../config/env.js";
@@ -33,15 +36,31 @@ import {
 
 export type ReviewEvidenceKind = "finding" | "diagnostic" | "coverage";
 
-export interface ReviewEvidenceIdentity {
+/**
+ * One authoritative logical-dispatch fence. All writes, deduplication, reads,
+ * and projections are scoped to this exact run/reviewer/node/session/round/
+ * generation; attempts accumulate only within the fence.
+ */
+export interface ReviewEvidenceFence {
   runId: string;
   reviewer: string;
   nodeId: string;
   sessionId: string;
   roundId: string;
   generation: number;
+}
+
+export interface ReviewEvidenceIdentity extends ReviewEvidenceFence {
   attempt: number;
 }
+
+/**
+ * Either a complete logical-dispatch fence or a full evidence identity. The
+ * identity's `attempt` is intentionally ignored by fence-selection APIs; only
+ * the authoritative run/reviewer/node/session/round/generation components
+ * scope the read or projection.
+ */
+export type ReviewEvidenceFenceInput = ReviewEvidenceFence | ReviewEvidenceIdentity;
 
 export interface ReviewEvidenceRecord {
   schemaVersion: 1;
@@ -86,14 +105,21 @@ function boundedInteger(value: unknown, label: string): number {
   return Number(value);
 }
 
-function validateIdentity(identity: ReviewEvidenceIdentity): ReviewEvidenceIdentity {
+function validateFence(fence: ReviewEvidenceFence): ReviewEvidenceFence {
   return {
-    runId: boundedIdentity(identity.runId, "evidence run_id"),
-    reviewer: boundedIdentity(identity.reviewer, "evidence reviewer"),
-    nodeId: boundedIdentity(identity.nodeId, "evidence node_id"),
-    sessionId: boundedIdentity(identity.sessionId, "evidence session_id"),
-    roundId: boundedIdentity(identity.roundId, "evidence round_id"),
-    generation: boundedInteger(identity.generation, "evidence generation"),
+    runId: boundedIdentity(fence.runId, "evidence run_id"),
+    reviewer: boundedIdentity(fence.reviewer, "evidence reviewer"),
+    nodeId: boundedIdentity(fence.nodeId, "evidence node_id"),
+    sessionId: boundedIdentity(fence.sessionId, "evidence session_id"),
+    roundId: boundedIdentity(fence.roundId, "evidence round_id"),
+    generation: boundedInteger(fence.generation, "evidence generation"),
+  };
+}
+
+function validateIdentity(identity: ReviewEvidenceIdentity): ReviewEvidenceIdentity {
+  const fence = validateFence(identity);
+  return {
+    ...fence,
     attempt: boundedInteger(identity.attempt, "evidence attempt"),
   };
 }
@@ -281,32 +307,123 @@ export function recordReviewHandoffEvidence(
   }
 }
 
+function assertFenceMatchesSelection(
+  runId: string,
+  reviewer: string | undefined,
+  fence: ReviewEvidenceFence,
+): ReviewEvidenceFence {
+  const validated = validateFence(fence);
+  if (validated.runId !== runId || (reviewer !== undefined && validated.reviewer !== reviewer)) {
+    throw new Error("evidence fence does not match the requested run/reviewer");
+  }
+  return validated;
+}
+
+function resolveReviewEvidenceSelection(
+  runIdOrContext: string | ReviewEvidenceFenceInput,
+  reviewer?: string,
+  fence?: ReviewEvidenceFence,
+): { runId: string; reviewer: string; fence: ReviewEvidenceFence | undefined } {
+  if (typeof runIdOrContext === "string") {
+    if (reviewer === undefined) {
+      throw new Error("evidence reviewer is required when selecting evidence by run id");
+    }
+    const runId = boundedIdentity(runIdOrContext, "evidence run_id");
+    const actualReviewer = boundedIdentity(reviewer, "evidence reviewer");
+    return {
+      runId,
+      reviewer: actualReviewer,
+      fence: fence === undefined ? undefined : assertFenceMatchesSelection(runId, actualReviewer, fence),
+    };
+  }
+  const validated = validateFence(runIdOrContext);
+  return { runId: validated.runId, reviewer: validated.reviewer, fence: validated };
+}
+
+/**
+ * Deterministic, traversal-safe, bounded path component. Safe characters are
+ * preserved; anything else (or an over-long component) is replaced by a
+ * stable SHA-256 digest so a raw identity value can never become a path.
+ */
+function pathSafeIdentityComponent(value: string): string {
+  const raw = value.trim();
+  const digest = createHash("sha256").update(raw).digest("hex").slice(0, 24);
+  const safe = /^[A-Za-z0-9._-]+$/.test(raw) ? raw : `component-${digest}`;
+  const maxLength = 80;
+  return safe.length <= maxLength ? safe : `${safe.slice(0, 48)}-${digest}`;
+}
+
+/**
+ * Relative workspace path for one reviewer's projection. Fence-scoped paths
+ * include every validated identity component so stale sessions/rounds/
+ * generations can never overwrite the current dispatch; the legacy
+ * run/reviewer form stays reviewer-scoped for callers without a fence.
+ */
+function reviewEvidenceProjectionRelativePath(
+  reviewer: string,
+  fence: ReviewEvidenceFence | undefined,
+): string {
+  const safeReviewer = pathSafeIdentityComponent(reviewer);
+  if (fence === undefined) {
+    return path.join("review-evidence", safeReviewer, "projection.json");
+  }
+  return path.join(
+    "review-evidence",
+    safeReviewer,
+    pathSafeIdentityComponent(fence.nodeId),
+    pathSafeIdentityComponent(fence.sessionId),
+    pathSafeIdentityComponent(fence.roundId),
+    `generation-${fence.generation}.json`,
+  );
+}
+
+const REVIEW_EVIDENCE_COLUMNS = `
+  seq, schema_version, run_id, reviewer, node_id, session_id,
+  round_id, generation, attempt, kind, dedup_key, payload_json, created_at
+`;
+
 export function listReviewEvidenceRecords(
   runId: string,
   reviewer?: string,
+  fence?: ReviewEvidenceFence,
 ): ReviewEvidenceRecord[] {
   const db = getDb();
-  const rows = reviewer === undefined
-    ? db.prepare(`
-        SELECT seq, schema_version, run_id, reviewer, node_id, session_id,
-          round_id, generation, attempt, kind, dedup_key, payload_json, created_at
-        FROM dag_review_evidence
-        WHERE run_id = ?
-        ORDER BY seq
-      `).all(runId)
-    : db.prepare(`
-        SELECT seq, schema_version, run_id, reviewer, node_id, session_id,
-          round_id, generation, attempt, kind, dedup_key, payload_json, created_at
-        FROM dag_review_evidence
-        WHERE run_id = ? AND reviewer = ?
-        ORDER BY seq
-      `).all(runId, reviewer);
+  const conditions: string[] = ["run_id = ?"];
+  const params: unknown[] = [runId];
+  if (reviewer !== undefined) {
+    conditions.push("reviewer = ?");
+    params.push(reviewer);
+  }
+  if (fence !== undefined) {
+    const validated = assertFenceMatchesSelection(runId, reviewer, fence);
+    if (reviewer === undefined) {
+      conditions.push("reviewer = ?");
+      params.push(validated.reviewer);
+    }
+    conditions.push("node_id = ?", "session_id = ?", "round_id = ?", "generation = ?");
+    params.push(validated.nodeId, validated.sessionId, validated.roundId, validated.generation);
+  }
+  const rows = db.prepare(`
+    SELECT ${REVIEW_EVIDENCE_COLUMNS}
+    FROM dag_review_evidence
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY seq
+  `).all(...params);
   return rows.map((row) => rowToRecord(row as Parameters<typeof rowToRecord>[0]));
 }
 
-/** Load accepted findings, attempt diagnostics, and coverage for one reviewer. */
-export function loadReviewEvidence(runId: string, reviewer: string): LoadedReviewEvidence {
-  const records = listReviewEvidenceRecords(runId, reviewer);
+/**
+ * Load accepted findings, attempt diagnostics, and coverage for one reviewer.
+ * Pass an exact logical-dispatch fence to exclude evidence from stale
+ * sessions/rounds/generations while still accumulating every attempt inside
+ * that fence.
+ */
+export function loadReviewEvidence(
+  runId: string,
+  reviewer: string,
+  fence?: ReviewEvidenceFence,
+): LoadedReviewEvidence {
+  const records = listReviewEvidenceRecords(runId, reviewer, fence);
   const findings: ReviewFindingV1[] = [];
   const diagnostics: AttemptDiagnosticV1[] = [];
   let coverageAttestation: ChangedFileCoverageAttestationV1 | null = null;
@@ -326,14 +443,28 @@ export function loadReviewEvidence(runId: string, reviewer: string): LoadedRevie
   };
 }
 
-/** Build the bounded correction/normalization projection for one reviewer. */
+/**
+ * Build the bounded correction/normalization projection for one reviewer.
+ * Pass the authoritative logical-dispatch fence so the projection never
+ * aggregates evidence from stale sessions/rounds/generations.
+ */
+export function buildReviewEvidenceProjectionFor(
+  context: ReviewEvidenceFenceInput,
+): ReviewEvidenceProjectionV1 | undefined;
 export function buildReviewEvidenceProjectionFor(
   runId: string,
   reviewer: string,
+  fence?: ReviewEvidenceFence,
+): ReviewEvidenceProjectionV1 | undefined;
+export function buildReviewEvidenceProjectionFor(
+  runIdOrContext: string | ReviewEvidenceFenceInput,
+  reviewer?: string,
+  fence?: ReviewEvidenceFence,
 ): ReviewEvidenceProjectionV1 | undefined {
-  const loaded = loadReviewEvidence(runId, reviewer);
+  const selection = resolveReviewEvidenceSelection(runIdOrContext, reviewer, fence);
+  const loaded = loadReviewEvidence(selection.runId, selection.reviewer, selection.fence);
   return buildReviewEvidenceProjection({
-    reviewer,
+    reviewer: selection.reviewer,
     findings: loaded.findings,
     diagnostics: loaded.diagnostics,
     coverage_attestation: loaded.coverageAttestation ?? null,
@@ -356,21 +487,49 @@ function safeRunWorkspace(runId: string): string | undefined {
  * deterministic command normalizers can consume Manager-owned evidence
  * without trusting a later truncated handoff.
  */
-export function writeReviewEvidenceProjectionFile(runId: string, reviewer: string): boolean {
+export function writeReviewEvidenceProjectionFile(context: ReviewEvidenceFenceInput): boolean;
+export function writeReviewEvidenceProjectionFile(
+  runId: string,
+  reviewer: string,
+  fence?: ReviewEvidenceFence,
+): boolean;
+export function writeReviewEvidenceProjectionFile(
+  runIdOrContext: string | ReviewEvidenceFenceInput,
+  reviewer?: string,
+  fence?: ReviewEvidenceFence,
+): boolean {
   try {
-    const projection = buildReviewEvidenceProjectionFor(runId, reviewer);
+    const selection = resolveReviewEvidenceSelection(runIdOrContext, reviewer, fence);
+    const projection = buildReviewEvidenceProjectionFor(selection.runId, selection.reviewer, selection.fence);
     if (!projection) return false;
-    const runWorkspace = safeRunWorkspace(runId);
+    const runWorkspace = safeRunWorkspace(selection.runId);
     if (!runWorkspace) return false;
-    const evidenceDir = path.join(runWorkspace, "review-evidence");
+    const target = path.join(
+      runWorkspace,
+      reviewEvidenceProjectionRelativePath(selection.reviewer, selection.fence),
+    );
+    const evidenceDir = path.dirname(target);
     fs.mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
-    const target = path.join(evidenceDir, "projection.json");
-    fs.writeFileSync(target, JSON.stringify(projection), { encoding: "utf8", mode: 0o600 });
+    const temporary = path.join(
+      evidenceDir,
+      `.${path.basename(target)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`,
+    );
     try {
-      fs.chmodSync(evidenceDir, 0o700);
-      fs.chmodSync(target, 0o600);
-    } catch {
-      // Best-effort permissions on platforms without POSIX modes.
+      // Atomic replacement: readers never observe a partially written JSON.
+      fs.writeFileSync(temporary, JSON.stringify(projection), { encoding: "utf8", mode: 0o600 });
+      fs.renameSync(temporary, target);
+      try {
+        fs.chmodSync(evidenceDir, 0o700);
+        fs.chmodSync(target, 0o600);
+      } catch {
+        // Best-effort permissions on platforms without POSIX modes.
+      }
+    } finally {
+      try {
+        if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+      } catch {
+        // Best-effort cleanup of an aborted temporary file.
+      }
     }
     return true;
   } catch {
@@ -379,10 +538,21 @@ export function writeReviewEvidenceProjectionFile(runId: string, reviewer: strin
 }
 
 /** Build the workspace projection path for a run/reviewer (read-only helper). */
-export function reviewEvidenceProjectionPath(runId: string, reviewer: string): string | undefined {
-  const runWorkspace = safeRunWorkspace(runId);
+export function reviewEvidenceProjectionPath(context: ReviewEvidenceFenceInput): string | undefined;
+export function reviewEvidenceProjectionPath(
+  runId: string,
+  reviewer: string,
+  fence?: ReviewEvidenceFence,
+): string | undefined;
+export function reviewEvidenceProjectionPath(
+  runIdOrContext: string | ReviewEvidenceFenceInput,
+  reviewer?: string,
+  fence?: ReviewEvidenceFence,
+): string | undefined {
+  const selection = resolveReviewEvidenceSelection(runIdOrContext, reviewer, fence);
+  const runWorkspace = safeRunWorkspace(selection.runId);
   if (!runWorkspace) return undefined;
-  return path.join(runWorkspace, "review-evidence", "projection.json");
+  return path.join(runWorkspace, reviewEvidenceProjectionRelativePath(selection.reviewer, selection.fence));
 }
 
 export { REVIEW_EVIDENCE_PROJECTION_SCHEMA_ID, extractReviewEvidence };

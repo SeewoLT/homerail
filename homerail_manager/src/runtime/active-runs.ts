@@ -2177,10 +2177,13 @@ export function requestNodeCorrection(
     ));
     mailbox.set("correction", values);
     if (evidenceContext) {
-      const projection = buildReviewEvidenceProjectionFor(run.runId, evidenceContext.reviewer);
+      // Select only the authoritative node/session/round/generation fence.
+      // Aggregating run/reviewer rows would leak stale dispatch evidence into
+      // the correction mailbox and downstream ReviewEvidenceState consumers.
+      const projection = buildReviewEvidenceProjectionFor(evidenceContext);
       if (projection) {
         mailbox.set("review_evidence", [projection]);
-        writeReviewEvidenceProjectionFile(run.runId, evidenceContext.reviewer);
+        writeReviewEvidenceProjectionFile(evidenceContext);
         // Deliver the same bounded projection to downstream command nodes
         // whose ReviewEvidenceState inputs normalize persisted accepted
         // evidence. Only workflows declaring the runtime_evidence capability
@@ -2420,7 +2423,7 @@ export function handoffActiveRun(
       const evidenceContext = _reviewEvidenceContext(run, fromNode);
       if (evidenceContext) {
         recordReviewHandoffEvidence(evidenceContext, { submission });
-        writeReviewEvidenceProjectionFile(run.runId, evidenceContext.reviewer);
+        writeReviewEvidenceProjectionFile(evidenceContext);
       }
     } catch {
       // Evidence persistence is best-effort and never blocks handoff processing.
@@ -2506,7 +2509,7 @@ export function handoffActiveRun(
         const evidenceContext = _reviewEvidenceContext(run, fromNode);
         if (evidenceContext) {
           recordReviewHandoffEvidence(evidenceContext, evidence);
-          writeReviewEvidenceProjectionFile(run.runId, evidenceContext.reviewer);
+          writeReviewEvidenceProjectionFile(evidenceContext);
         }
       }
       writeRunMetadata(runId, serializeRunMetadata(run));
