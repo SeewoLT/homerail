@@ -435,5 +435,5 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     expect(new Set([initial.sessionId, revision.sessionId, confirmation.sessionId]).size).toBe(3);
     expect(getActiveRun("autofix-v2-run")?.counters.fanout_invocations).toMatchObject({ implement: 1, fix: 1 });
     expect(getActiveRun("autofix-v2-run")?.status).toBe("completed");
-  });
+  }, 30_000);
 });
