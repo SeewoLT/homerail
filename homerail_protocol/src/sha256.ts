@@ -28,9 +28,11 @@ export function canonicalChangedFiles(files: readonly unknown[]): string[] {
 /**
  * Deterministic digest/count pair for a trusted changed-file inventory.
  *
- * The digest is computed over the canonical sorted unique path set, so model
- * attestations never need to echo the full list and ordering changes cannot
- * forge coverage.
+ * Canonical algorithm: trim each path, drop blanks and duplicates, sort the
+ * remaining paths ascending, join them with "\n", and SHA-256 the result.
+ * The PR-review prepare node and strict attestation validation must both use
+ * this exact algorithm, so equivalent changed-file sets produce the same
+ * digest/count regardless of input order or duplicates.
  */
 export function changedFileCoverageDigest(files: readonly unknown[]): {
   digest: string;

@@ -82,8 +82,13 @@ spec:
 
     ReviewCoverage:
       # runtime_evidence protocol (shared with homerail_protocol/src/pr-review.ts):
-      # - The trusted coverage digest is lowercase hex SHA-256 of
-      #   JSON.stringify(changed_files) in git order; count equals length.
+      # - The trusted coverage digest is lowercase hex SHA-256 of the
+      #   canonical changed-file set: each path is trimmed, blanks and
+      #   duplicates are dropped, remaining paths are sorted ascending, and
+      #   joined with "\n"; count is the unique path count. Equivalent path
+      #   sets therefore produce the same digest/count regardless of input
+      #   order or duplicates, while changed_files keeps its Git-provided
+      #   order for display and diff processing.
       # - The Manager persists ReviewEvidenceState fenced by run/reviewer/
       #   session/generation/attempt and injects it into the normalize node's
       #   `evidence` input before the final vote is normalized. Each reviewer's
@@ -704,6 +709,22 @@ spec:
             let stdin = '';
             const fail = (message) => { throw new Error(message); };
             const exactRevision = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+            const canonicalCoverage = (files) => {
+              const unique = [];
+              const seen = new Set();
+              for (const file of files) {
+                if (typeof file !== 'string') continue;
+                const normalized = file.trim();
+                if (!normalized || seen.has(normalized)) continue;
+                seen.add(normalized);
+                unique.push(normalized);
+              }
+              unique.sort();
+              return {
+                digest: createHash('sha256').update(unique.join('\n')).digest('hex'),
+                count: unique.length,
+              };
+            };
             const secureUrl = (value) => {
               if (typeof value !== 'string') fail('repository URL is missing');
               let parsed;
@@ -785,10 +806,7 @@ spec:
               if (Buffer.byteLength(JSON.stringify(changed), 'utf8') > 150000) {
                 fail('changed file list exceeds the review input limit');
               }
-              const coverage = {
-                digest: createHash('sha256').update(JSON.stringify(changed)).digest('hex'),
-                count: changed.length,
-              };
+              const coverage = canonicalCoverage(changed);
               const diffStat = run([
                 '-C', 'repository', 'diff', '--shortstat', '--no-ext-diff', base + '...' + head,
               ]).trim();

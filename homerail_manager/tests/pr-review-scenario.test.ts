@@ -1,12 +1,18 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
+
+import {
+  changedFileCoverageAttestation,
+  changedFileCoverageDigest,
+  validateChangedFileCoverageAttestation,
+} from "homerail-protocol";
 
 import {
   FakeDAGDispatcher,
@@ -57,12 +63,17 @@ const finding = {
 
 const changedFiles = ["src/run.ts"];
 const coverage: Coverage = {
-  digest: createHash("sha256").update(JSON.stringify(changedFiles)).digest("hex"),
-  count: changedFiles.length,
+  digest: changedFileCoverageDigest(changedFiles).digest,
+  count: changedFileCoverageDigest(changedFiles).count,
 };
 
-function digestFor(files: string[]): string {
-  return createHash("sha256").update(JSON.stringify(files)).digest("hex");
+function coverageFor(files: readonly string[]): Coverage {
+  const { digest, count } = changedFileCoverageDigest(files);
+  return { digest, count };
+}
+
+function cryptoDigest(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
 }
 
 function modelReview(
@@ -174,7 +185,7 @@ function trustedContext(files: string[] = changedFiles): Record<string, unknown>
     head: "b".repeat(40),
     repository_path: "/workspace/repository",
     changed_files: files,
-    coverage: { digest: digestFor(files), count: files.length },
+    coverage: coverageFor(files),
     diff_stat: `${files.length} files changed`,
     diff_patch: "diff --git a/src/run.ts b/src/run.ts",
     diff_chunks: [{
@@ -195,16 +206,16 @@ function installPrepareCommandStub(
   const prepare = parsed.graph.nodes.find((node) => node.node_id === "prepare");
   if (!prepare?.gateway_config) throw new Error("prepare command node is missing");
   const files = options.files ?? changedFiles;
-  const digest = digestFor(files);
+  const preparedCoverage = coverageFor(files);
   prepare.gateway_config.command = [
     "node",
     "-e",
     "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const i=JSON.parse(s),r=Array.isArray(i.request)?i.request.at(-1):undefined,p=r?.payload;if(!p)throw new Error('missing request');process.stdout.write(JSON.stringify({repo:p.repo,pr:p.pr,base:p.base,head:p.head,repository_path:'/workspace/repository',changed_files:" +
       JSON.stringify(files) +
       ",coverage:{digest:" +
-      JSON.stringify(digest) +
+      JSON.stringify(preparedCoverage.digest) +
       ",count:" +
-      files.length +
+      preparedCoverage.count +
       "},diff_stat:'1 file changed',diff_patch:'diff --git a/src/run.ts b/src/run.ts',diff_chunks:[{index:1,path:'review-evidence/diff-0001.patch',bytes:39,files:" +
       JSON.stringify(files) +
       "}],diff_bytes:39,diff_truncated:" +
@@ -629,7 +640,7 @@ describe("PR Review scenario assets", () => {
   it("deduplicates repeated accepted finding chunks and bounds malformed arguments", () => {
     const { code, args } = commandCode("normalize_glm_review");
     const files = Array.from({ length: 50 }, (_, index) => `src/file-${String(index + 1).padStart(2, "0")}.ts`);
-    const digest = digestFor(files);
+    const preparedCoverage = coverageFor(files);
     const evidenceFinding = { ...finding, title: "Preserved finding", file: files[0], line: 1 };
     const result = spawnSync(process.execPath, ["-e", code, ...args], {
       encoding: "utf8",
@@ -814,7 +825,7 @@ describe("PR Review scenario assets", () => {
 
   it("recovers a 50-file three-finding incomplete handoff through minimal correction", async () => {
     const files = Array.from({ length: 50 }, (_, index) => `src/file-${String(index + 1).padStart(2, "0")}.ts`);
-    const digest = digestFor(files);
+    const preparedCoverage = coverageFor(files);
     const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
     installPrepareCommandStub(parsed, { files });
@@ -899,10 +910,10 @@ describe("PR Review scenario assets", () => {
     // payload still contains the valid compact coverage attestation.
     handoffActiveRun(runId, "qwen_review", "failed", {
       error: "provider output truncated",
-      coverage: { digest, count: files.length },
+      coverage: preparedCoverage,
     });
-    handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi", "approve", { coverage: { digest, count: files.length } }));
-    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm", "approve", { coverage: { digest, count: files.length } }));
+    handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi", "approve", { coverage: preparedCoverage }));
+    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm", "approve", { coverage: preparedCoverage }));
     expect(executor.tick(runId)).toBeGreaterThan(0);
 
     const normalized = loadRunSnapshot(runId)?.handoffs.find(
@@ -915,7 +926,7 @@ describe("PR Review scenario assets", () => {
       evidence_truncated: true,
       reviewed_files: files,
       unreviewed_files: [],
-      coverage: { digest, count: files.length },
+      coverage: preparedCoverage,
       diagnostics: [
         expect.objectContaining({
           attempt: 1,
@@ -1217,7 +1228,7 @@ describe("PR Review scenario assets", () => {
 
   it("publishes repeated ~50-file success runs deterministically", () => {
     const files = Array.from({ length: 50 }, (_, index) => `src/file-${String(index + 1).padStart(2, "0")}.ts`);
-    const digest = digestFor(files);
+    const preparedCoverage = coverageFor(files);
     for (let round = 1; round <= 2; round++) {
       const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
       for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
@@ -1229,7 +1240,7 @@ describe("PR Review scenario assets", () => {
       executor.tick(runId);
       for (const reviewer of ["qwen", "kimi", "glm"] as const) {
         handoffActiveRun(runId, `${reviewer}_review`, "voted", modelReview(reviewer, "approve", {
-          coverage: { digest, count: files.length },
+          coverage: preparedCoverage,
         }));
       }
       expect(executor.tick(runId)).toBeGreaterThan(0);
@@ -1239,7 +1250,7 @@ describe("PR Review scenario assets", () => {
       expect(decision).toMatchObject({
         report: {
           status: "pass",
-          coverage: { digest, count: files.length },
+          coverage: preparedCoverage,
         },
         quorum: { passed: true, successes: 3, total: 3, threshold: 2 },
       });
@@ -1267,7 +1278,7 @@ describe("PR Review scenario assets", () => {
       commit_metadata: unknown[];
     };
     expect(prepared.changed_files).toEqual(files);
-    expect(prepared.coverage).toEqual({ digest: digestFor(files), count: files.length });
+    expect(prepared.coverage).toEqual(coverageFor(files));
 
     const build = commandCode("build_review_context");
     const compactResult = spawnSync(process.execPath, ["-e", build.code, ...build.args], {
@@ -1278,7 +1289,7 @@ describe("PR Review scenario assets", () => {
     const compact = JSON.parse(compactResult.stdout) as Record<string, unknown>;
     expect(compact).not.toHaveProperty("changed_files");
     expect(compact).not.toHaveProperty("commit_metadata");
-    expect(compact.coverage).toEqual({ digest: digestFor(files), count: files.length });
+    expect(compact.coverage).toEqual(coverageFor(files));
 
     const trustedBuild = commandCode("build_trusted_review_context");
     const trustedResult = spawnSync(process.execPath, ["-e", trustedBuild.code, ...trustedBuild.args], {
@@ -1300,7 +1311,7 @@ describe("PR Review scenario assets", () => {
           status: "complete",
           vote: "request_changes",
           summary: "Complete review.",
-          coverage: { digest: digestFor(files), count: files.length },
+          coverage: coverageFor(files),
           findings: [finding],
         }],
         failure: [],
@@ -1316,6 +1327,56 @@ describe("PR Review scenario assets", () => {
       findings: [finding],
       diagnostics: [{ attempt: 1, category: "accepted" }],
     });
+  }, 30_000);
+
+  it("computes canonical coverage for unsorted duplicate paths while preserving Git order", () => {
+    const cwd = path.join(tmpHome, "prepare-canonical-coverage");
+    fs.mkdirSync(cwd, { recursive: true });
+    const files = ["src/z.ts", "src/a.ts", "src/m.ts", "src/a.ts", "src/z.ts", "src/a.ts"];
+    const bin = installFakeGit(cwd, files);
+
+    const preparedResult = spawnSync(process.execPath, ["-e", productionPrepareCommand()], {
+      cwd,
+      encoding: "utf8",
+      input: JSON.stringify(prepareCommandInput()),
+      env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` },
+      maxBuffer: 2_000_000,
+    });
+    if (preparedResult.status !== 0) throw new Error(preparedResult.stderr || preparedResult.stdout);
+    const prepared = JSON.parse(preparedResult.stdout) as {
+      changed_files: string[];
+      coverage: Coverage;
+    };
+
+    const canonical = coverageFor(files);
+    expect(prepared.changed_files).toEqual(files);
+    expect(prepared.coverage).toEqual(canonical);
+    expect(canonical.count).toBe(3);
+
+    // The prepare node output must satisfy strict protocol validation for the
+    // same changed-file set once wrapped in the full attestation schema (the
+    // runtime evidence bridge does exactly this wrap for compact coverage),
+    // and must be independent of order and duplicates.
+    const attestation = changedFileCoverageAttestation(files);
+    expect(attestation).toMatchObject(prepared.coverage);
+    expect(validateChangedFileCoverageAttestation({
+      schema: "changed-file-coverage-v1",
+      ...prepared.coverage,
+    }, files).valid).toBe(true);
+    expect(validateChangedFileCoverageAttestation(
+      { schema: "changed-file-coverage-v1", ...prepared.coverage },
+      ["src/m.ts", "src/z.ts", "src/a.ts"],
+    ).valid).toBe(true);
+
+    // The prior workflow algorithm (SHA-256 of JSON.stringify in Git order
+    // with duplicate count) diverges and is rejected by strict validation.
+    const legacyDigest = cryptoDigest(JSON.stringify(files));
+    expect(prepared.coverage.digest).not.toBe(legacyDigest);
+    expect(validateChangedFileCoverageAttestation({
+      schema: "changed-file-coverage-v1",
+      digest: legacyDigest,
+      count: files.length,
+    }, files).valid).toBe(false);
   }, 30_000);
 
   it("rejects hostile clone URLs before invoking git", () => {
@@ -1362,7 +1423,7 @@ describe("PR Review scenario assets", () => {
         diff_bytes: number;
       };
       expect(context.changed_files).toEqual(files);
-      expect(context.coverage).toEqual({ digest: digestFor(files), count: files.length });
+      expect(context.coverage).toEqual(coverageFor(files));
       expect(context.diff_chunks.length).toBeGreaterThan(0);
       expect(context.diff_chunks.length).toBeLessThan(files.length);
       expect(context.diff_chunks.every((chunk) =>

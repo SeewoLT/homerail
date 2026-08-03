@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -39,6 +40,19 @@ describe("canonical changed-file coverage", () => {
     expect(first).toEqual(second);
     expect(first.count).toBe(3);
     expect(first.digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("pins the canonical digest to sorted unique newline-joined paths", () => {
+    const canonical = changedFileCoverageDigest(["c/d.txt", "b.txt", "a.txt", "b.txt", ""]);
+    const expected = createHash("sha256")
+      .update(["a.txt", "b.txt", "c/d.txt"].join("\n"))
+      .digest("hex");
+    expect(canonical).toEqual({ digest: expected, count: 3 });
+    // The divergent Git-order JSON.stringify algorithm must not be reintroduced.
+    const legacy = createHash("sha256")
+      .update(JSON.stringify(["c/d.txt", "b.txt", "a.txt", "b.txt", ""]))
+      .digest("hex");
+    expect(canonical.digest).not.toBe(legacy);
   });
 
   it("produces a compact attestation and validates it strictly", () => {
