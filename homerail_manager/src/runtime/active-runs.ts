@@ -1357,6 +1357,8 @@ interface BrokerActionReceipt {
   session_id: string;
   recorded_at: number;
   bound_results?: Record<string, string | number | boolean | null>;
+  /** Manager-produced, contract-ready content that can recover a rejected model handoff. */
+  canonical_handoff?: unknown;
 }
 
 const BROKER_ACTION_RECEIPTS_KEY = "broker_action_receipts";
@@ -1387,6 +1389,17 @@ function _boundedBrokerResult(value: unknown): value is string | number | boolea
     || typeof value === "boolean"
     || (typeof value === "number" && Number.isFinite(value))
     || (typeof value === "string" && value.length <= 1_024);
+}
+
+function _boundedCanonicalHandoff(value: unknown): unknown | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined || Buffer.byteLength(encoded, "utf8") > 64 * 1024) return undefined;
+    return JSON.parse(encoded) as unknown;
+  } catch {
+    return undefined;
+  }
 }
 
 function _outputBrokerActionRequirements(
@@ -1510,6 +1523,8 @@ function _brokerActionReceipts(run: ActiveRun): BrokerActionReceipt[] {
       if (entries.length > 8 || entries.some(([field, result]) => !BROKER_ACTION_FIELD.test(field) || !_boundedBrokerResult(result))) return [];
       boundResults = Object.fromEntries(entries) as BrokerActionReceipt["bound_results"];
     }
+    const canonicalHandoff = _boundedCanonicalHandoff(entry.canonical_handoff);
+    if (entry.canonical_handoff !== undefined && canonicalHandoff === undefined) return [];
     return [{
       credential_ref: String(entry.credential_ref),
       broker: String(entry.broker),
@@ -1518,6 +1533,7 @@ function _brokerActionReceipts(run: ActiveRun): BrokerActionReceipt[] {
       session_id: String(entry.session_id),
       recorded_at: entry.recorded_at,
       ...(boundResults ? { bound_results: boundResults } : {}),
+      ...(canonicalHandoff !== undefined ? { canonical_handoff: canonicalHandoff } : {}),
     }];
   });
 }
@@ -1558,6 +1574,10 @@ export function recordActiveRunBrokerActionSuccess(input: {
         return _boundedBrokerResult(value) ? [[field, value] as const] : [];
       }));
       return Object.keys(boundResults).length > 0 ? { bound_results: boundResults } : {};
+    })(),
+    ...(() => {
+      const canonicalHandoff = _boundedCanonicalHandoff(_dottedField(input.result, "review_decision"));
+      return canonicalHandoff === undefined ? {} : { canonical_handoff: canonicalHandoff };
     })(),
   };
   const receipts = _brokerActionReceipts(run).filter((entry) => !(
@@ -2162,6 +2182,7 @@ function _correctionPrompt(
   workspaceFileContracts: Record<string, Array<WorkspaceFileRequirement & { schema: unknown }>>,
   brokerRequirements: BrokerActionRequirement[],
   brokerReceipts: BrokerActionReceipt[],
+  rejectedHandoff?: { port: string; content: unknown },
 ): string {
   const declaredPorts = outputPorts.length > 0 ? outputPorts.join(", ") : "done";
   const contractGuidance = Object.keys(outputContracts).length > 0
@@ -2184,6 +2205,9 @@ function _correctionPrompt(
     broker: receipt.broker,
     action: receipt.action,
     ...(receipt.bound_results ? { bound_results: receipt.bound_results } : {}),
+    ...(receipt.canonical_handoff !== undefined
+      ? { canonical_handoff: redactTelemetry(receipt.canonical_handoff) }
+      : {}),
   }));
   const brokerGuidance = brokerActions.length > 0
     ? [
@@ -2193,9 +2217,28 @@ function _correctionPrompt(
           `Valid durable broker receipts already exist for this exact node session: ${JSON.stringify(existingReceipts)}.`,
           "Reuse the receipt bound_results verbatim in the corrected handoff. Do not repeat an already successful side-effecting broker action.",
         ] : []),
+        "If a read-only verification action returns a complete handoff object such as review_decision, use that object verbatim as handoff content.",
+        "A digest-bound content field must stay value-identical to the array/object submitted to the successful broker action; do not discard non-actionable entries. Repeat a read-only verification action when necessary to obtain a final canonical result.",
         "If the corrected output triggers one of those requirements and no valid receipt exists, call that declared broker action before the handoff. Otherwise call handoff directly.",
       ]
     : ["Correction mode permits only the handoff tool. Do not repeat investigation, file changes, or other side effects."];
+  const rejectedHandoffGuidance = rejectedHandoff === undefined
+    ? []
+    : (() => {
+        let encoded: string;
+        try {
+          encoded = JSON.stringify(redactTelemetry(rejectedHandoff));
+        } catch {
+          encoded = JSON.stringify({ port: rejectedHandoff.port, content: "[unserializable]" });
+        }
+        const bounded = encoded.length <= 24_000
+          ? encoded
+          : `${encoded.slice(0, 24_000)}...[truncated]`;
+        return [
+          `Previous rejected handoff (redacted; repair this value instead of reconstructing it from memory): ${bounded}`,
+          "Preserve valid evidence and findings from the rejected content unless the authoritative error specifically requires changing them.",
+        ];
+      })();
   return [
     `Correction attempt ${attempt}/${maxAttempts} for DAG node ${nodeId}.`,
     `Previous attempt ended without a valid DAG handoff: ${reason}`,
@@ -2204,6 +2247,7 @@ function _correctionPrompt(
     `Failure ports: ${failurePorts.length > 0 ? failurePorts.join(", ") : "none declared"}.`,
     ...contractGuidance,
     ...workspaceEvidenceGuidance,
+    ...rejectedHandoffGuidance,
     "A contract or transport error from the previous attempt is not a failure of the original task. Retry a preferred success port when the original work is complete.",
     "Use a failure port only when the original task itself cannot complete; never use it merely to report this correction error.",
     "Treat that error as authoritative. Preserve required field names and JSON array/object/number types exactly.",
@@ -2218,6 +2262,7 @@ export function requestNodeCorrection(
   runId: string,
   nodeId: string,
   reason: string,
+  rejectedHandoff?: { port: string; content: unknown },
 ): NodeCorrectionResult {
   const run = store.get(runId);
   if (!run) return { status: "unavailable", reason: `Unknown run: ${runId}` };
@@ -2282,6 +2327,7 @@ export function requestNodeCorrection(
       workspaceFileContracts,
       brokerRequirements,
       brokerReceipts,
+      rejectedHandoff,
     ));
     mailbox.set("correction", values);
   }
@@ -2329,6 +2375,36 @@ export function autoHandoffAfterCorrectionExhausted(
   const run = store.get(runId);
   if (!run || run.status !== "active" || !run.dagRun.nodeStates.has(nodeId)) return undefined;
   const port = _defaultSuccessPort(run, nodeId);
+  const sessionId = run.nodeSessions.get(nodeId)?.sessionId;
+  const canonicalReceipt = sessionId === undefined
+    ? undefined
+    : [..._brokerActionReceipts(run)].reverse().find((receipt) => (
+        receipt.node_id === nodeId
+        && receipt.session_id === sessionId
+        && receipt.canonical_handoff !== undefined
+      ));
+  if (canonicalReceipt?.canonical_handoff !== undefined) {
+    try {
+      const next = handoffActiveRun(runId, nodeId, port, canonicalReceipt.canonical_handoff);
+      if (next) {
+        emit("dag:node_auto_handoff", {
+          runId,
+          nodeId,
+          port,
+          reason,
+          source: "canonical_broker_result",
+        });
+      }
+      return next;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return abortActiveRun(
+        runId,
+        `canonical broker handoff failed after correction exhaustion: ${message}`,
+        nodeId,
+      );
+    }
+  }
   if (
     _outputContract(run, nodeId, port)
     || _outputBrokerActionRequirements(run, nodeId, port).length > 0
@@ -5832,6 +5908,14 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
   const outgoingEdges = run.dagRun.graph.edges.filter(
     (e) => e.from_node === nodeId && e.label !== "after_dep",
   );
+  const outputContracts = Object.fromEntries(Array.from(new Set(
+    outgoingEdges.map((edge) => edge.from_port),
+  )).sort().flatMap((port) => {
+    const outputContract = _outputContract(run, nodeId, port);
+    return outputContract?.schema === undefined
+      ? []
+      : [[port, { contract: outputContract.contract, schema: outputContract.schema }] as const];
+  }));
 
   return {
     ok: true,
@@ -5844,6 +5928,7 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
       ...(skillContext ? { skillContext } : {}),
       inputs: dispatchInputs,
       outgoingEdges,
+      ...(Object.keys(outputContracts).length > 0 ? { outputContracts } : {}),
       checkpointResume: nodeSession.resumeInstruction
         ? {
             parentSessionId: nodeSession.parentSessionId,

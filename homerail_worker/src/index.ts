@@ -32,7 +32,10 @@ import {
   AgentTurnController,
   agentTurnControllerOptionsForBackend,
 } from "./agent/turn-controller.js";
-import { envelopeInputsToTaskText } from "./envelope-task.js";
+import {
+  envelopeInputsToTaskText,
+  envelopeOutputContractsToSystemPrompt,
+} from "./envelope-task.js";
 import { envelopeActivityToDagConfig } from "./envelope-activity.js";
 import {
   activePromptTransportIdentity,
@@ -241,7 +244,10 @@ client.on("task", async (msg) => {
           : undefined,
       }
     : (data.dag_config ?? data.dagConfig ?? {}) as DagNodeConfig;
-  const systemPromptValue = envelope ? agentConfig.system : data.system_prompt;
+  const outputContractPrompt = envelopeOutputContractsToSystemPrompt(envelope?.outputContracts);
+  const systemPromptValue = envelope
+    ? [String(agentConfig.system ?? "").trim(), outputContractPrompt].filter(Boolean).join("\n\n")
+    : data.system_prompt;
   let preparedSkillContext;
   try {
     preparedSkillContext = prepareWorkerSkillContext({

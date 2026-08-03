@@ -273,8 +273,13 @@ export function setupWorkerWebSocket(
       let registered = false;
       let pingInterval: ReturnType<typeof setInterval> | null = null;
 
-      const tryCorrectNode = (runId: string, nodeId: string, reason: string): boolean => {
-        const correction = requestNodeCorrection(runId, nodeId, reason);
+      const tryCorrectNode = (
+        runId: string,
+        nodeId: string,
+        reason: string,
+        rejectedHandoff?: { port: string; content: unknown },
+      ): boolean => {
+        const correction = requestNodeCorrection(runId, nodeId, reason, rejectedHandoff);
         if (correction.status === "scheduled") {
           options.onHandoffApplied?.(runId);
           return true;
@@ -532,7 +537,7 @@ export function setupWorkerWebSocket(
               );
             }
             if (result.status === "handoff_failed") {
-              tryCorrectNode(result.runId, result.nodeId, result.reason);
+              tryCorrectNode(result.runId, result.nodeId, result.reason, result.rejectedHandoff);
             }
           }
           return;

@@ -839,12 +839,53 @@ export async function githubAssessReview(context: CredentialBrokerContext): Prom
   const findings = context.input.findings;
   if (!Array.isArray(findings) || findings.length > 30) throw new Error("assess_review findings are invalid");
   const weights = { critical: 16, high: 8, medium: 3, low: 1 } as const;
+  const allowedFindingKeys = new Set([
+    "id",
+    "severity",
+    "category",
+    "actionable",
+    "advisory_reason",
+    "path",
+    "line",
+    "evidence",
+    "recommendation",
+  ]);
+  const idPattern = /^[a-z][a-z0-9_-]{0,127}$/;
+  const advisoryReasons = new Set(["preexisting", "out_of_scope", "optional_preference"]);
   let defectLoad = 0;
   for (const [index, value] of findings.entries()) {
     const finding = jsonRecord(value, `assess_review findings[${index}]`);
+    const unexpectedKeys = Object.keys(finding).filter((key) => !allowedFindingKeys.has(key));
+    if (unexpectedKeys.length > 0) {
+      throw new Error(
+        `assess_review findings[${index}] has unsupported fields: ${unexpectedKeys.join(", ")}; `
+        + "use the final ReviewDecision finding fields exactly",
+      );
+    }
     const severity = String(finding.severity ?? "") as keyof typeof weights;
     if (!Object.prototype.hasOwnProperty.call(weights, severity) || typeof finding.actionable !== "boolean") {
       throw new Error(`assess_review findings[${index}] severity/actionable is invalid`);
+    }
+    if (typeof finding.id !== "string" || !idPattern.test(finding.id)
+      || typeof finding.category !== "string" || finding.category.length < 1 || finding.category.length > 128
+      || typeof finding.evidence !== "string" || finding.evidence.length < 1 || finding.evidence.length > 4_000
+      || typeof finding.recommendation !== "string" || finding.recommendation.length < 1
+      || finding.recommendation.length > 4_000) {
+      throw new Error(
+        `assess_review findings[${index}] must provide contract-valid id, category, evidence, and recommendation`,
+      );
+    }
+    if (finding.path !== undefined && (
+      typeof finding.path !== "string" || finding.path.length < 1 || finding.path.length > 1_000
+    )) throw new Error(`assess_review findings[${index}] path is invalid`);
+    if (finding.line !== undefined && (
+      typeof finding.line !== "number" || !Number.isSafeInteger(finding.line) || finding.line < 1
+    )) throw new Error(`assess_review findings[${index}] line is invalid`);
+    if (finding.advisory_reason !== undefined && (
+      typeof finding.advisory_reason !== "string" || !advisoryReasons.has(finding.advisory_reason)
+    )) throw new Error(`assess_review findings[${index}] advisory_reason is invalid`);
+    if (!finding.actionable && finding.advisory_reason === undefined) {
+      throw new Error(`assess_review findings[${index}] non-actionable findings require advisory_reason`);
     }
     if (finding.actionable) defectLoad += weights[severity];
   }
@@ -883,6 +924,32 @@ export async function githubAssessReview(context: CredentialBrokerContext): Prom
     .digest("hex");
   const score = Math.max(0, 100 - Math.min(100, defectLoad));
   const converged = defectLoad === 0 && coverageComplete && testsPassed;
+  const quality = {
+    status: converged ? "clean" as const : "needs_fix" as const,
+    findings_sha256: findingsSha256,
+    coverage_ratio: coverageRatio,
+    coverage_complete: coverageComplete,
+    test_report_sha256: reportEvidence.sha256,
+    defect_load: defectLoad,
+    score,
+  };
+  const actionableFindings = findings.filter((value) => (
+    jsonRecord(value, "assess_review actionable finding").actionable === true
+  ));
+  const feedback = actionableFindings.map((value) => (
+    String(jsonRecord(value, "assess_review actionable finding").recommendation)
+  ));
+  const reviewDecision = {
+    verdict: converged ? "approve" as const : "changes_requested" as const,
+    head_sha: expectedHead,
+    summary: converged
+      ? "Manager assessment found no actionable defects."
+      : `Manager assessment found ${actionableFindings.length} actionable defect${actionableFindings.length === 1 ? "" : "s"}.`,
+    findings,
+    feedback,
+    fix_tasks: converged ? [] : [{ id: `review-fix-${expectedHead.slice(0, 12)}`, feedback }],
+    quality,
+  };
   return {
     head_sha: expectedHead,
     findings_sha256: findingsSha256,
@@ -895,6 +962,7 @@ export async function githubAssessReview(context: CredentialBrokerContext): Prom
     score,
     converged,
     status: converged ? "clean" : "needs_fix",
+    review_decision: reviewDecision,
   };
 }
 

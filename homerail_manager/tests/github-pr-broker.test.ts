@@ -562,6 +562,39 @@ describe("bounded GitHub Draft PR credential broker", () => {
     pullFileCount = 2;
     await expect(call("reviewer", "assess_review", {
       expected_head_sha: INITIAL_HEAD,
+      findings: [{
+        severity: "low",
+        actionable: false,
+        file: "src/fix-0.ts",
+        title: "Alias-shaped finding",
+        body: "This shape cannot be handed off as ReviewDecision.",
+        advisory_reason: "optional_preference",
+      }],
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("use the final ReviewDecision finding fields exactly"),
+    });
+
+    await expect(call("reviewer", "assess_review", {
+      expected_head_sha: INITIAL_HEAD,
+      findings: [{
+        id: "valid-advisory",
+        severity: "low",
+        category: "tests",
+        actionable: false,
+        advisory_reason: "optional_preference",
+        path: "src/fix-0.ts",
+        line: 1,
+        evidence: "The optional assertion is not present.",
+        recommendation: "Consider adding the optional assertion later.",
+      }],
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("complete diff coverage (0/2 files)"),
+    });
+
+    await expect(call("reviewer", "assess_review", {
+      expected_head_sha: INITIAL_HEAD,
       findings: [],
     })).resolves.toMatchObject({
       ok: false,

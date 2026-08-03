@@ -418,10 +418,21 @@ spec:
         Return structured findings. An actionable defect always blocks even if
         it would be called non-blocking in prose. A non-actionable advisory must
         use exactly one advisory_reason: preexisting, out_of_scope, or
-        optional_preference. After forming the final findings array, call
+        optional_preference. Use the exact final ReviewDecision finding shape
+        for assess_review: {"id":"lowercase-stable-id","severity":"critical|high|medium|low",
+        "category":"<category>","actionable":true|false,
+        "advisory_reason":"preexisting|out_of_scope|optional_preference",
+        "path":"<optional changed path>","line":1,
+        "evidence":"<evidence>","recommendation":"<recommendation>"}.
+        advisory_reason is required when actionable is false. path and line are
+        optional. Do not use aliases such as file, title, body, or review_notes.
+        After forming the final findings array, call
         assess_review with {"expected_head_sha":"<snapshot head_sha>",
-        "findings":[...]} and copy its Manager-computed fields exactly into
-        quality. The Manager weights critical/high/medium/low as 16/8/3/1 and
+        "findings":[...]}. The broker returns a complete review_decision; pass
+        that object verbatim as the content of handoff on port reviewed. Never
+        remove an advisory after assessment or reuse its findings_sha256 with a
+        different findings array. The Manager weights
+        critical/high/medium/low as 16/8/3/1 and
         also verifies complete diff coverage plus the exact-head TestReport.
         quality.status clean means approve with empty feedback and fix_tasks;
         needs_fix means changes_requested with clear feedback and exactly one

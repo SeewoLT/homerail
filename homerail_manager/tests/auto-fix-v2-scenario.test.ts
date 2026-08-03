@@ -265,6 +265,8 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     expect(source).toContain('"exit_code":0');
     expect(source).toContain('"duration_ms":0');
     expect(source).toContain("Do not add fields such as tests_passed");
+    expect(source).toContain("The broker returns a complete review_decision");
+    expect(source).toContain("Do not use aliases such as file, title, body, or review_notes");
     expect(source).toContain("result_required_workspace_files:");
     expect(source).toContain("required_workspace_files:");
     expect(source).toContain("clean_reviews_required: 2");
@@ -370,6 +372,16 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
 
     await tickUntil(executor, () => dispatcher.dispatched.some((entry) => entry.nodeId === "review_initial"), "initial review was not dispatched");
     const initial = dispatcher.dispatched.find((entry) => entry.nodeId === "review_initial")!;
+    expect(initial.outputContracts).toMatchObject({
+      reviewed: {
+        contract: "ReviewDecision",
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["verdict", "head_sha", "summary", "findings", "feedback", "fix_tasks", "quality"],
+        },
+      },
+    });
     const requested = reviewDecision(aggregateReport.sha256, false);
     recordReviewEvidence("review_initial", initial.sessionId!, requested);
     handoffActiveRun("autofix-v2-run", "review_initial", "reviewed", requested);

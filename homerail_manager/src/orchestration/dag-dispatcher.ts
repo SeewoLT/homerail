@@ -20,6 +20,8 @@ export interface DispatchEnvelope {
   skillContext?: DagWorkerSkillContextV1;
   inputs: Record<string, unknown[]>;
   outgoingEdges: DAGEdge[];
+  /** Trusted, exact JSON Schemas for contracted output ports. */
+  outputContracts?: Record<string, { contract: string; schema: unknown }>;
   checkpointResume?: {
     parentSessionId?: string;
     entryUuid?: string;
