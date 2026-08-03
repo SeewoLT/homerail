@@ -4640,11 +4640,14 @@ function _assertFanoutGitCommitResult(
   let expectedTopLevel: string;
   let expectedCommonDir: string;
   try {
-    resolvedTopLevel = realpathSync(String(topLevel.stdout).trim());
-    resolvedCommonDir = realpathSync(String(commonDir.stdout).trim());
-    resolvedGitDir = realpathSync(String(gitDir.stdout).trim());
-    expectedTopLevel = realpathSync(workspace);
-    expectedCommonDir = realpathSync(path.join(repository, ".git"));
+    // Git for Windows can expand an 8.3 path (for example RUNNER~1) while
+    // Node's portable realpath keeps the caller's spelling. Native realpath
+    // gives both sides one OS-resolved identity before the security checks.
+    resolvedTopLevel = realpathSync.native(String(topLevel.stdout).trim());
+    resolvedCommonDir = realpathSync.native(String(commonDir.stdout).trim());
+    resolvedGitDir = realpathSync.native(String(gitDir.stdout).trim());
+    expectedTopLevel = realpathSync.native(workspace);
+    expectedCommonDir = realpathSync.native(path.join(repository, ".git"));
   } catch {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree Git metadata could not be resolved");
   }
