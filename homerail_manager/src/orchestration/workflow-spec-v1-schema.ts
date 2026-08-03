@@ -111,12 +111,60 @@ const BrokerActionRequirement = Type.Object({
       pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
     }),
   }, { additionalProperties: false })),
+  result_digest_binding: Type.Optional(Type.Object({
+    result_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+    content_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+  }, { additionalProperties: false })),
+}, { additionalProperties: false });
+
+const WorkspaceFileRequirement = Type.Object({
+  path_field: Type.String({
+    minLength: 1,
+    maxLength: 256,
+    pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+  }),
+  sha256_field: Type.String({
+    minLength: 1,
+    maxLength: 256,
+    pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+  }),
+  contract: ContractIdentifier,
+  max_bytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_048_576 })),
+  bindings: Type.Optional(Type.Array(Type.Object({
+    file_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+    content_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+  }, { additionalProperties: false }), {
+    minItems: 1,
+    maxItems: 16,
+    uniqueItems: true,
+  })),
 }, { additionalProperties: false });
 
 const OutputPort = Type.Object({
   contract: Type.Optional(ContractIdentifier),
   description: Type.Optional(ShortText),
   required_broker_actions: Type.Optional(Type.Array(BrokerActionRequirement, {
+    minItems: 1,
+    maxItems: 8,
+    uniqueItems: true,
+  })),
+  required_workspace_files: Type.Optional(Type.Array(WorkspaceFileRequirement, {
     minItems: 1,
     maxItems: 8,
     uniqueItems: true,
@@ -379,6 +427,11 @@ const FanoutNode = Type.Object({
     threshold: Type.Optional(Type.Integer({ minimum: 1, maximum: 256 })),
     result_contract: Type.Optional(ContractIdentifier),
     result_required_broker_actions: Type.Optional(Type.Array(BrokerActionRequirement, {
+      minItems: 1,
+      maxItems: 8,
+      uniqueItems: true,
+    })),
+    result_required_workspace_files: Type.Optional(Type.Array(WorkspaceFileRequirement, {
       minItems: 1,
       maxItems: 8,
       uniqueItems: true,

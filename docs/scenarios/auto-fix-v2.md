@@ -53,7 +53,7 @@ predates the runtime and broker support described below.
   handoff-contract correction stays in that same logical dispatch so valid
   same-session broker receipts remain usable. Correction mode retains only the
   hard broker evidence declared for that output port, including prerequisite
-  `pull_request_snapshot` and `checks_snapshot` reads; it cannot broaden the
+  `pull_request_snapshot` and `assess_review` receipts; it cannot broaden the
   original capability.
 - GLM receives no repository/workers/fixers mount. It reads changed or related
   PR hunks through `read_diff` and UTF-8 source through `read_file`, both bound
@@ -70,26 +70,26 @@ predates the runtime and broker support described below.
   nested writable mount only at `/workspace/.homerail-runtime` for trusted
   Worker audit/session telemetry. This prevents audit writer startup from
   crashing a read-only Worker without granting repository writes.
-- Each rejected validation or review creates one fresh dynamic DeepSeek fixer.
-  The loop permits at most five candidate evaluations and four fixes. A
-  validation failure consumes an evaluation, so the number of GLM dispatches
-  may be lower than five.
+- Each review with actionable defects creates one fresh dynamic DeepSeek fixer.
+  The loop permits at most four fixes. Aggregation and every fix run all
+  caller-authored `local_tests` inside their disposable container worktree and
+  submit a mandatory SHA-256-bound `TestReport` file. Manager verifies the file
+  path, bytes, JSON contract, exact head, manifest binding, and passing status
+  before a candidate can be reviewed.
 - GitHub writes are expected-head, fast-forward-only, non-force, bounded to 64
   files/1 MiB, and restricted by explicit `pr_context.writable_paths` prefixes.
   `writable_paths: ["."]` is invalid; `.github/**`, `.git/**`, and the mounted
   input directory are always denied even when a broader prefix is declared.
-- Before each GLM dispatch, a Manager-owned `validate_head` broker node requires
-  every immutable check on the exact current PR head. Terminal check failures
-  become a structured fixer task. For a failed GitHub Actions check, Manager
-  also retrieves a bounded, sanitized tail of the matching job log when the
-  check app, repository, and job/check ID all match the immutable binding. Log
-  content remains repository-controlled, untrusted diagnostic text and is
-  explicitly labeled as never-instructions; the token and response headers
-  never enter the Worker. Missing/pending checks
-  wait until the bounded operational timeout. After `approve`, a separate Manager-owned
-  `required_checks` node re-checks the approved `head_sha` before success.
-  `github_pr` is the broker implementation name and must never be supplied as
-  the credential reference.
+- The DAG never dispatches, polls, or gates on GitHub CI. CI is a finite
+  repository resource and runs only after local testing and review convergence.
+  Reviewers call `read_diff` for every changed path through EOF, then submit
+  structured findings to `assess_review`. Manager computes defect load with
+  `critical/high/medium/low = 16/8/3/1`, verifies 100% diff coverage and the
+  exact-head TestReport, and returns the quality score/status. Zero actionable
+  defect load is necessary but not sufficient: a second fresh-context GLM must
+  independently produce another clean assessment for the unchanged head.
+  Any mutation resets confirmation. `github_pr` is the broker implementation
+  name and must never be supplied as the credential reference.
 
 ## GitHub credential
 
@@ -97,13 +97,9 @@ For a pilot, a repository-scoped fine-grained PAT is acceptable. Give it only:
 
 - Contents: read and write
 - Pull requests: read-only
-- Checks: read-only
 
-If `pr_context.validation_workflow` is configured, also grant Actions:
-read/write so the broker can call `workflow_dispatch` and retrieve failed job
-logs. If trusted CI is triggered outside the DAG, Actions: read-only is enough
-for the bounded job-log evidence; without it the broker safely falls back to
-the check-run output and details URL.
+Checks and Actions permissions are not needed by Auto Fix v2. Grant those only
+to the separate post-convergence CI actor if that actor actually needs them.
 
 Store it as an encrypted Manager credential; it is never placed in a Worker:
 
@@ -113,9 +109,7 @@ printf '%s' "$GITHUB_AUTOFIX_TOKEN" | hr credential set github-autofix \
 ```
 
 For production, prefer a GitHub App installed only on the target repositories.
-Use Contents read/write, Pull requests read, and Checks read. Add Actions
-read when failed GitHub Actions job logs should be included, or Actions
-read/write when the broker also dispatches validation. Store the App material
+Use Contents read/write and Pull requests read. Store the App material
 as an opaque JSON credential with fields `app_id`, `installation_id`, and
 `private_key`; the broker mints a short-lived installation token for each call.
 
@@ -151,28 +145,16 @@ the actually staged `task_document` before any PR action.
   "base_sha": "40-character-base-sha",
   "task_document_sha256": "64-character-sha256-of-task.md",
   "require_draft": true,
-  "writable_paths": ["homerail_manager/src", "homerail_manager/tests"],
-  "required_checks": ["Core (Linux, Node 24)"],
-  "validation_workflow": {
-    "workflow_id": "core.yml",
-    "inputs": { "head_sha": "$head_sha" }
-  }
+  "writable_paths": ["homerail_manager/src", "homerail_manager/tests"]
 }
 ```
 
 The broker refuses a non-Draft PR, a different base/head/branch, an external
 head update, a fork/cross-repository PR, a task-document digest mismatch, or a
-write outside the path allowlist. `required_checks` contains one to 32 unique,
-exact GitHub check-run names. It is immutable for the run; the broker selects
-the newest run with each exact name and requires `completed`/`success` on the
-current head when trusted outer automation owns validation.
-`validation_workflow` is optional. When present, `workflow_id` is a bounded
-workflow file/id and `$head_sha` input values are replaced with the exact
-candidate SHA. Manager binds the resulting `workflow_dispatch` run to the
-configured workflow, exact branch, and exact candidate SHA. The whole run must
-complete successfully; a successful required anchor cannot mask a later or
-parallel failing matrix job. All required anchors must also exist and succeed
-inside that bound run. The post-review finalizer repeats this whole-run check.
+write outside the path allowlist. The generic GitHub broker still supports
+`required_checks` and `validation_workflow` for other workflows, but Auto Fix
+v2 deliberately omits them from `pr_context` and projects no CI actions to its
+nodes.
 
 CLI input bindings declare their media type through the immutable mount suffix:
 `.md` is Markdown, `.json` is validated JSON, and `.txt` is plain text. The CLI
@@ -185,11 +167,11 @@ transport is fenced to the current lease/session/generation, and
 complete dirty-file manifest, writable path allowlist, file/byte limits, and
 `force: false`.
 
-This repository's pull-request CI intentionally skips Draft PRs and does not
-run on Draft `synchronize` events. Configure `validation_workflow` so Manager
-can dispatch trusted CI with the Draft head branch and exact SHA input, or have
-trusted outer automation create the configured check on that SHA. The broker
-can observe results but cannot manufacture or override check conclusions.
+This repository's pull-request CI intentionally skips Draft PRs. After the DAG
+returns a converged exact head, the caller may mark the PR ready or explicitly
+start the repository's normal CI policy. A CI failure is outside this completed
+run and should become new evidence for a follow-up run or human correction; it
+must not turn the review/fix loop into a CI polling loop.
 
 `commit_workspace` uses GitHub's bounded Git Data API sequence (blob, tree,
 commit, then non-force ref update). A failure before the ref update can leave
@@ -215,6 +197,13 @@ document into this fixed `task_plan` input before starting the DAG:
       "acceptance": ["Observable focused check"]
     }
   ],
+  "local_tests": [
+    {
+      "id": "manager-focused",
+      "command": "npm --prefix homerail_manager exec vitest run tests/example.test.ts",
+      "timeout_seconds": 900
+    }
+  ],
   "shared": {
     "repository_path": "repo",
     "task_document": "input/task.md",
@@ -229,6 +218,26 @@ the WorkflowSpec contract enforces one to three bounded tasks. Dependent work
 must be combined into one item. Because this plan is a content-addressed run
 input, dynamic worker count and division cannot drift with Agent conversation
 history.
+
+Each `local_tests` entry is a caller-reviewed command plus a required 1–1800
+second test-process timeout, not a model-selected CI workflow or model/tool
+budget. The aggregator and every fixer execute all entries and then write a
+report below their own `.homerail/test-reports/` directory after the broker has
+published source changes. The report is not committed to the PR. It contains:
+
+- `version`, `phase`, exact `head_sha`, optional source `manifest_sha256`, and
+  overall `status`;
+- one record per required command with its stable id, exact command, immutable
+  timeout, status, exit code, duration, and a bounded output tail;
+- a bounded summary.
+
+The handoff carries only `{path, sha256, status}`. Manager resolves the path
+against the producer's sole writable workspace, rejects symlinks and escapes,
+checks the bytes and JSON contract, binds report fields back to the handoff,
+and persists the accepted bytes as a `workspace_evidence` run artifact in the
+handoff transaction. Review reads this durable copy, so workspace cleanup
+cannot erase approval evidence. An absent, forged, oversized, failed, or
+stale-head report cannot reach review.
 
 ## Model profile
 
@@ -314,14 +323,14 @@ npm --prefix homerail_cli exec vitest run tests/run-inputs.test.ts
 node scripts/auto-fix-v2-runtime-profile.test.mjs
 ```
 
-The fake-remote coverage proves two dynamic implementers, four dynamically
-generated fixers, five total reviews with distinct sessions, fifth-round
-exhaustion, dormant-loop cold recovery, read-only input projection, Manager
-broker action projection, exact-head validation pending-to-success, failed
-validation-to-fixer routing, non-force head fencing, path denial (including
-`.github/actions/**`), task/PR identity binding, fork/closed-PR denial,
-external-head-drift rejection, and an independent final required-checks fence.
+The deterministic coverage proves dynamic implementer/fixer creation, fresh
+review sessions, a complete review/fix/clean-confirmation path, mandatory
+workspace TestReport path/digest/contract validation, Manager-bound assessment
+receipts, full exact-head diff coverage, non-force head fencing, path denial
+(including `.github/actions/**`), task/PR identity binding, fork/closed-PR
+denial, and external-head-drift rejection. Generic broker tests continue to
+cover check actions for workflows that opt into them; this DAG does not.
 
-This proof does not spend model tokens or mutate GitHub. A real Draft-PR pilot,
-including creation of the configured check run on the exact Draft head, remains
-required before production adoption.
+This proof does not spend model tokens or mutate GitHub. A real Draft-PR pilot
+followed by post-convergence repository CI remains required before production
+adoption.

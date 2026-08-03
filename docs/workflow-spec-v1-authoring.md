@@ -130,6 +130,40 @@ supports bounded `allOf`, `if` / `then` / `else`, and array `contains` rules for
 cross-field invariants such as requiring executable evidence whenever a review
 claims that reproduction is confirmed.
 
+### Required workspace evidence files
+
+An Agent output can require a JSON file from the producer's sole writable
+workspace. Manager validates it before accepting the handoff:
+
+```yaml
+outputs:
+  candidate:
+    contract: Candidate
+    required_workspace_files:
+      - path_field: test_report.path
+        sha256_field: test_report.sha256
+        contract: TestReport
+        max_bytes: 262144
+        bindings:
+          - { file_field: head_sha, content_field: head_sha }
+          - { file_field: status, content_field: test_report.status }
+```
+
+`path_field` and `sha256_field` are dotted paths in the validated handoff.
+`bindings` compare fields in the parsed file with handoff fields. The producer
+must declare exactly one writable workspace path. Manager rejects path escape,
+symlink components, non-files, oversized content, digest mismatch, non-UTF-8 or
+invalid JSON, contract failure, and binding mismatch. The file is evidence in
+the run workspace; it is not automatically committed to a repository. On an
+accepted handoff Manager also copies its exact bytes into a content-addressed
+`workspace_evidence` run artifact. This durable copy survives producer
+workspace retention and is available through the ordinary run-artifact list
+and content APIs.
+
+For dynamic fan-out children, put the same declarations under
+`config.result_required_workspace_files`. Manager projects them onto each
+generated child's `result` output after resolving `{{fanout_workspace}}`.
+
 ## Fixed Run Artifacts
 
 Declare stable outputs under `spec.artifacts`. A handoff artifact turns one

@@ -136,6 +136,14 @@ export interface DAGGatewayConfig {
     action: string;
     when?: { field: string; equals: unknown };
     result_binding?: { result_field: string; content_field: string };
+    result_digest_binding?: { result_field: string; content_field: string };
+  }>;
+  result_required_workspace_files?: Array<{
+    path_field: string;
+    sha256_field: string;
+    contract: string;
+    max_bytes?: number;
+    bindings?: Array<{ file_field: string; content_field: string }>;
   }>;
   success_field?: string;
   cancel_remaining?: boolean;

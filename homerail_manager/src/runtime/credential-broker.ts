@@ -12,6 +12,7 @@ import {
   recordActiveRunBrokerActionSuccess,
 } from "./active-runs.js";
 import {
+  githubAssessReview,
   githubChecksSnapshot,
   githubCommitFiles,
   githubCommitWorkspace,
@@ -292,6 +293,7 @@ registerCredentialBroker("lark_bot", "bot_info", async ({ credential, secret }) 
 registerCredentialBroker("github_pr", "pull_request_snapshot", githubPullRequestSnapshot);
 registerCredentialBroker("github_pr", "read_file", githubReadFile);
 registerCredentialBroker("github_pr", "read_diff", githubReadDiff);
+registerCredentialBroker("github_pr", "assess_review", githubAssessReview);
 registerCredentialBroker("github_pr", "checks_snapshot", githubChecksSnapshot);
 registerCredentialBroker("github_pr", "required_checks", githubRequiredChecks);
 registerCredentialBroker("github_pr", "validate_head", githubValidateHead);

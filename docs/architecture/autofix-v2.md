@@ -13,11 +13,10 @@ The Draft pull request is a mutable delivery surface, and model conversation
 history is never required to recover the task.
 
 The current MVP enforces immutable inputs, secure dynamic fan-out, fresh review
-sessions, fenced PR reads/writes, and a Manager-side required-checks approval
-gate. Deterministic Manager broker nodes bind an immutable list of exact GitHub
-check names to each current PR head before review and re-check the approved
-head before success. A real Draft-PR pilot remains necessary before production
-adoption.
+sessions, fenced PR reads/writes, mandatory Manager-verified local test reports,
+and quantitative review convergence. It deliberately does not consume GitHub
+CI while iterating. Repository CI begins only after the DAG has converged. A
+real Draft-PR pilot remains necessary before production adoption.
 
 ## Problem Statement
 
@@ -47,13 +46,15 @@ to stand in for durable task state and deterministic evidence.
 - Dynamically fan out one to three independent DeepSeek V4 Flash implementers.
 - Use a DeepSeek V4 Flash aggregator to integrate worker patches.
 - Use a fresh-context GLM-5.2 reviewer for every review round.
-- Dynamically create a fresh DeepSeek V4 Flash fixer when validation or review
-  rejects the current candidate.
-- Bound the complete candidate/review loop to five rounds.
+- Dynamically create a fresh DeepSeek V4 Flash fixer when review rejects the
+  current candidate.
+- Bound the loop to four fixes and require two consecutive clean fresh-context
+  reviews of the final unchanged head.
 - Give remote PR write capability only to the aggregator and fixers, through a
   Manager-side broker. Reviewers receive read-only PR capability.
 - Preserve enough durable state to recover without an Agent transcript.
-- Put deterministic validation before model approval.
+- Require all caller-authored bounded container tests after aggregation and
+  every fix, without dispatching GitHub CI.
 
 ## Non-Goals
 
@@ -78,16 +79,18 @@ to stand in for durable task state and deterministic evidence.
    credential, and session policy.
 5. Implementers never receive remote repository credentials or PR mutation
    tools.
-6. A model claim that a command passed is not validation evidence. Only a
-   trusted command result can satisfy a validation gate.
+6. A candidate or fix handoff is invalid without a SHA-256-bound TestReport
+   file in the producer's sole writable workspace. Manager validates its path,
+   bytes, JSON contract, exact head, manifest binding, and passing status.
 7. A review round uses a new provider session and receives no prior model
    transcript.
-8. Missing evidence, head drift, invalid contracts, exhausted rounds, and
-   incomplete validation produce explicit non-success outcomes.
-9. Every candidate head reaches a reviewer only after a Manager-owned
-   `validate_head` broker node succeeds, and final success re-checks the exact
-   approved head independently of model output.
-10. The final successful outcome is `ready_for_human`, not merge approval.
+8. Missing evidence, head drift, invalid contracts, incomplete diff coverage,
+   or exhausted fixes produce explicit non-success outcomes.
+9. Manager, not GLM, computes review quality from structured findings, full
+   diff coverage, and the exact-head TestReport. Zero actionable defect load
+   must be confirmed by a second fresh reviewer on the unchanged head.
+10. The DAG's successful outcome is `ready_for_ci`, not merge approval. It does
+    not change the PR's Draft state.
 
 ## Proposed Flow
 
@@ -98,22 +101,25 @@ caller creates immutable task + task-plan inputs and identifies an existing Draf
   -> dynamic DeepSeek implementers work in isolated worktrees
   -> deterministic patch collection and safety checks
   -> DeepSeek aggregator integrates patches in declared order
+       -> run every immutable local_tests command
        -> broker fast-forward pushes candidate round 1 to Draft PR
-  -> candidate round 1
-       -> Manager `validate_head` dispatches or observes trusted required checks
-          on the exact pushed head
-       -> failed checks: fresh DeepSeek fixer -> broker pushes next candidate
-       -> fresh GLM review of task + current diff + validation evidence
-       -> approve: Manager re-checks required checks on the exact approved head
-                   -> final evidence publication -> ready_for_human
-       -> reject: fresh DeepSeek fixer -> broker pushes next candidate round
-  -> candidate round 5 rejection: needs_human
+       -> write and hash required local TestReport outside the PR commit
+  -> fresh GLM reads every exact-head diff through EOF and emits findings
+       -> Manager assesses weighted defect load + 100% coverage + TestReport
+       -> clean: second fresh GLM repeats full review on the unchanged head
+            -> clean again: ready_for_ci
+            -> defect: fresh DeepSeek fixer
+       -> defect: fresh DeepSeek fixer
+  -> fixer runs every local_test, publishes one fenced commit, writes TestReport
+       -> fresh primary review, then clean confirmation
+  -> fourth unsuccessful fix cycle: needs_human
+  -> after DAG convergence only: caller starts normal repository CI
 ```
 
-One round is one candidate evaluation. A validation failure and a GLM review
-failure both consume the current round. Rounds 1 through 4 may create a fixer.
-A failure in round 5 terminates as `needs_human`; it does not create a fixer
-whose output would require a sixth evaluation.
+One fix round is one mutation attempt followed by fresh review. Most tasks
+should converge in one to three fixes. A fourth unsuccessful fix cycle
+terminates as `needs_human`; graph iteration caps are safety bounds, not model
+or tool-call budgets.
 
 ## Run Input Artifacts
 
@@ -210,12 +216,7 @@ run binds this immutable context:
   "base_sha": "...",
   "task_document_sha256": "...",
   "require_draft": true,
-  "writable_paths": ["src", "tests"],
-  "required_checks": ["Core (Linux, Node 24)"],
-  "validation_workflow": {
-    "workflow_id": "core.yml",
-    "inputs": { "head_sha": "$head_sha" }
-  }
+  "writable_paths": ["src", "tests"]
 }
 ```
 
@@ -236,17 +237,17 @@ The WorkflowSpec should define these bounded contracts:
 | Contract | Required content |
 | --- | --- |
 | `TaskManifest` | artifact id, digest, media type, size, logical path |
-| `PRContext` | repo, PR, draft state, base/head branches and SHAs, explicit writable prefixes, exact required-check names |
+| `PRContext` | repo, PR, draft state, base/head branches and SHAs, explicit writable prefixes |
 | `BoundTask` | task manifest plus verified PR context and policy id |
-| `WorkPlan` | plan digest, 1..3 work items, integration order, global validation |
+| `WorkPlan` | plan digest, 1..3 work items, integration order, required local test commands |
 | `WorkItem` | id, objective, allowed paths, acceptance checks, context paths, risk |
 | `ImplementationResult` | work item id, base SHA, patch artifact, files, tests, status |
-| `AggregateCandidate` | ordered input patch digests, candidate patch, files, tests |
-| `ValidationResult` | exact command ids, exit status, bounded logs, evidence digest |
-| `ReviewVerdict` | round, reviewed head SHA, approve/request_changes, findings |
-| `FixResult` | round, reviewed head SHA, patch artifact, resolved finding ids |
+| `AggregateCandidate` | exact head and manifest digests, summary, TestReport reference |
+| `TestReport` | phase, exact head/manifest, every required command, exit status, duration, bounded output, overall status |
+| `ReviewVerdict` | reviewed head, structured findings, Manager-computed coverage/load/score/status |
+| `FixResult` | previous/current head, manifest, summary, TestReport reference |
 | `LoopState` | task SHA, current PR head, round, candidate and evidence digests |
-| `AutoFixV2Result` | ready_for_human/needs_human/blocked and complete provenance |
+| `AutoFixV2Result` | ready_for_ci/needs_human/blocked and complete provenance |
 
 Every finding must have a stable id, severity, file, optional line, evidence,
 and a concrete expected correction. The fixer reports which finding ids it
@@ -359,43 +360,53 @@ the complete dirty-file manifest, reads the bytes, and publishes one atomic
 candidate commit. The model neither serializes large base64 payloads nor
 chooses a partial file list, and it never receives the underlying credential.
 
-## Trusted Required-Checks Approval Gate
+## Local Test Evidence And Quantitative Convergence
 
-Each implementer runs focused checks named by its WorkItem. After the aggregator
-or fixer pushes a candidate, trusted repository validation publishes GitHub
-check runs on that exact head. The immutable `PRContext.required_checks` list is
-selected by the caller, not by a model.
+GitHub CI is intentionally outside this DAG. It is a finite repository resource
+and should validate a converged change, not serve as the inner-loop debugger.
+The trusted caller therefore supplies a non-empty bounded `local_tests` list in
+the immutable WorkPlan. Every item has a required 1–1800 second process timeout;
+this is not a model or tool-call budget. The aggregator and every fixer run
+every command inside their disposable container worktree.
 
-- A generic Manager-owned `broker` DAG node calls `validate_head`; no model
-  holds the credential or decides whether the gate ran.
-- `validate_head` binds `expected_head_sha` and the Manager-produced
-  `manifest_sha256`. If the exact required checks already succeeded, it uses
-  them when validation is supplied by trusted outer automation. When immutable
-  `PRContext.validation_workflow` is configured, Manager instead binds the
-  concrete `workflow_dispatch` run for the exact repository, branch, and head.
-  It waits for that whole run, not merely the first successful anchor job.
-- For a configured validation workflow, every applicable job must settle and
-  the workflow conclusion must be `success`; skipped jobs follow GitHub's own
-  workflow semantics. Any failing job, including one not named in
-  `required_checks`, becomes bounded `changes_requested` evidence and one
-  trusted-validation fixer task. The required-check names remain immutable
-  anchors that must exist and succeed inside the bound workflow run.
-- Without a configured workflow, missing or pending required checks remain
-  blocked and terminal failures become the same bounded fixer task.
-- `checks_snapshot` remains bounded reviewer evidence but cannot authorize an
-  approval.
-- After GLM returns `approve`, a second Manager broker node calls
-  `required_checks` with the approved `head_sha`. This independently rejects
-  head drift, a no-longer-successful external check, or a configured validation
-  workflow whose latest exact-head run is not wholly successful.
-- Runtime records only bounded broker receipts, never the credential or
-  provider response body.
+After source publication, the producer writes a JSON TestReport below its own
+`.homerail/test-reports/` directory. Writing after `commit_workspace` keeps the
+report out of the PR. The handoff includes its relative path, SHA-256, and
+status. A reusable WorkflowSpec `required_workspace_files` rule makes Manager:
 
-The Draft PR may temporarily contain a candidate that fails validation; it is a
-WIP delivery surface. Failed checks route directly to a bounded fixer before
-GLM. Missing or pending checks keep the Manager validation node waiting until
-its operational timeout. If no `validation_workflow` is configured, trusted
-outer automation must create the required check runs on the exact head.
+- resolve the path below the producer's sole writable workspace;
+- reject absolute paths, traversal, symlinks, non-files, invalid UTF-8, and
+  oversized content;
+- verify the byte digest and JSON contract;
+- bind exact report fields such as head, manifest, and status to the handoff;
+- copy the accepted bytes into a content-addressed `workspace_evidence` run
+  artifact in the same Manager transaction as the handoff.
+
+The persisted artifact is the review and audit source of truth. Worker
+workspace retention can therefore expire without deleting the evidence used to
+approve the exact head, and the report remains retrievable through the normal
+run-artifact API. It is never added to the Draft PR.
+
+Review quality is also Manager-computed. Each fresh GLM returns structured
+findings, classifying every real defect as actionable. Non-actionable advice is
+allowed only with `preexisting`, `out_of_scope`, or `optional_preference`.
+Before handoff the reviewer calls `assess_review`; Manager verifies that
+`read_diff` covered every current PR path contiguously from offset zero through
+EOF, locates the verified TestReport for the exact head, hashes the findings,
+and calculates:
+
+```text
+defect_load = 16*critical + 8*high + 3*medium + 1*low
+quality_score = max(0, 100 - defect_load)
+clean = defect_load == 0 && diff_coverage == 1.0 && test_report == passed
+```
+
+A single clean result is not convergence. A second GLM dispatch with a fresh
+provider session must independently return clean for the same unchanged head.
+Any fixer mutation resets confirmation. Four exhausted fixer iterations end in
+`needs_human`. Once converged, the caller may start the repository's normal CI;
+CI failure is new evidence for a later run rather than an event polled by this
+completed DAG.
 
 ## Fresh-Context Review And Fix Rounds
 
@@ -412,8 +423,8 @@ workers. `session_scope: dispatch` means:
 - the run still retains all transcripts as audit evidence, but they are not
   model input.
 
-GLM receives only the immutable task, current PR context and diff, current
-validation result, and exact-head repository bytes returned by the read-only
+GLM receives only the immutable task, current PR context and diff, the current
+TestReport reference, and exact-head repository bytes returned by the read-only
 `read_file` broker action. It has no local repository mount, so an uncommitted
 integration or fixer worktree cannot be mistaken for the Draft PR. A new DeepSeek fixer
 receives those inputs plus the current structured findings. Neither receives
@@ -424,7 +435,7 @@ review round, even when it is the same logical review node after recovery or a
 loop iteration. A correction of that dispatch may reuse its already-recorded
 receipts or repeat only the broker actions declared as hard output evidence for
 that port in the same session before handing off. This preserves prerequisite
-reads such as `pull_request_snapshot` and `checks_snapshot` alongside the final
+reads such as `pull_request_snapshot` and `assess_review` alongside the final
 review handoff or `commit_workspace` call; correction still cannot use built-in
 tools, mutate beyond the original capability, or broaden the permitted broker
 actions.
@@ -441,11 +452,15 @@ The Manager-side `github_pr` broker implements these first-version actions:
 | `pull_request_snapshot` | Return bounded immutable PR metadata and the changed-file inventory |
 | `read_diff` | Return one bounded GitHub PR patch chunk for a changed path on the exact current head |
 | `read_file` | Return one bounded UTF-8 file chunk from the exact current head SHA |
+| `assess_review` | Verify full per-session diff coverage and exact-head TestReport, then compute finding digest, defect load, score, and clean status |
 | `checks_snapshot` | Return bounded checks for the current exact head SHA |
 | `required_checks` | Fail unless every immutable required check succeeds on that head |
 | `validate_head` | Optionally dispatch trusted validation and wait for required checks on one exact head |
 | `commit_workspace` | Derive every dirty file from the node's unique writable worktree and publish one commit |
 | `commit_files` | Create bounded blobs/tree/commit and fast-forward the bound head branch |
+
+`checks_snapshot`, `required_checks`, and `validate_head` remain generic broker
+capabilities for other workflows. Auto Fix v2 does not project or call them.
 
 `commit_workspace` and the lower-level compatibility action `commit_files`
 share the GitHub mutation fence. Auto Fix v2 uses only `commit_workspace`,
@@ -510,10 +525,8 @@ the pair and its action-specific input.
 | Caller plan validator | trusted command | fixed command only | none |
 | DeepSeek implementer | isolated worktree | bounded read/write/shell | none |
 | DeepSeek aggregator | integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
-| Exact-head validator | none | Manager runtime only | `validate_head` |
-| GLM reviewer | immutable input only; exact diffs/files via broker | Read/Grep/Glob | `pull_request_snapshot`, `read_diff`, `read_file`, `checks_snapshot` |
+| GLM reviewer | immutable input only; exact diffs/files via broker | Read/Grep/Glob | `pull_request_snapshot`, `read_diff`, `read_file`, `assess_review` |
 | DeepSeek fixer | fresh integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
-| Finalizer | none | Manager runtime only | `required_checks` |
 
 Reviewer mutation is intentionally excluded. If operator-visible comments are
 required later, add only `post_comment`; never grant review approval or merge
@@ -586,8 +599,8 @@ WorkPlan + digest
 worker patch artifacts + digests
 aggregate/fix candidate + digest
 round number
-deterministic validation result
-current ReviewVerdict
+verified local TestReport path + digest + command results
+current ReviewVerdict + Manager quality assessment
 broker action receipts
 ```
 
@@ -599,8 +612,8 @@ On recovery:
 4. continue only when it equals the stored expected head;
 5. otherwise enter `head_drift` and retain all evidence.
 
-Outer CI timeout handling should stop or suspend the logical run explicitly and
-retain all input, actor, handoff, patch, review, validation, and broker records.
+Post-convergence CI is a separate lifecycle. Its timeout must not reopen or
+silently mutate this completed logical run.
 
 ## Observability
 
@@ -611,8 +624,9 @@ The run summary and CLI should expose:
 - number of fan-out children, their effective policy digests, worktree ids,
   status, patch digest, and focused tests;
 - aggregation order and conflicts;
-- candidate round, validation status, reviewer provider session id, finding
-  ids, and fixer id;
+- candidate round, local test report digest/status, reviewer provider session
+  id, diff coverage, weighted defect load, score, finding ids, and fixer id;
+- clean-confirmation streak for the unchanged exact head;
 - every broker call with redacted input and immutable receipt;
 - final outcome and the next human action.
 
@@ -633,9 +647,9 @@ strict v1 template.
 6. Exclude `.github/**`, credentials, dependency upgrades, migrations, release
    automation, and security-sensitive infrastructure from the first pilot.
 7. Run one real Draft-PR pilot with no auto-ready or merge behavior.
-8. Expand only after at least four of five eligible pilots produce a validated
-   Draft PR within the agreed operational time window and no capability boundary is
-   violated.
+8. Expand only after at least four of five eligible pilots produce a locally
+   tested, review-converged Draft PR that later passes repository CI within the
+   agreed operational window and no capability boundary is violated.
 
 The current Auto Fix workflow can be deprecated only after the pilot evidence
 shows that v2 has better completion rate, wall time, recovery, and operator
@@ -645,10 +659,6 @@ clarity.
 
 - Whether run input blobs live in the Manager database or a Manager-owned
   content-addressed file store. The public contract should not depend on this.
-- Whether `session_scope` belongs to `AgentNode`, the reusable runtime policy,
-  or both. The canonical IR must resolve it to one explicit value.
-- Whether validation failures and model review failures share one five-round
-  budget. This proposal says yes to preserve a hard upper bound.
 - Whether reviewer comments should be posted during the pilot. The safer
   default is to keep review evidence inside HomeRail and post only the final
   summary after human inspection.

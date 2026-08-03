@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { DAGDispatcher, DispatchEnvelope } from "../src/orchestration/dag-dispatcher.js";
 import { GraphExecutor } from "../src/orchestration/graph-executor.js";
@@ -15,25 +16,45 @@ import {
   stageDagRunInputArtifact,
 } from "../src/persistence/run-input-artifacts.js";
 import {
+  getRunArtifactBlobPath,
+  listRunArtifacts,
+} from "../src/persistence/run-artifacts.js";
+import {
   _clearActiveRuns,
   createActiveRun,
   getActiveRun,
+  getVerifiedRunWorkspaceEvidence,
   handoffActiveRun,
   recordActiveRunBrokerActionSuccess,
-  requestNodeCorrection,
-  recoverAllActiveRuns,
 } from "../src/runtime/active-runs.js";
 
 const TEMPLATE = path.resolve(import.meta.dirname, "../../assets/orchestrations/auto-fix-v2.yaml.template");
 const MANIFEST_SHA256 = "1".repeat(64);
 
-class ReentrantDispatcher implements DAGDispatcher {
+class RecordingDispatcher implements DAGDispatcher {
   dispatched: DispatchEnvelope[] = [];
 
   dispatch(envelope: DispatchEnvelope) {
     this.dispatched.push(envelope);
     return { status: "dispatched" as const, targetType: "fake" as const, targetId: "fake" };
   }
+}
+
+function git(cwd: string, args: string[]): string {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", shell: false });
+  if (result.status !== 0) throw new Error(String(result.stderr || result.error));
+  return String(result.stdout).trim();
+}
+
+function jsonSha(value: unknown): string {
+  const sort = (entry: unknown): unknown => {
+    if (Array.isArray(entry)) return entry.map(sort);
+    if (!entry || typeof entry !== "object") return entry;
+    return Object.fromEntries(Object.entries(entry as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, sort(nested)]));
+  };
+  return createHash("sha256").update(JSON.stringify(sort(value))).digest("hex");
 }
 
 async function tickUntil(
@@ -49,26 +70,17 @@ async function tickUntil(
   throw new Error(typeof message === "function" ? message() : message);
 }
 
-function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8", shell: false });
-  if (result.status !== 0) throw new Error(String(result.stderr || result.error));
-  return String(result.stdout).trim();
-}
-
-describe("Auto Fix v2 document-first dynamic architecture", () => {
+describe("Auto Fix v2 local-test convergence architecture", () => {
   let home: string;
   let previousHome: string | undefined;
-  let previousFetch: typeof globalThis.fetch;
   let head: string;
 
   beforeEach(() => {
     previousHome = process.env.HOMERAIL_HOME;
-    previousFetch = globalThis.fetch;
     home = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-autofix-v2-"));
     process.env.HOMERAIL_HOME = home;
     closeDb();
     _clearActiveRuns();
-
     createCredential({
       id: "github-autofix",
       credential_type: "api_key",
@@ -85,138 +97,50 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     git(repository, ["add", "README.md"]);
     git(repository, ["commit", "-m", "fixture"]);
     head = git(repository, ["rev-parse", "HEAD"]);
-    globalThis.fetch = vi.fn(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/repos/acme/widget/pulls/172")) {
-        return new Response(JSON.stringify({
-          number: 172,
-          title: "Autofix pilot",
-          body: "",
-          draft: true,
-          state: "open",
-          html_url: "https://github.com/acme/widget/pull/172",
-          head: { sha: head, ref: "autofix/issue-172", repo: { full_name: "acme/widget" } },
-          base: { sha: head, ref: "main", repo: { full_name: "acme/widget" } },
-        }), { status: 200 });
-      }
-      if (url.includes(`/repos/acme/widget/commits/${head}/check-runs`)) {
-        return new Response(JSON.stringify({
-          check_runs: [{
-            id: 1,
-            name: "unit",
-            status: "completed",
-            conclusion: "success",
-            details_url: "https://github.com/acme/widget/actions/runs/1",
-            output: { title: "unit", summary: "passed", text: "" },
-          }],
-        }), { status: 200 });
-      }
-      throw new Error(`Unexpected fake GitHub request: ${url}`);
-    }) as typeof globalThis.fetch;
   });
 
   afterEach(() => {
     _clearActiveRuns();
     closeDb();
-    globalThis.fetch = previousFetch;
     if (previousHome === undefined) delete process.env.HOMERAIL_HOME;
     else process.env.HOMERAIL_HOME = previousHome;
-    for (const inputRoot of [
-      path.join(home, "workspace", "autofix-v2-run", "input"),
-      path.join(home, "relocated", "autofix-v2-run", "input"),
-    ]) {
-      if (fs.existsSync(inputRoot)) fs.chmodSync(inputRoot, 0o700);
-    }
+    const inputRoot = path.join(home, "workspace", "autofix-v2-run", "input");
+    if (fs.existsSync(inputRoot)) fs.chmodSync(inputRoot, 0o700);
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it.each([
-    { finalVerdict: "approve" as const, expectedStatus: "completed" as const },
-    { finalVerdict: "changes_requested" as const, expectedStatus: "cancelled" as const },
-  ])("parses to a compact graph and bounds five fresh review rounds at $expectedStatus", async ({
-    finalVerdict,
-    expectedStatus,
-  }) => {
-    const source = fs.readFileSync(TEMPLATE, "utf8");
-    const parsed = parseWorkflowSource(source);
-    expect(parsed.meta.workflow_id).toBe("auto-fix-v2");
-    expect(parsed.graph.nodes).toHaveLength(14);
-    expect(parsed.graph.edges.length).toBeLessThanOrEqual(50);
-    expect(parsed.meta.agents?.analyzer).toBeUndefined();
-    expect(parsed.meta.agents?.implementer?.system).toContain("npm ci");
-    expect(parsed.meta.agents?.implementer?.system).toMatch(/never npm\s+install/);
-    expect(parsed.meta.agents?.aggregator?.system).toContain(
-      'containing exactly {"head_sha":"<commit result head_sha>"',
-    );
-    expect(parsed.meta.agents?.aggregator?.system).toMatch(
-      /top-level summary does not satisfy the\s+Candidate content contract/,
-    );
-    expect(parsed.meta.agents?.fixer?.system).toMatch(
-      /containing exactly\s+\{"status":"fixed","previous_head_sha":"<snapshot head_sha>"/,
-    );
-    expect(parsed.meta.agents?.fixer?.system).toMatch(
-      /If no safe change can be published[\s\S]*"status":"cannot_fix"/,
-    );
-    expect(validateJsonContract(parsed.meta.contracts?.FixResult, {
-      status: "cannot_fix",
-      previous_head_sha: head,
-      summary: "outside immutable path allowlist",
-      tests: ["focused test passed"],
-    })).toMatchObject({ valid: true });
-    expect(validateJsonContract(parsed.meta.contracts?.FixResult, {
-      status: "fixed",
-      previous_head_sha: head,
-      summary: "missing publish receipt fields",
-      tests: [],
-    })).toMatchObject({ valid: false });
-    for (const agentId of ["aggregator", "reviewer", "fixer"] as const) {
-      expect(parsed.meta.agents?.[agentId]?.system).toMatch(/credential_ref\s+github-autofix/);
-      expect(parsed.meta.agents?.[agentId]?.system).toMatch(/broker name\s+github_pr/);
-      expect(parsed.meta.agents?.[agentId]?.system).not.toMatch(/github_pr\/(?:pull_request_snapshot|commit_files|required_checks)/);
-    }
-    expect(source).not.toMatch(/\bmax_[a-z_]*tool_calls[a-z_]*:/);
-    for (const nodeId of ["implement", "fix"]) {
-      expect(parsed.graph.nodes.find((node) => node.node_id === nodeId)?.gateway_config).toMatchObject({
-        workspace_strategy: "isolated_git_worktree",
-        worker_policy: {
-          builtin_tool_policy: "backend_native",
-          workspace_access: { writable_paths: ["{{fanout_workspace}}"], readonly_paths: ["input"] },
-        },
-        ...(nodeId === "implement" ? { result_git_commit: { commit_mode: "manager" } } : {}),
-      });
-    }
-    expect(parsed.graph.nodes.find((node) => node.node_id === "fix")?.gateway_config)
-      .toMatchObject({
-        result_required_broker_actions: [
-          {
-            credential_ref: "github-autofix",
-            broker: "github_pr",
-            action: "pull_request_snapshot",
-            result_binding: { result_field: "head_sha", content_field: "previous_head_sha" },
-          },
-          {
-            credential_ref: "github-autofix",
-            broker: "github_pr",
-            action: "commit_workspace",
-            when: { field: "status", equals: "fixed" },
-            result_binding: { result_field: "head_sha", content_field: "head_sha" },
-          },
-          {
-            credential_ref: "github-autofix",
-            broker: "github_pr",
-            action: "commit_workspace",
-            when: { field: "status", equals: "fixed" },
-            result_binding: { result_field: "manifest_sha256", content_field: "manifest_sha256" },
-          },
-        ],
-      });
+  function createRun() {
+    const parsed = parseWorkflowSource(fs.readFileSync(TEMPLATE, "utf8"));
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
-
     const task = stageDagRunInputArtifact({
       scope_id: "pilot",
       name: "task.md",
       media_type: "text/markdown",
-      content: "# Issue 172\n\nImplement the durable document-first Auto Fix v2 acceptance criteria.\n",
+      content: "# Real issue\n\nImplement the acceptance criteria.\n",
+    });
+    const planContent = {
+      version: 1,
+      task_document_sha256: task.sha256,
+      tasks: [{
+        id: "runtime",
+        title: "Runtime",
+        description: "Implement runtime",
+        files: ["src/runtime.ts"],
+        acceptance: ["passes"],
+      }],
+      local_tests: [{ id: "focused", command: "npm test -- --run focused", timeout_seconds: 900 }],
+      shared: {
+        repository_path: "repo",
+        task_document: "input/task.md",
+        task_plan: "input/task-plan.json",
+        pr_context: "input/pr-context.json",
+      },
+    };
+    const plan = stageDagRunInputArtifact({
+      scope_id: "pilot",
+      name: "task-plan.json",
+      media_type: "application/json",
+      content: JSON.stringify(planContent),
     });
     const pr = stageDagRunInputArtifact({
       scope_id: "pilot",
@@ -235,163 +159,48 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
         task_document_sha256: task.sha256,
         require_draft: true,
         writable_paths: ["src", "tests"],
-        required_checks: ["unit"],
       }),
-    });
-    const taskPlanContent = {
-      version: 1,
-      task_document_sha256: task.sha256,
-      tasks: [
-        { id: "runtime", title: "Runtime", description: "Implement runtime", files: ["src/runtime.ts"], acceptance: ["passes"] },
-        { id: "tests", title: "Tests", description: "Add tests", files: ["tests/runtime.test.ts"], acceptance: ["passes"] },
-      ],
-      shared: {
-        repository_path: "repo",
-        task_document: "input/task.md",
-        task_plan: "input/task-plan.json",
-        pr_context: "input/pr-context.json",
-      },
-    };
-    const taskPlan = stageDagRunInputArtifact({
-      scope_id: "pilot",
-      name: "task-plan.json",
-      media_type: "application/json",
-      content: JSON.stringify(taskPlanContent),
     });
     const bindings = resolveDagRunInputBindings("pilot", [
       { artifact_id: task.artifact_id, logical_name: "task_document", mount_path: "input/task.md" },
-      { artifact_id: taskPlan.artifact_id, logical_name: "task_plan", mount_path: "input/task-plan.json" },
+      { artifact_id: plan.artifact_id, logical_name: "task_plan", mount_path: "input/task-plan.json" },
       { artifact_id: pr.artifact_id, logical_name: "pr_context", mount_path: "input/pr-context.json" },
     ]);
     createActiveRun("autofix-v2-run", parsed, { initialPrompt: "{}", inputArtifacts: bindings });
-    const dispatcher = new ReentrantDispatcher();
-    const executor = new GraphExecutor(dispatcher);
+    return { parsed, planContent };
+  }
 
-    handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", taskPlanContent);
-    executor.tick("autofix-v2-run");
-    expect(dispatcher.dispatched.filter((entry) => entry.nodeId.startsWith("implement__item_"))).toHaveLength(2);
-    for (const entry of dispatcher.dispatched.filter((candidate) => candidate.nodeId.startsWith("implement__item_"))) {
-      expect(entry.builtinToolPolicy).toBe("backend_native");
-      expect(entry.allowedBuiltinTools).toBeUndefined();
-    }
-    for (let index = 1; index <= 2; index++) {
-      const nodeId = `implement__item_${String(index).padStart(4, "0")}`;
-      const workspacePath = `workers/implement/inv_0001/item_${String(index).padStart(4, "0")}`;
-      const runWorkspace = path.join(home, "workspace", "autofix-v2-run");
-      const worktree = path.join(runWorkspace, workspacePath);
-      const worktreeGitFile = path.join(worktree, ".git");
-      expect(fs.existsSync(worktreeGitFile)).toBe(true);
-      const gitDirPointer = fs.readFileSync(worktreeGitFile, "utf8").trim().replace(/^gitdir:\s*/, "");
-      expect(path.isAbsolute(gitDirPointer)).toBe(false);
-      const adminGitDir = git(worktree, ["rev-parse", "--absolute-git-dir"]);
-      expect(path.isAbsolute(fs.readFileSync(path.join(adminGitDir, "gitdir"), "utf8").trim())).toBe(false);
-      if (index === 1) {
-        const relocatedWorkspace = path.join(home, "relocated", "autofix-v2-run");
-        fs.cpSync(runWorkspace, relocatedWorkspace, { recursive: true });
-        const relocatedWorktree = path.join(relocatedWorkspace, workspacePath);
-        expect(fs.realpathSync(git(relocatedWorktree, ["rev-parse", "--show-toplevel"]))).toBe(fs.realpathSync(relocatedWorktree));
-        expect(fs.realpathSync(git(relocatedWorktree, ["rev-parse", "--git-common-dir"]))).toBe(
-          fs.realpathSync(path.join(relocatedWorkspace, "repo", ".git")),
-        );
-        expect(git(relocatedWorktree, ["status", "--porcelain"])).toBe("");
-      }
-      const child = getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.find((node) => node.node_id === nodeId);
-      expect(child?.extra?.agent_runtime).toMatchObject({
-        builtin_tool_policy: "backend_native",
-        codex_sandbox: "danger-full-access",
-        workspace_access: {
-          writable_paths: [workspacePath],
-          readonly_paths: ["input"],
-          snapshot_exclude_paths: [
-            `workers/implement/inv_0001/item_${String(index === 1 ? 2 : 1).padStart(4, "0")}`,
-          ],
-        },
-        allowed_dag_tools: ["handoff"],
-        credentials: [],
-      });
-      if (index === 1) {
-        expect(() => handoffActiveRun("autofix-v2-run", nodeId, "result", {
-          status: "implemented",
-          task_id: "runtime",
-          commit_sha: "f".repeat(40),
-          workspace_path: workspacePath,
-          summary: "fabricated commit",
-          tests: [],
-        })).toThrow("DAG_FANOUT_GIT_RESULT_INVALID worker produced no changes");
-        expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get(nodeId)).toBe("RUNNING");
-        expect(() => handoffActiveRun("autofix-v2-run", nodeId, "result", {
-          status: "implemented",
-          task_id: "runtime",
-          commit_sha: head,
-          workspace_path: "workers/implement/inv_0001/item_0002",
-          summary: "wrong workspace",
-          tests: [],
-        })).toThrow("DAG_FANOUT_GIT_RESULT_INVALID workspace");
-        expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get(nodeId)).toBe("RUNNING");
-      }
-      fs.writeFileSync(path.join(worktree, `worker-${index}.txt`), `worker ${index}\n`);
-      handoffActiveRun("autofix-v2-run", nodeId, "result", {
-        status: "implemented",
-        task_id: index === 1 ? "runtime" : "tests",
-        workspace_path: workspacePath,
-        summary: "implemented",
-        tests: ["fixture"],
-      });
-      expect(git(worktree, ["rev-parse", "HEAD"])).not.toBe(head);
-      expect(git(worktree, ["status", "--porcelain"])).toBe("");
-      expect(git(worktree, ["log", "-1", "--format=%s"])).toBe(
-        `homerail fanout implement/${nodeId}`,
-      );
-    }
-
-    const implementRuntime = getActiveRun("autofix-v2-run")?.dagRun.graph.nodes
-      .find((node) => node.node_id === "implement")?.extra?.fanout_runtime as {
-        results?: Array<{ content?: { commit_sha?: string } }>;
-      } | undefined;
-    expect(implementRuntime?.results?.map((result) => result.content?.commit_sha)).toEqual([
-      git(path.join(home, "workspace", "autofix-v2-run", "workers/implement/inv_0001/item_0001"), ["rev-parse", "HEAD"]),
-      git(path.join(home, "workspace", "autofix-v2-run", "workers/implement/inv_0001/item_0002"), ["rev-parse", "HEAD"]),
-    ]);
-
-    expect(parsed.graph.nodes.find((node) => node.node_id === "aggregate")?.extra?.agent_runtime).toMatchObject({
-      builtin_tool_policy: "backend_native",
-      codex_sandbox: "danger-full-access",
-    });
-    executor.tick("autofix-v2-run");
-    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("aggregate");
-    expect(dispatcher.dispatched.at(-1)?.builtinToolPolicy).toBe("backend_native");
-    expect(dispatcher.dispatched.at(-1)?.codexSandbox).toBe("danger-full-access");
-    expect(dispatcher.dispatched.at(-1)?.allowedBuiltinTools).toBeUndefined();
-    expect(dispatcher.dispatched.at(-1)?.credentialProjections).toMatchObject([{
-      broker: "github_pr",
-      allowed_actions: ["pull_request_snapshot", "commit_workspace"],
-    }]);
-    const aggregateSession = dispatcher.dispatched.at(-1)?.sessionId ?? "";
-    expect(() => handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
+  function writeReport(workspace: string, phase: "aggregate" | "fix", status: "passed" | "failed") {
+    const relative = `.homerail/test-reports/${phase}.json`;
+    const absolute = path.join(workspace, relative);
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    const report = {
+      version: 1,
+      phase,
       head_sha: head,
       manifest_sha256: MANIFEST_SHA256,
-      summary: "candidate",
-      tests: ["fixture"],
-    })).toThrow(/DAG_HANDOFF_BROKER_REQUIREMENT_MISSING/);
-    expect(requestNodeCorrection(
-      "autofix-v2-run",
-      "aggregate",
-      "candidate handoff omitted broker evidence",
-    ).status).toBe("scheduled");
-    executor.tick("autofix-v2-run");
-    expect(dispatcher.dispatched.at(-1)).toMatchObject({
-      nodeId: "aggregate",
-      sessionId: aggregateSession,
-      credentialProjections: [{
-        credential_ref: "github-autofix",
-        broker: "github_pr",
-        allowed_actions: ["pull_request_snapshot", "commit_workspace"],
+      status,
+      commands: [{
+        id: "focused",
+        command: "npm test -- --run focused",
+        timeout_seconds: 900,
+        status,
+        exit_code: status === "passed" ? 0 : 1,
+        duration_ms: 12,
       }],
-    });
+      summary: status === "passed" ? "focused test passed" : "focused test failed",
+    };
+    const bytes = `${JSON.stringify(report)}\n`;
+    fs.writeFileSync(absolute, bytes);
+    return { path: relative, sha256: createHash("sha256").update(bytes).digest("hex"), status };
+  }
+
+  function recordReviewEvidence(nodeId: string, sessionId: string, decision: Record<string, unknown>) {
+    const quality = decision.quality as Record<string, unknown>;
     recordActiveRunBrokerActionSuccess({
       run_id: "autofix-v2-run",
-      node_id: "aggregate",
-      session_id: aggregateSession,
+      node_id: nodeId,
+      session_id: sessionId,
       credential_ref: "github-autofix",
       broker: "github_pr",
       action: "pull_request_snapshot",
@@ -399,216 +208,215 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     });
     recordActiveRunBrokerActionSuccess({
       run_id: "autofix-v2-run",
-      node_id: "aggregate",
-      session_id: aggregateSession,
+      node_id: nodeId,
+      session_id: sessionId,
       credential_ref: "github-autofix",
       broker: "github_pr",
-      action: "commit_workspace",
-      result: { head_sha: "a".repeat(40), manifest_sha256: MANIFEST_SHA256 },
+      action: "assess_review",
+      result: {
+        findings_sha256: jsonSha(decision.findings),
+        coverage_ratio: quality.coverage_ratio,
+        coverage_complete: quality.coverage_complete,
+        test_report_sha256: quality.test_report_sha256,
+        defect_load: quality.defect_load,
+        score: quality.score,
+        status: quality.status,
+      },
     });
+  }
+
+  function reviewDecision(testReportSha: string, clean: boolean) {
+    const findings = clean ? [] : [{
+      id: "missing-guard",
+      severity: "medium",
+      category: "correctness",
+      actionable: true,
+      evidence: "The changed path lacks the required guard.",
+      recommendation: "Add the guard and its focused test.",
+    }];
+    return {
+      verdict: clean ? "approve" : "changes_requested",
+      head_sha: head,
+      summary: clean ? "No actionable defects remain." : "One actionable defect remains.",
+      findings,
+      feedback: clean ? [] : ["Add the missing guard and focused test."],
+      fix_tasks: clean ? [] : [{ id: "round-fix", feedback: ["Add the missing guard and focused test."] }],
+      quality: {
+        status: clean ? "clean" : "needs_fix",
+        findings_sha256: jsonSha(findings),
+        coverage_ratio: 1,
+        coverage_complete: true,
+        test_report_sha256: testReportSha,
+        defect_load: clean ? 0 : 3,
+        score: clean ? 100 : 97,
+      },
+    };
+  }
+
+  it("compiles without online-CI nodes and declares Manager-verified local reports", () => {
+    const source = fs.readFileSync(TEMPLATE, "utf8");
+    const parsed = parseWorkflowSource(source);
+    expect(parsed.meta.workflow_id).toBe("auto-fix-v2");
+    expect(parsed.meta.agents?.analyzer).toBeUndefined();
+    expect(source).not.toMatch(/action:\s*(?:validate_head|required_checks|checks_snapshot)/);
+    expect(source).not.toMatch(/\bmax_[a-z_]*tool_calls[a-z_]*:/);
+    expect(source).toContain("result_required_workspace_files:");
+    expect(source).toContain("required_workspace_files:");
+    expect(source).toContain("clean_reviews_required: 2");
+    expect(parsed.graph.nodes.find((node) => node.node_id === "aggregate")?.extra?.workflow_spec_v1)
+      .toMatchObject({
+        output_workspace_file_requirements: {
+          candidate: [{ path_field: "test_report.path", sha256_field: "test_report.sha256", contract: "TestReport" }],
+        },
+      });
+    expect(parsed.graph.nodes.find((node) => node.node_id === "fix")?.gateway_config)
+      .toMatchObject({
+        result_required_workspace_files: [{
+          path_field: "test_report.path",
+          sha256_field: "test_report.sha256",
+          contract: "TestReport",
+        }],
+      });
+    expect(parsed.graph.nodes.find((node) => node.node_id === "review_gate")?.gateway_config)
+      .toMatchObject({ max_iterations: 4, field: "values.0.quality.status" });
+    expect(validateJsonContract(parsed.meta.contracts?.TaskPlan, {
+      version: 1,
+      task_document_sha256: "a".repeat(64),
+      tasks: [{ id: "one", title: "One", description: "Do it", files: ["src/a.ts"], acceptance: ["passes"] }],
+      local_tests: [{ id: "test", command: "npm test", timeout_seconds: 900 }],
+      shared: { repository_path: "repo", task_document: "input/task.md", task_plan: "input/task-plan.json", pr_context: "input/pr-context.json" },
+    })).toMatchObject({ valid: true });
+    expect(validateJsonContract(parsed.meta.contracts?.TaskPlan, {
+      version: 1,
+      task_document_sha256: "a".repeat(64),
+      tasks: [{ id: "one", title: "One", description: "Do it", files: ["src/a.ts"], acceptance: ["passes"] }],
+      local_tests: [{ id: "unbounded", command: "npm test" }],
+      shared: { repository_path: "repo", task_document: "input/task.md", task_plan: "input/task-plan.json", pr_context: "input/pr-context.json" },
+    })).toMatchObject({ valid: false });
+  });
+
+  it("requires a valid report, fixes one review, then converges after two fresh clean reviews", async () => {
+    const { planContent } = createRun();
+    const dispatcher = new RecordingDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", planContent);
+    executor.tick("autofix-v2-run");
+
+    const implementer = dispatcher.dispatched.find((entry) => entry.nodeId === "implement__item_0001")!;
+    const workerPath = "workers/implement/inv_0001/item_0001";
+    const workerWorkspace = path.join(home, "workspace", "autofix-v2-run", workerPath);
+    fs.writeFileSync(path.join(workerWorkspace, "worker.txt"), "implemented\n");
+    handoffActiveRun("autofix-v2-run", implementer.nodeId, "result", {
+      status: "implemented",
+      task_id: "runtime",
+      workspace_path: workerPath,
+      summary: "implemented",
+      tests: ["focused"],
+    });
+    await tickUntil(executor, () => dispatcher.dispatched.some((entry) => entry.nodeId === "aggregate"), "aggregate was not dispatched");
+    const aggregate = dispatcher.dispatched.find((entry) => entry.nodeId === "aggregate")!;
+    for (const [action, result] of [
+      ["pull_request_snapshot", { head_sha: head }],
+      ["commit_workspace", { head_sha: head, manifest_sha256: MANIFEST_SHA256 }],
+    ] as const) {
+      recordActiveRunBrokerActionSuccess({
+        run_id: "autofix-v2-run",
+        node_id: "aggregate",
+        session_id: aggregate.sessionId!,
+        credential_ref: "github-autofix",
+        broker: "github_pr",
+        action,
+        result,
+      });
+    }
+    const aggregateReport = writeReport(path.join(home, "workspace", "autofix-v2-run", "repo"), "aggregate", "passed");
     expect(() => handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
       head_sha: head,
       manifest_sha256: MANIFEST_SHA256,
       summary: "candidate",
-      tests: ["fixture"],
-    })).toThrow(/DAG_HANDOFF_BROKER_RESULT_MISMATCH/);
-    recordActiveRunBrokerActionSuccess({
-      run_id: "autofix-v2-run",
-      node_id: "aggregate",
-      session_id: aggregateSession,
-      credential_ref: "github-autofix",
-      broker: "github_pr",
-      action: "commit_workspace",
-      result: { head_sha: head, manifest_sha256: MANIFEST_SHA256 },
-    });
+      test_report: { ...aggregateReport, sha256: "0".repeat(64) },
+    })).toThrow(/DAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT/);
+    const reportPath = path.join(home, "workspace", "autofix-v2-run", "repo", aggregateReport.path);
+    const savedReportPath = `${reportPath}.saved`;
+    fs.renameSync(reportPath, savedReportPath);
+    fs.symlinkSync(savedReportPath, reportPath);
     expect(() => handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
       head_sha: head,
       manifest_sha256: MANIFEST_SHA256,
-    })).toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
-    expect(requestNodeCorrection(
-      "autofix-v2-run",
-      "aggregate",
-      "candidate content omitted summary and tests",
-    ).status).toBe("scheduled");
-    executor.tick("autofix-v2-run");
-    const receiptCorrection = String(dispatcher.dispatched.at(-1)?.inputs.correction?.at(-1));
-    expect(receiptCorrection).toContain("Valid durable broker receipts already exist for this exact node session");
-    expect(receiptCorrection).toContain(`\"head_sha\":\"${head}\"`);
-    expect(receiptCorrection).toContain(`\"manifest_sha256\":\"${MANIFEST_SHA256}\"`);
-    expect(receiptCorrection).toContain("Do not repeat an already successful side-effecting broker action");
+      summary: "candidate",
+      test_report: aggregateReport,
+    })).toThrow(/symbolic link/);
+    fs.unlinkSync(reportPath);
+    fs.renameSync(savedReportPath, reportPath);
     handoffActiveRun("autofix-v2-run", "aggregate", "candidate", {
       head_sha: head,
       manifest_sha256: MANIFEST_SHA256,
       summary: "candidate",
-      tests: ["fixture"],
+      test_report: aggregateReport,
     });
-    await tickUntil(
-      executor,
-      () => dispatcher.dispatched.some((entry) => entry.nodeId === "review_initial"),
-      "initial exact-head validation did not dispatch the reviewer",
-    );
-    const initialReview = dispatcher.dispatched.find((entry) => entry.nodeId === "review_initial")!;
-    expect(initialReview.workspaceAccess).toEqual({
-      writable_paths: [],
-      readonly_paths: ["input"],
-    });
-    expect(initialReview.credentialProjections).toMatchObject([{
-      broker: "github_pr",
-      allowed_actions: ["pull_request_snapshot", "read_diff", "read_file", "checks_snapshot"],
-    }]);
-    const reviewSessions: string[] = [initialReview.sessionId ?? ""];
-    for (const action of ["pull_request_snapshot", "checks_snapshot"]) {
+    const aggregateArtifact = listRunArtifacts("autofix-v2-run")
+      .find((artifact) => artifact.source.type === "workspace_evidence" && artifact.source.node_id === "aggregate");
+    expect(aggregateArtifact).toMatchObject({ status: "ready", sha256: aggregateReport.sha256 });
+    expect(fs.readFileSync(getRunArtifactBlobPath("autofix-v2-run", aggregateArtifact!.name)!, "utf8"))
+      .toBe(fs.readFileSync(reportPath, "utf8"));
+    fs.rmSync(reportPath);
+    expect(getVerifiedRunWorkspaceEvidence("autofix-v2-run", head, "TestReport"))
+      .toMatchObject({ sha256: aggregateReport.sha256, artifact_name: aggregateArtifact!.name });
+
+    await tickUntil(executor, () => dispatcher.dispatched.some((entry) => entry.nodeId === "review_initial"), "initial review was not dispatched");
+    const initial = dispatcher.dispatched.find((entry) => entry.nodeId === "review_initial")!;
+    const requested = reviewDecision(aggregateReport.sha256, false);
+    recordReviewEvidence("review_initial", initial.sessionId!, requested);
+    handoffActiveRun("autofix-v2-run", "review_initial", "reviewed", requested);
+
+    await tickUntil(executor, () => dispatcher.dispatched.some((entry) => entry.nodeId === "fix__item_0001"), "fixer was not dispatched");
+    const fixer = dispatcher.dispatched.find((entry) => entry.nodeId === "fix__item_0001")!;
+    const fixPath = "fixers/fix/inv_0001/item_0001";
+    for (const [action, result] of [
+      ["pull_request_snapshot", { head_sha: head }],
+      ["commit_workspace", { head_sha: head, manifest_sha256: MANIFEST_SHA256 }],
+    ] as const) {
       recordActiveRunBrokerActionSuccess({
         run_id: "autofix-v2-run",
-        node_id: "review_initial",
-        session_id: reviewSessions[0]!,
+        node_id: fixer.nodeId,
+        session_id: fixer.sessionId!,
         credential_ref: "github-autofix",
         broker: "github_pr",
         action,
-        result: { head_sha: head },
+        result,
       });
     }
-    handoffActiveRun("autofix-v2-run", "review_initial", "reviewed", {
-      verdict: "changes_requested",
+    const fixReport = writeReport(path.join(home, "workspace", "autofix-v2-run", fixPath), "fix", "passed");
+    handoffActiveRun("autofix-v2-run", fixer.nodeId, "result", {
+      status: "fixed",
+      previous_head_sha: head,
       head_sha: head,
-      summary: "round 1",
-      feedback: ["fix round 1"],
-      fix_tasks: [{ id: "round-1", feedback: ["fix round 1"] }],
+      manifest_sha256: MANIFEST_SHA256,
+      summary: "fixed",
+      test_report: fixReport,
+    });
+    const fixReportPath = path.join(home, "workspace", "autofix-v2-run", fixPath, fixReport.path);
+    fs.rmSync(fixReportPath);
+    expect(getVerifiedRunWorkspaceEvidence("autofix-v2-run", head, "TestReport"))
+      .toMatchObject({ sha256: fixReport.sha256 });
+
+    await tickUntil(executor, () => dispatcher.dispatched.some((entry) => entry.nodeId === "review_revision"), "revision review was not dispatched");
+    const revision = dispatcher.dispatched.find((entry) => entry.nodeId === "review_revision")!;
+    const clean = reviewDecision(fixReport.sha256, true);
+    recordReviewEvidence("review_revision", revision.sessionId!, clean);
+    handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", clean);
+
+    await tickUntil(executor, () => dispatcher.dispatched.some((entry) => entry.nodeId === "confirm_revision"), "confirmation review was not dispatched");
+    const confirmation = dispatcher.dispatched.find((entry) => entry.nodeId === "confirm_revision")!;
+    recordReviewEvidence("confirm_revision", confirmation.sessionId!, clean);
+    handoffActiveRun("autofix-v2-run", "confirm_revision", "reviewed", clean);
+    await tickUntil(executor, () => getActiveRun("autofix-v2-run")?.status === "completed", () => {
+      const run = getActiveRun("autofix-v2-run");
+      return `run did not converge: status=${run?.status} states=${JSON.stringify(Object.fromEntries(run?.dagRun.nodeStates ?? []))}`;
     });
 
-    for (let fixRound = 1; fixRound <= 4; fixRound++) {
-      const fixerId = fixRound === 1
-        ? "fix__item_0001"
-        : `fix__inv_${String(fixRound).padStart(4, "0")}__item_0001`;
-      await tickUntil(
-        executor,
-        () => dispatcher.dispatched.some((entry) => entry.nodeId === fixerId),
-        () => {
-          const active = getActiveRun("autofix-v2-run");
-          const states = Object.fromEntries(active?.dagRun.nodeStates ?? []);
-          const mailboxes = Object.fromEntries(Array.from(active?.dagRun.mailboxes ?? []).map(
-            ([nodeId, ports]) => [nodeId, Object.fromEntries(ports)],
-          ));
-          return `fixer ${fixerId} was not dispatched; status=${active?.status}; loopSources=${JSON.stringify(Array.from(active?.dagRun.loopSources ?? []))}; states=${JSON.stringify(states)}; mailboxes=${JSON.stringify(mailboxes)}; counters=${JSON.stringify(active?.counters)}`;
-        },
-      );
-      const fixerEnvelope = dispatcher.dispatched.find((entry) => entry.nodeId === fixerId);
-      expect(fixerEnvelope).toBeDefined();
-      expect(fixerEnvelope?.builtinToolPolicy).toBe("backend_native");
-      expect(fixerEnvelope?.codexSandbox).toBe("danger-full-access");
-      expect(fixerEnvelope?.allowedBuiltinTools).toBeUndefined();
-      expect(fixerEnvelope?.credentialProjections).toMatchObject([{
-        broker: "github_pr",
-        allowed_actions: ["pull_request_snapshot", "commit_workspace"],
-      }]);
-      recordActiveRunBrokerActionSuccess({
-        run_id: "autofix-v2-run",
-        node_id: fixerId,
-        session_id: fixerEnvelope?.sessionId ?? "",
-        credential_ref: "github-autofix",
-        broker: "github_pr",
-        action: "pull_request_snapshot",
-        result: { head_sha: head },
-      });
-      recordActiveRunBrokerActionSuccess({
-        run_id: "autofix-v2-run",
-        node_id: fixerId,
-        session_id: fixerEnvelope?.sessionId ?? "",
-        credential_ref: "github-autofix",
-        broker: "github_pr",
-        action: "commit_workspace",
-        result: { head_sha: head, manifest_sha256: MANIFEST_SHA256 },
-      });
-      handoffActiveRun("autofix-v2-run", fixerId, "result", {
-        status: "fixed",
-        previous_head_sha: head,
-        head_sha: head,
-        manifest_sha256: MANIFEST_SHA256,
-        summary: `fixed ${fixRound}`,
-        tests: ["fixture"],
-      });
-      await tickUntil(
-        executor,
-        () => dispatcher.dispatched.filter((entry) => entry.nodeId === "review_revision").length >= fixRound,
-        `revision ${fixRound} did not pass exact-head validation`,
-      );
-      const reviewEnvelope = dispatcher.dispatched.filter((entry) => entry.nodeId === "review_revision").at(-1)!;
-      expect(reviewEnvelope.nodeId).toBe("review_revision");
-      reviewSessions.push(reviewEnvelope.sessionId!);
-      const reviewRound = fixRound + 1;
-      for (const action of ["pull_request_snapshot", "checks_snapshot"]) {
-        recordActiveRunBrokerActionSuccess({
-          run_id: "autofix-v2-run",
-          node_id: "review_revision",
-          session_id: reviewEnvelope.sessionId!,
-          credential_ref: "github-autofix",
-          broker: "github_pr",
-          action,
-          result: { head_sha: head },
-        });
-      }
-      if (reviewRound === 5 && finalVerdict === "approve") {
-        const approval = {
-          verdict: "approve",
-          head_sha: head,
-          summary: "approved",
-          feedback: [],
-          fix_tasks: [],
-        };
-        expect(() => handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", {
-          verdict: "approve",
-          head_sha: head,
-          feedback: [],
-          fix_tasks: [],
-        })).toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
-        expect(requestNodeCorrection(
-          "autofix-v2-run",
-          "review_revision",
-          "approve handoff omitted required summary",
-        ).status).toBe("scheduled");
-        executor.tick("autofix-v2-run");
-        expect(dispatcher.dispatched.at(-1)).toMatchObject({
-          nodeId: "review_revision",
-          sessionId: reviewEnvelope.sessionId,
-        });
-        handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", approval);
-      } else {
-        handoffActiveRun("autofix-v2-run", "review_revision", "reviewed", {
-          verdict: "changes_requested",
-          head_sha: head,
-          summary: `round ${reviewRound}`,
-          feedback: [`fix round ${reviewRound}`],
-          fix_tasks: [{ id: `round-${reviewRound}`, feedback: [`fix round ${reviewRound}`] }],
-        });
-      }
-
-      if (fixRound === 1) {
-        expect(getActiveRun("autofix-v2-run")?.status).toBe("active");
-        expect(Array.from(getActiveRun("autofix-v2-run")?.dagRun.loopSources ?? [])).toEqual(["review_gate"]);
-        expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("review_gate")).toBe("RUNNING");
-        _clearActiveRuns();
-        closeDb();
-        expect(recoverAllActiveRuns().recovered).toContain("autofix-v2-run");
-      }
-    }
-    await tickUntil(
-      executor,
-      () => getActiveRun("autofix-v2-run")?.status === expectedStatus,
-      `five-round terminal state did not become ${expectedStatus}`,
-    );
-
-    expect(new Set(reviewSessions).size).toBe(5);
-    expect(getActiveRun("autofix-v2-run")?.status).toBe(expectedStatus);
-    expect(getActiveRun("autofix-v2-run")?.counters.fanout_invocations).toMatchObject({
-      implement: 1,
-      fix: 4,
-    });
-    expect(getActiveRun("autofix-v2-run")?.counters.edge_traversals).toMatchObject({
-      "revision_decision_join/ready->review_gate/state": 4,
-    });
-    expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("review_gate"))
-      .toBe(expectedStatus === "completed" ? "COMPLETED" : "CANCELLED");
-    expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.some((node) => node.node_id.includes("inv_0005"))).toBe(false);
-    expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes).toHaveLength(20);
+    expect(new Set([initial.sessionId, revision.sessionId, confirmation.sessionId]).size).toBe(3);
+    expect(getActiveRun("autofix-v2-run")?.counters.fanout_invocations).toMatchObject({ implement: 1, fix: 1 });
+    expect(getActiveRun("autofix-v2-run")?.status).toBe("completed");
   });
 });

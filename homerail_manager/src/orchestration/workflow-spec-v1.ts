@@ -46,6 +46,14 @@ export interface CanonicalPort {
     action: string;
     when?: { field: string; equals: unknown };
     result_binding?: { result_field: string; content_field: string };
+    result_digest_binding?: { result_field: string; content_field: string };
+  }>;
+  required_workspace_files?: Array<{
+    path_field: string;
+    sha256_field: string;
+    contract: string;
+    max_bytes?: number;
+    bindings?: Array<{ file_field: string; content_field: string }>;
   }>;
 }
 
@@ -265,6 +273,14 @@ function portEntries(ports: Record<string, {
     action: string;
     when?: { field: string; equals: unknown };
     result_binding?: { result_field: string; content_field: string };
+    result_digest_binding?: { result_field: string; content_field: string };
+  }>;
+  required_workspace_files?: Array<{
+    path_field: string;
+    sha256_field: string;
+    contract: string;
+    max_bytes?: number;
+    bindings?: Array<{ file_field: string; content_field: string }>;
   }>;
 }> | undefined): CanonicalPort[] {
   return Object.entries(ports ?? {})
@@ -278,6 +294,10 @@ function portEntries(ports: Record<string, {
           .sort((left, right) => (
             JSON.stringify(deepSort(left)).localeCompare(JSON.stringify(deepSort(right)))
           )),
+      } : {}),
+      ...(port.required_workspace_files ? {
+        required_workspace_files: [...port.required_workspace_files]
+          .sort((left, right) => JSON.stringify(deepSort(left)).localeCompare(JSON.stringify(deepSort(right)))),
       } : {}),
     }));
 }
@@ -397,16 +417,15 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
     const nodePath = `/spec/nodes/${nodeId}`;
     for (const [portName, port] of Object.entries(node.kind === "terminal" || node.kind === "await_command" ? {} : node.outputs ?? {})) {
       const requirements = port.required_broker_actions ?? [];
-      if (requirements.length === 0) continue;
-      if (node.kind !== "agent") {
+      const workspaceFiles = port.required_workspace_files ?? [];
+      if (requirements.length > 0 && node.kind !== "agent") {
         add(
           `${nodePath}/outputs/${portName}/required_broker_actions`,
           "DAG_SEMANTIC_BROKER_REQUIREMENT_AGENT_ONLY",
           "required broker actions are supported only on agent output ports",
         );
-        continue;
       }
-      for (let index = 0; index < requirements.length; index++) {
+      for (let index = 0; node.kind === "agent" && index < requirements.length; index++) {
         const requirement = requirements[index];
         const declared = (node.credentials ?? []).some((binding) => (
           binding.credential_ref === requirement.credential_ref
@@ -419,6 +438,30 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
             `${nodePath}/outputs/${portName}/required_broker_actions/${index}`,
             "DAG_SEMANTIC_UNDECLARED_BROKER_REQUIREMENT",
             "required broker action must match a manager_broker credential and allowed action declared on the same node",
+          );
+        }
+      }
+      if (workspaceFiles.length > 0 && node.kind !== "agent") {
+        add(
+          `${nodePath}/outputs/${portName}/required_workspace_files`,
+          "DAG_SEMANTIC_WORKSPACE_FILE_REQUIREMENT_AGENT_ONLY",
+          "required workspace files are supported only on agent output ports",
+        );
+      }
+      if (workspaceFiles.length > 0 && node.kind === "agent" && (node.workspace_access?.writable_paths.length ?? 0) !== 1) {
+        add(
+          `${nodePath}/outputs/${portName}/required_workspace_files`,
+          "DAG_SEMANTIC_WORKSPACE_FILE_WRITE_BOUNDARY_REQUIRED",
+          "required workspace files need exactly one writable workspace path on the producing agent",
+        );
+      }
+      for (let index = 0; index < workspaceFiles.length; index++) {
+        const requirement = workspaceFiles[index];
+        if (!contracts[requirement.contract]) {
+          add(
+            `${nodePath}/outputs/${portName}/required_workspace_files/${index}/contract`,
+            "DAG_SEMANTIC_UNKNOWN_CONTRACT",
+            `unknown workspace file contract '${requirement.contract}'`,
           );
         }
       }
@@ -626,6 +669,7 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       }
       const workerPolicy = node.config.worker_policy;
       const resultBrokerRequirements = node.config.result_required_broker_actions ?? [];
+      const resultWorkspaceFiles = node.config.result_required_workspace_files ?? [];
       if (workerPolicy?.builtin_tool_policy !== undefined && workerPolicy.allowed_builtin_tools !== undefined) {
         add(
           `${nodePath}/config/worker_policy/builtin_tool_policy`,
@@ -680,6 +724,23 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
             `${nodePath}/config/result_required_broker_actions/${index}`,
             "DAG_SEMANTIC_UNDECLARED_BROKER_REQUIREMENT",
             "required fanout result broker action must match a manager_broker credential and allowed action declared in worker_policy",
+          );
+        }
+      }
+      if (resultWorkspaceFiles.length > 0 && (workerPolicy?.workspace_access?.writable_paths.length ?? 0) !== 1) {
+        add(
+          `${nodePath}/config/result_required_workspace_files`,
+          "DAG_SEMANTIC_WORKSPACE_FILE_WRITE_BOUNDARY_REQUIRED",
+          "required fanout result workspace files need exactly one worker writable workspace path",
+        );
+      }
+      for (let index = 0; index < resultWorkspaceFiles.length; index++) {
+        const requirement = resultWorkspaceFiles[index];
+        if (!contracts[requirement.contract]) {
+          add(
+            `${nodePath}/config/result_required_workspace_files/${index}/contract`,
+            "DAG_SEMANTIC_UNKNOWN_CONTRACT",
+            `unknown workspace file contract '${requirement.contract}'`,
           );
         }
       }
@@ -1531,6 +1592,9 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
     const outputBrokerRequirements = Object.fromEntries(node.outputs
       .filter((port) => port.required_broker_actions?.length)
       .map((port) => [port.name, port.required_broker_actions!]));
+    const outputWorkspaceFileRequirements = Object.fromEntries(node.outputs
+      .filter((port) => port.required_workspace_files?.length)
+      .map((port) => [port.name, port.required_workspace_files!]));
     return {
       node_id: node.id,
       name: node.id,
@@ -1545,6 +1609,7 @@ export function projectCanonicalWorkflowToParsedDAG(canonical: CanonicalWorkflow
           input_contracts: inputContracts,
           output_contracts: outputContracts,
           output_broker_requirements: outputBrokerRequirements,
+          output_workspace_file_requirements: outputWorkspaceFileRequirements,
         },
         ...(node.kind === "agent" && node.config ? { agent_runtime: node.config } : {}),
         ...(node.kind === "broker" && node.config ? {
@@ -1614,6 +1679,14 @@ function authoringPorts(ports: CanonicalPort[]): Record<string, {
     action: string;
     when?: { field: string; equals: unknown };
     result_binding?: { result_field: string; content_field: string };
+    result_digest_binding?: { result_field: string; content_field: string };
+  }>;
+  required_workspace_files?: Array<{
+    path_field: string;
+    sha256_field: string;
+    contract: string;
+    max_bytes?: number;
+    bindings?: Array<{ file_field: string; content_field: string }>;
   }>;
 }> | undefined {
   if (ports.length === 0) return undefined;
@@ -1621,6 +1694,7 @@ function authoringPorts(ports: CanonicalPort[]): Record<string, {
     ...(port.contract ? { contract: port.contract } : {}),
     ...(port.description ? { description: port.description } : {}),
     ...(port.required_broker_actions ? { required_broker_actions: port.required_broker_actions } : {}),
+    ...(port.required_workspace_files ? { required_workspace_files: port.required_workspace_files } : {}),
   }]));
 }
 

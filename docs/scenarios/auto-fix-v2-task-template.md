@@ -7,9 +7,10 @@ Manager Agent or another trusted client, but must review it before staging.
 The run binds the staged document by SHA-256. Do not edit the staged content in
 place. A task change creates a new document revision and a new run.
 
-PR number, repository, branches, base/head SHAs, credentials, and executable
-validation commands are structured control-plane inputs. They must not be
-copied into this document as authoritative runtime configuration.
+PR number, repository, branches, base/head SHAs, and credentials are structured
+control-plane inputs. Executable local validation commands belong in the
+immutable `task-plan.json`; they must not be copied into this document as
+authoritative runtime configuration.
 
 ---
 
@@ -108,13 +109,17 @@ second in-DAG analyzer to reinterpret it.
 
 ## Validation Requirements
 
-Name the expected trusted validation profile and the evidence it must produce.
-Raw commands in this document are explanatory only; the DAG executes commands
-from the operator-approved scenario policy.
+Name the bounded container checks that should predict whether later repository
+CI will pass. The trusted caller must encode every executable command as a
+`local_tests` item in `task-plan.json`; raw commands here are explanatory only.
+Auto Fix v2 does not dispatch or wait for GitHub CI inside its review/fix loop.
+Every item must include a `timeout_seconds` value from 1 through 1800. This
+bounds the test process only; it is never a model or tool-call budget.
 
-- Validation profile: `<registered profile id>`
+- Local test id: `<stable id used in task-plan.json>`
 - Focused evidence: `<test suite, fixture, or behavior>`
-- Required final evidence: `<build/typecheck/test/scan subset>`
+- Why this bounded set predicts CI: `<coverage rationale>`
+- Deferred post-convergence CI: `<repository workflow/check set run later>`
 
 ## Risks And Edge Cases
 
@@ -129,4 +134,4 @@ from the operator-approved scenario policy.
 ## Human Review Notes
 
 Call out anything the final human reviewer must verify that cannot be proven by
-the trusted validation profile.
+the bounded local tests and two-review convergence gate.

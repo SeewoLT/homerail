@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getHomerailHome } from "../config/env.js";
@@ -97,6 +97,12 @@ import {
   materializeDagRunInputs,
   verifyDagRunInputs,
 } from "../persistence/run-input-artifacts.js";
+import {
+  getRunArtifactBlobPath,
+  listRunArtifacts,
+  publishWorkspaceEvidenceArtifact,
+  type RunArtifactRecord,
+} from "../persistence/run-artifacts.js";
 import {
   createInitialDagRunRound,
   getCurrentDagRunRound,
@@ -1329,6 +1335,18 @@ interface BrokerActionRequirement {
     result_field: string;
     content_field: string;
   };
+  result_digest_binding?: {
+    result_field: string;
+    content_field: string;
+  };
+}
+
+interface WorkspaceFileRequirement {
+  path_field: string;
+  sha256_field: string;
+  contract: string;
+  max_bytes?: number;
+  bindings?: Array<{ file_field: string; content_field: string }>;
 }
 
 interface BrokerActionReceipt {
@@ -1352,6 +1370,16 @@ function _dottedField(value: unknown, field: string): unknown {
     selected = (selected as Record<string, unknown>)[segment];
   }
   return selected;
+}
+
+function _deepSortValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(_deepSortValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, _deepSortValue(entry)]),
+  );
 }
 
 function _boundedBrokerResult(value: unknown): value is string | number | boolean | null {
@@ -1403,6 +1431,17 @@ function _outputBrokerActionRequirements(
         content_field: rawBinding.content_field,
       };
     }
+    let resultDigestBinding: BrokerActionRequirement["result_digest_binding"];
+    if (entry.result_digest_binding !== undefined) {
+      if (!entry.result_digest_binding || typeof entry.result_digest_binding !== "object" || Array.isArray(entry.result_digest_binding)) return [];
+      const rawBinding = entry.result_digest_binding as Record<string, unknown>;
+      if (typeof rawBinding.result_field !== "string" || !BROKER_ACTION_FIELD.test(rawBinding.result_field)
+        || typeof rawBinding.content_field !== "string" || !BROKER_ACTION_FIELD.test(rawBinding.content_field)) return [];
+      resultDigestBinding = {
+        result_field: rawBinding.result_field,
+        content_field: rawBinding.content_field,
+      };
+    }
     if (evaluateConditions && when) {
       const actual = _dottedField(content, when.field);
       if (!isDeepStrictEqual(actual, when.equals)) return [];
@@ -1413,6 +1452,44 @@ function _outputBrokerActionRequirements(
       action: String(entry.action),
       ...(when ? { when } : {}),
       ...(resultBinding ? { result_binding: resultBinding } : {}),
+      ...(resultDigestBinding ? { result_digest_binding: resultDigestBinding } : {}),
+    }];
+  });
+}
+
+function _outputWorkspaceFileRequirements(
+  run: ActiveRun,
+  nodeId: string,
+  port: string,
+): WorkspaceFileRequirement[] {
+  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  const workflowSpec = node?.extra?.workflow_spec_v1;
+  if (!workflowSpec || typeof workflowSpec !== "object" || Array.isArray(workflowSpec)) return [];
+  const rawByPort = (workflowSpec as Record<string, unknown>).output_workspace_file_requirements;
+  if (!rawByPort || typeof rawByPort !== "object" || Array.isArray(rawByPort)) return [];
+  const selected = (rawByPort as Record<string, unknown>)[port];
+  if (!Array.isArray(selected)) return [];
+  return selected.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.path_field !== "string" || !BROKER_ACTION_FIELD.test(entry.path_field)
+      || typeof entry.sha256_field !== "string" || !BROKER_ACTION_FIELD.test(entry.sha256_field)
+      || typeof entry.contract !== "string" || !BROKER_ACTION_NAME.test(entry.contract)) return [];
+    const rawBindings = entry.bindings;
+    if (rawBindings !== undefined && !Array.isArray(rawBindings)) return [];
+    const bindings = (rawBindings as unknown[] | undefined)?.flatMap((binding) => {
+      if (!binding || typeof binding !== "object" || Array.isArray(binding)) return [];
+      const raw = binding as Record<string, unknown>;
+      if (typeof raw.file_field !== "string" || !BROKER_ACTION_FIELD.test(raw.file_field)
+        || typeof raw.content_field !== "string" || !BROKER_ACTION_FIELD.test(raw.content_field)) return [];
+      return [{ file_field: raw.file_field, content_field: raw.content_field }];
+    });
+    return [{
+      path_field: entry.path_field,
+      sha256_field: entry.sha256_field,
+      contract: entry.contract,
+      ...(typeof entry.max_bytes === "number" ? { max_bytes: entry.max_bytes } : {}),
+      ...(bindings?.length ? { bindings } : {}),
     }];
   });
 }
@@ -1475,7 +1552,7 @@ export function recordActiveRunBrokerActionSuccess(input: {
     recorded_at: Date.now(),
     ...(() => {
       const boundResults = Object.fromEntries(requirements.flatMap((requirement) => {
-        const field = requirement.result_binding?.result_field;
+        const field = requirement.result_binding?.result_field ?? requirement.result_digest_binding?.result_field;
         if (!field) return [];
         const value = _dottedField(input.result, field);
         return _boundedBrokerResult(value) ? [[field, value] as const] : [];
@@ -2408,13 +2485,35 @@ export function handoffActiveRun(
   if (effectiveContent !== content) {
     _assertHandoffPreconditions(run, fromNode, port, effectiveContent, true);
   }
+  const workspaceEvidence = _validatedWorkspaceFiles(run, fromNode, port, effectiveContent);
+  const evidenceSessionId = workspaceEvidence.length > 0
+    ? run.nodeSessions.get(fromNode)?.sessionId
+    : undefined;
+  if (workspaceEvidence.length > 0 && !evidenceSessionId) {
+    throw new Error(`DAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT ${fromNode}.${port}: producer has no active session`);
+  }
   const mutableBefore = _snapshotMutableRun(run);
   const before = _snapshotNodeStates(run);
   const readyBefore = new Set(getReadyNodes(run.dagRun));
   let transition!: ReturnType<typeof handoff>;
+  const evidenceArtifacts: RunArtifactRecord[] = [];
   try {
     getDb().transaction(() => {
       run.counters.handoffs++;
+
+      for (const evidence of workspaceEvidence) {
+        evidenceArtifacts.push(publishWorkspaceEvidenceArtifact({
+          run_id: runId,
+          node_id: fromNode,
+          session_id: evidenceSessionId!,
+          port,
+          declared_path: evidence.declared_path,
+          workspace_path: evidence.path,
+          contract: evidence.contract,
+          sha256: evidence.sha256,
+          bytes: evidence.bytes,
+        }));
+      }
 
       for (const edge of run.dagRun.graph.edges) {
         if (edge.from_node !== fromNode || edge.to_node === "" || edge.label === "after_dep") continue;
@@ -2489,6 +2588,16 @@ export function handoffActiveRun(
     throw error;
   }
   _emitNodeStateChanges(run, before);
+  for (const artifact of evidenceArtifacts) {
+    emit("dag:artifact_ready", {
+      runId,
+      artifactId: artifact.artifact_id,
+      name: artifact.name,
+      status: artifact.status,
+      sizeBytes: artifact.size_bytes,
+      sha256: artifact.sha256,
+    });
+  }
   emit("dag:handoff", { runId, fromNode, port });
   if (transition.terminalFailure) {
     emit("dag:terminal_failure_handoff", { runId, fromNode, port });
@@ -2587,6 +2696,8 @@ function _assertHandoffPreconditions(
   if (contractViolation) throw new Error(contractViolation);
   const brokerRequirementViolation = _handoffBrokerRequirementViolation(run, fromNode, port, content);
   if (brokerRequirementViolation) throw new Error(brokerRequirementViolation);
+  const workspaceFileViolation = _handoffWorkspaceFileRequirementViolation(run, fromNode, port, content);
+  if (workspaceFileViolation) throw new Error(workspaceFileViolation);
   if (run.counters.handoffs >= run.limits.max_handoffs) {
     if (abortOnLimit) abortActiveRun(run.runId, `max_handoffs (${run.limits.max_handoffs}) exceeded`, fromNode);
     throw new Error(`max_handoffs (${run.limits.max_handoffs}) exceeded`);
@@ -2602,6 +2713,199 @@ function _assertHandoffPreconditions(
       throw new Error(`edge retry limit (${edgeLimit}) exceeded for ${key}`);
     }
   }
+}
+
+export interface ValidatedWorkspaceFile {
+  path: string;
+  sha256: string;
+  contract: string;
+  value: unknown;
+  artifact_name?: string;
+}
+
+interface ValidatedWorkspaceFileBytes extends ValidatedWorkspaceFile {
+  declared_path: string;
+  bytes: Buffer;
+}
+
+function _singleWritableWorkspace(run: ActiveRun, nodeId: string): { relative: string; absolute: string } {
+  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  const runtime = node?.extra?.agent_runtime;
+  const access = runtime && typeof runtime === "object" && !Array.isArray(runtime)
+    ? (runtime as Record<string, unknown>).workspace_access
+    : undefined;
+  const writable = access && typeof access === "object" && !Array.isArray(access)
+    ? (access as Record<string, unknown>).writable_paths
+    : undefined;
+  if (!Array.isArray(writable) || writable.length !== 1 || typeof writable[0] !== "string") {
+    throw new Error("producer must have exactly one writable workspace path");
+  }
+  const relative = _fanoutSafeRelativePath(writable[0], "workspace");
+  const runRoot = realpathSync(path.resolve(getHomerailHome(), "workspace", ...run.runId.split("/")));
+  const absolute = realpathSync(path.resolve(runRoot, ...relative.split("/")));
+  if (!_pathIsWithin(runRoot, absolute)) throw new Error("producer workspace escaped the run workspace");
+  return { relative, absolute };
+}
+
+function _workspaceFilePath(base: string, raw: unknown): { relative: string; absolute: string } {
+  const relative = _fanoutSafeRelativePath(raw, "evidence.json");
+  let current = base;
+  for (const segment of relative.split("/")) {
+    current = path.join(current, segment);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      throw new Error("workspace evidence path does not exist");
+    }
+    if (stat.isSymbolicLink()) throw new Error("workspace evidence path contains a symbolic link");
+  }
+  let absolute: string;
+  try {
+    absolute = realpathSync(current);
+  } catch {
+    throw new Error("workspace evidence path is unavailable");
+  }
+  if (!_pathIsWithin(base, absolute)) throw new Error("workspace evidence path escaped the producer workspace");
+  if (!lstatSync(absolute).isFile()) throw new Error("workspace evidence is not a regular file");
+  return { relative, absolute };
+}
+
+function _validatedWorkspaceFiles(
+  run: ActiveRun,
+  nodeId: string,
+  port: string,
+  content: unknown,
+): ValidatedWorkspaceFileBytes[] {
+  const requirements = _outputWorkspaceFileRequirements(run, nodeId, port);
+  if (requirements.length === 0) return [];
+  const workspace = _singleWritableWorkspace(run, nodeId);
+  return requirements.map((requirement) => {
+    const declaredPath = _dottedField(content, requirement.path_field);
+    const declaredSha256 = _dottedField(content, requirement.sha256_field);
+    if (typeof declaredPath !== "string" || typeof declaredSha256 !== "string" || !/^[0-9a-f]{64}$/.test(declaredSha256)) {
+      throw new Error(`${requirement.path_field} and ${requirement.sha256_field} must identify a SHA-256-bound file`);
+    }
+    const evidencePath = _workspaceFilePath(workspace.absolute, declaredPath);
+    const bytes = readFileSync(evidencePath.absolute);
+    const maxBytes = Math.max(1, Math.floor(requirement.max_bytes ?? 256 * 1024));
+    if (bytes.byteLength > maxBytes) throw new Error(`workspace evidence exceeds ${maxBytes} bytes`);
+    const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+    if (actualSha256 !== declaredSha256) throw new Error(`${requirement.sha256_field} does not match workspace evidence bytes`);
+    const text = bytes.toString("utf8");
+    if (Buffer.from(text, "utf8").compare(bytes) !== 0 || text.includes("\0")) {
+      throw new Error("workspace evidence must be canonical UTF-8 JSON");
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(text) as unknown;
+    } catch {
+      throw new Error("workspace evidence is not valid JSON");
+    }
+    const schema = run.contracts?.[requirement.contract];
+    if (schema === undefined) throw new Error(`workspace evidence contract '${requirement.contract}' is missing`);
+    const validation = validateJsonContract(schema, value);
+    if (!validation.valid) throw new Error(`workspace evidence contract '${requirement.contract}' failed: ${validation.details}`);
+    for (const binding of requirement.bindings ?? []) {
+      if (!isDeepStrictEqual(_dottedField(value, binding.file_field), _dottedField(content, binding.content_field))) {
+        throw new Error(`workspace evidence ${binding.file_field} must equal handoff ${binding.content_field}`);
+      }
+    }
+    return {
+      declared_path: declaredPath,
+      path: `${workspace.relative}/${evidencePath.relative}`,
+      sha256: actualSha256,
+      contract: requirement.contract,
+      value,
+      bytes,
+    };
+  });
+}
+
+function _handoffWorkspaceFileRequirementViolation(
+  run: ActiveRun,
+  nodeId: string,
+  port: string,
+  content: unknown,
+): string | undefined {
+  try {
+    _validatedWorkspaceFiles(run, nodeId, port, content);
+    return undefined;
+  } catch (error) {
+    return `DAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT ${nodeId}.${port}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+export function getVerifiedRunWorkspaceEvidence(
+  runId: string,
+  headSha: string,
+  contract: string,
+): ValidatedWorkspaceFile | undefined {
+  const run = store.get(runId);
+  if (!run || run.status !== "active") return undefined;
+  const snapshot = loadRunSnapshot(runId);
+  const artifacts = listRunArtifacts(runId);
+  const handoffs = [...(snapshot?.handoffs ?? [])].reverse();
+  for (const handoff of handoffs) {
+    if (_dottedField(handoff.content, "head_sha") !== headSha) continue;
+    const requirements = _outputWorkspaceFileRequirements(run, handoff.fromNode, handoff.port)
+      .filter((requirement) => requirement.contract === contract);
+    for (const requirement of requirements) {
+      const declaredPath = _dottedField(handoff.content, requirement.path_field);
+      const declaredSha256 = _dottedField(handoff.content, requirement.sha256_field);
+      if (typeof declaredPath !== "string" || typeof declaredSha256 !== "string") continue;
+      const artifact = artifacts.find((candidate) => (
+        candidate.status === "ready"
+        && candidate.sha256 === declaredSha256
+        && candidate.source.type === "workspace_evidence"
+        && candidate.source.node_id === handoff.fromNode
+        && candidate.source.port === handoff.port
+        && candidate.source.declared_path === declaredPath
+        && candidate.source.contract === contract
+        && candidate.source.sha256 === declaredSha256
+      ));
+      const blobPath = artifact ? getRunArtifactBlobPath(runId, artifact.name) : undefined;
+      if (!artifact || !blobPath) continue;
+      if (artifact.source.type !== "workspace_evidence") continue;
+      let bytes: Buffer;
+      try {
+        bytes = readFileSync(blobPath);
+      } catch {
+        continue;
+      }
+      if (createHash("sha256").update(bytes).digest("hex") !== declaredSha256) continue;
+      const text = bytes.toString("utf8");
+      if (Buffer.from(text, "utf8").compare(bytes) !== 0 || text.includes("\0")) continue;
+      let value: unknown;
+      try {
+        value = JSON.parse(text) as unknown;
+      } catch {
+        continue;
+      }
+      const schema = run.contracts?.[contract];
+      if (schema === undefined || !validateJsonContract(schema, value).valid) continue;
+      if (!(requirement.bindings ?? []).every((binding) => isDeepStrictEqual(
+        _dottedField(value, binding.file_field),
+        _dottedField(handoff.content, binding.content_field),
+      ))) continue;
+      return {
+        path: artifact.source.workspace_path,
+        sha256: declaredSha256,
+        contract,
+        value,
+        artifact_name: artifact.name,
+      };
+    }
+    // Compatibility for runs accepted before workspace evidence became durable.
+    try {
+      const workspaceEvidence = _validatedWorkspaceFiles(run, handoff.fromNode, handoff.port, handoff.content)
+        .find((entry) => entry.contract === contract);
+      if (workspaceEvidence) return workspaceEvidence;
+    } catch {
+      // A pre-upgrade workspace may already be gone; try older handoffs.
+    }
+  }
+  return undefined;
 }
 
 function _handoffBrokerRequirementViolation(
@@ -2629,16 +2933,22 @@ function _handoffBrokerRequirementViolation(
       return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: ${actionName}`;
     }
     const binding = requirement.result_binding;
-    if (!binding) continue;
+    const digestBinding = requirement.result_digest_binding;
+    if (!binding && !digestBinding) continue;
+    const resultField = binding?.result_field ?? digestBinding!.result_field;
     if (!receipt.bound_results
-      || !Object.prototype.hasOwnProperty.call(receipt.bound_results, binding.result_field)) {
-      return `DAG_HANDOFF_BROKER_RESULT_MISSING ${fromNode}.${port}: ${actionName} did not return ${binding.result_field}`;
+      || !Object.prototype.hasOwnProperty.call(receipt.bound_results, resultField)) {
+      return `DAG_HANDOFF_BROKER_RESULT_MISSING ${fromNode}.${port}: ${actionName} did not return ${resultField}`;
     }
+    const expected = binding
+      ? _dottedField(content, binding.content_field)
+      : createHash("sha256").update(JSON.stringify(_deepSortValue(_dottedField(content, digestBinding!.content_field)))).digest("hex");
     if (!isDeepStrictEqual(
-      receipt.bound_results[binding.result_field],
-      _dottedField(content, binding.content_field),
+      receipt.bound_results[resultField],
+      expected,
     )) {
-      return `DAG_HANDOFF_BROKER_RESULT_MISMATCH ${fromNode}.${port}: ${actionName} ${binding.result_field} must equal ${binding.content_field}`;
+      const contentField = binding?.content_field ?? digestBinding!.content_field;
+      return `DAG_HANDOFF_BROKER_RESULT_MISMATCH ${fromNode}.${port}: ${actionName} ${resultField} must bind ${contentField}`;
     }
   }
   return undefined;
@@ -4665,6 +4975,9 @@ function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutR
             output_contracts: { result: config.result_contract },
             ...(Array.isArray(config.result_required_broker_actions) ? {
               output_broker_requirements: { result: config.result_required_broker_actions },
+            } : {}),
+            ...(Array.isArray(config.result_required_workspace_files) ? {
+              output_workspace_file_requirements: { result: config.result_required_workspace_files },
             } : {}),
           },
         } : {}),

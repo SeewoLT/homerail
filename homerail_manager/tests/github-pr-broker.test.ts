@@ -61,7 +61,7 @@ spec:
       kind: agent
       agent: actor
       allowed_dag_tools: [handoff, credential_broker_call]
-      credentials:${binding("pull_request_snapshot, read_diff, read_file, checks_snapshot, required_checks, validate_head")}
+      credentials:${binding("pull_request_snapshot, read_diff, read_file, assess_review, checks_snapshot, required_checks, validate_head")}
       inputs: { task: {} }
       outputs:
         reviewed:
@@ -142,6 +142,7 @@ describe("bounded GitHub Draft PR credential broker", () => {
     initialHead = INITIAL_HEAD,
     validationWorkflow?: { workflow_id: string; inputs: Record<string, string> },
     workflowSource = workflow(),
+    requiredChecks: string[] | null = ["unit"],
   ): void {
     const taskArtifact = stageDagRunInputArtifact({
       scope_id: runId,
@@ -166,7 +167,7 @@ describe("bounded GitHub Draft PR credential broker", () => {
         task_document_sha256: taskArtifact.sha256,
         require_draft: true,
         writable_paths: writablePaths,
-        required_checks: ["unit"],
+        ...(requiredChecks ? { required_checks: requiredChecks } : {}),
         ...(validationWorkflow ? { validation_workflow: validationWorkflow } : {}),
       }),
     });
@@ -389,6 +390,21 @@ describe("bounded GitHub Draft PR credential broker", () => {
     expect(deniedAction).toMatchObject({ ok: false, error: expect.stringContaining("outside the PR write allowlist") });
   });
 
+  it("allows PR-only runs to omit CI configuration", async () => {
+    createBoundRun("github-no-checks-run", ["src"], INITIAL_HEAD, undefined, workflow(), null);
+    await expect(call("reviewer", "pull_request_snapshot", {}, "github-no-checks-run"))
+      .resolves.toMatchObject({ ok: true, result: { head_sha: INITIAL_HEAD } });
+    await expect(call("reviewer", "validate_head", {
+      expected_head_sha: INITIAL_HEAD,
+      manifest_sha256: "1".repeat(64),
+      summary: "candidate",
+      tests: ["focused"],
+    }, "github-no-checks-run")).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("not configured"),
+    });
+  });
+
   it("reads UTF-8 source bytes from the exact immutable PR head", async () => {
     const result = await call("reviewer", "read_file", {
       expected_head_sha: INITIAL_HEAD,
@@ -540,6 +556,31 @@ describe("bounded GitHub Draft PR credential broker", () => {
       expected_head_sha: INITIAL_HEAD,
       path: "src/not-changed.ts",
     })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("not in the bound pull request") });
+  });
+
+  it("requires every exact-head diff before assessing review quality", async () => {
+    pullFileCount = 2;
+    await expect(call("reviewer", "assess_review", {
+      expected_head_sha: INITIAL_HEAD,
+      findings: [],
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("complete diff coverage (0/2 files)"),
+    });
+
+    for (const pathname of ["src/fix-0.ts", "src/fix-1.ts"]) {
+      await expect(call("reviewer", "read_diff", {
+        expected_head_sha: INITIAL_HEAD,
+        path: pathname,
+      })).resolves.toMatchObject({ ok: true, result: { next_offset: null } });
+    }
+    await expect(call("reviewer", "assess_review", {
+      expected_head_sha: INITIAL_HEAD,
+      findings: [],
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("no Manager-verified TestReport"),
+    });
   });
 
   it("binds workspace commits to the caller node's sole writable path", async () => {

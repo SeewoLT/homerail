@@ -10,6 +10,7 @@ import {
 import {
   getActiveRun,
   getActiveRunBrokerState,
+  getVerifiedRunWorkspaceEvidence,
   setActiveRunBrokerState,
 } from "./active-runs.js";
 import type { CredentialBrokerContext } from "./credential-broker.js";
@@ -69,6 +70,71 @@ const MAX_VALIDATION_LOG_TAIL_BYTES = 64 * 1024;
 const MAX_VALIDATION_LOG_EXCERPT_CHARS = 3_500;
 const VALIDATION_POLL_INTERVAL_MS = 5_000;
 const VALIDATION_TIMEOUT_MS = 45 * 60_000;
+const REVIEW_COVERAGE_STATE_KEY = "github_pr_review_diff_coverage";
+
+interface ReviewDiffCoverageState {
+  version: 1;
+  node_id: string;
+  session_id: string;
+  head_sha: string;
+  paths: Record<string, { next_offset: number | null; complete: boolean }>;
+}
+
+function reviewPathKey(pathname: string): string {
+  return createHash("sha256").update(pathname).digest("hex");
+}
+
+function reviewTransport(context: CredentialBrokerContext): { runId: string; nodeId: string; sessionId: string } {
+  const runId = context.transport?.run_id;
+  const nodeId = context.transport?.node_id;
+  const sessionId = context.transport?.session_id;
+  if (!runId || !nodeId || !sessionId) throw new Error("review evidence requires a run, node, and session identity");
+  return { runId, nodeId, sessionId };
+}
+
+function reviewCoverageState(
+  context: CredentialBrokerContext,
+  headSha: string,
+): ReviewDiffCoverageState {
+  const { runId, nodeId, sessionId } = reviewTransport(context);
+  const raw = getActiveRunBrokerState(runId, REVIEW_COVERAGE_STATE_KEY);
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>;
+    if (record.version === 1 && record.node_id === nodeId && record.session_id === sessionId && record.head_sha === headSha
+      && record.paths && typeof record.paths === "object" && !Array.isArray(record.paths)) {
+      return raw as ReviewDiffCoverageState;
+    }
+  }
+  return { version: 1, node_id: nodeId, session_id: sessionId, head_sha: headSha, paths: {} };
+}
+
+function recordReviewDiffChunk(
+  context: CredentialBrokerContext,
+  headSha: string,
+  pathname: string,
+  offset: number,
+  nextOffset: number | null,
+): void {
+  const { runId } = reviewTransport(context);
+  const state = reviewCoverageState(context, headSha);
+  const key = reviewPathKey(pathname);
+  const previous = state.paths[key];
+  if (offset !== 0 && (!previous || previous.complete || previous.next_offset !== offset)) {
+    throw new Error("read_diff chunks must be consumed contiguously from offset 0");
+  }
+  state.paths[key] = { next_offset: nextOffset, complete: nextOffset === null };
+  setActiveRunBrokerState(runId, REVIEW_COVERAGE_STATE_KEY, state);
+}
+
+function deepSortJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(deepSortJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, deepSortJson(entry)]),
+  );
+}
 
 function base64Url(value: string | Buffer): string {
   return Buffer.from(value).toString("base64url");
@@ -88,6 +154,33 @@ function safeRelativePath(raw: unknown, label: string): string {
     throw new Error(`${label} is not a safe repository path`);
   }
   return segments.join("/");
+}
+
+function immutableLocalTests(runId: string): Array<{ id: string; command: string; timeout_seconds: number }> {
+  let plan: Record<string, unknown>;
+  try {
+    plan = jsonRecord(JSON.parse(fs.readFileSync(dagRunInputPath(runId, "task_plan"), "utf8")), "task_plan");
+  } catch {
+    throw new Error("The run has no valid immutable task_plan input");
+  }
+  if (!Array.isArray(plan.local_tests) || plan.local_tests.length < 1 || plan.local_tests.length > 12) {
+    throw new Error("task_plan local_tests is invalid");
+  }
+  return plan.local_tests.map((value, index) => {
+    const test = jsonRecord(value, `task_plan local_tests[${index}]`);
+    const id = String(test.id ?? "");
+    const command = String(test.command ?? "");
+    const timeoutSeconds = Number(test.timeout_seconds);
+    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id)
+      || !command
+      || command.length > 4_000
+      || !Number.isInteger(timeoutSeconds)
+      || timeoutSeconds < 1
+      || timeoutSeconds > 1_800) {
+      throw new Error(`task_plan local_tests[${index}] is invalid`);
+    }
+    return { id, command, timeout_seconds: timeoutSeconds };
+  });
 }
 
 function parsePullRequestContext(runId: string): GithubPullRequestContext {
@@ -132,10 +225,10 @@ function parsePullRequestContext(runId: string): GithubPullRequestContext {
   const writablePaths = raw.writable_paths.map((entry, index) => (
     safeRelativePath(entry, `pr_context writable_paths[${index}]`)
   ));
-  if (!Array.isArray(raw.required_checks) || raw.required_checks.length < 1 || raw.required_checks.length > 32) {
-    throw new Error("pr_context required_checks must be a non-empty bounded list");
+  if (raw.required_checks !== undefined && (!Array.isArray(raw.required_checks) || raw.required_checks.length > 32)) {
+    throw new Error("pr_context required_checks must be a bounded list when supplied");
   }
-  const requiredChecks = raw.required_checks.map((entry, index) => {
+  const requiredChecks = (raw.required_checks ?? []).map((entry: unknown, index: number) => {
     if (typeof entry !== "string") throw new Error(`pr_context required_checks[${index}] is invalid`);
     const name = entry.trim();
     if (!name || name.length > 256 || /[\u0000-\u001f\u007f]/.test(name)) {
@@ -719,6 +812,7 @@ export async function githubReadDiff(context: CredentialBrokerContext): Promise<
   if (!file) throw new Error("read_diff path is not in the bound pull request");
   const patch = typeof file.patch === "string" ? file.patch : "";
   const chunk = boundedTextChunk(patch, context.input, "read_diff");
+  recordReviewDiffChunk(context, state.current_head_sha, pathname, chunk.offset, chunk.next_offset);
   return {
     head_sha: state.current_head_sha,
     path: pathname,
@@ -736,6 +830,74 @@ export async function githubReadDiff(context: CredentialBrokerContext): Promise<
   };
 }
 
+export async function githubAssessReview(context: CredentialBrokerContext): Promise<unknown> {
+  const { token, binding, state } = await boundPull(context);
+  const expectedHead = String(context.input.expected_head_sha ?? "").toLowerCase();
+  if (!SHA.test(expectedHead) || expectedHead !== state.current_head_sha) {
+    throw new Error("assess_review expected head is stale or invalid");
+  }
+  const findings = context.input.findings;
+  if (!Array.isArray(findings) || findings.length > 30) throw new Error("assess_review findings are invalid");
+  const weights = { critical: 16, high: 8, medium: 3, low: 1 } as const;
+  let defectLoad = 0;
+  for (const [index, value] of findings.entries()) {
+    const finding = jsonRecord(value, `assess_review findings[${index}]`);
+    const severity = String(finding.severity ?? "") as keyof typeof weights;
+    if (!Object.prototype.hasOwnProperty.call(weights, severity) || typeof finding.actionable !== "boolean") {
+      throw new Error(`assess_review findings[${index}] severity/actionable is invalid`);
+    }
+    if (finding.actionable) defectLoad += weights[severity];
+  }
+
+  const files = await githubPullFiles(token, binding);
+  const coverage = reviewCoverageState(context, expectedHead);
+  const coveredFiles = files.filter((file) => coverage.paths[reviewPathKey(String(file.filename ?? ""))]?.complete).length;
+  const totalFiles = files.length;
+  const coverageRatio = totalFiles === 0 ? 1 : coveredFiles / totalFiles;
+  const coverageComplete = coveredFiles === totalFiles;
+  if (!coverageComplete) {
+    throw new Error(`assess_review requires complete diff coverage (${coveredFiles}/${totalFiles} files)`);
+  }
+  const { runId } = reviewTransport(context);
+  const reportEvidence = getVerifiedRunWorkspaceEvidence(runId, expectedHead, "TestReport");
+  if (!reportEvidence) throw new Error("assess_review found no Manager-verified TestReport for the exact head");
+  const report = jsonRecord(reportEvidence.value, "TestReport");
+  const expectedTests = immutableLocalTests(runId);
+  const reportedCommands = Array.isArray(report.commands) ? report.commands : [];
+  const commandResultsMatch = reportedCommands.length === expectedTests.length && reportedCommands.every((value, index) => {
+    const command = jsonRecord(value, `TestReport commands[${index}]`);
+    return command.id === expectedTests[index]?.id
+      && command.command === expectedTests[index]?.command
+      && command.timeout_seconds === expectedTests[index]?.timeout_seconds
+      && command.status === "passed"
+      && command.exit_code === 0
+      && typeof command.duration_ms === "number"
+      && command.duration_ms <= expectedTests[index]!.timeout_seconds * 1_000;
+  });
+  const testsPassed = report.status === "passed"
+    && report.head_sha === expectedHead
+    && commandResultsMatch;
+  if (!testsPassed) throw new Error("assess_review TestReport does not prove every immutable local test passed on the exact head");
+  const findingsSha256 = createHash("sha256")
+    .update(JSON.stringify(deepSortJson(findings)))
+    .digest("hex");
+  const score = Math.max(0, 100 - Math.min(100, defectLoad));
+  const converged = defectLoad === 0 && coverageComplete && testsPassed;
+  return {
+    head_sha: expectedHead,
+    findings_sha256: findingsSha256,
+    coverage_ratio: coverageRatio,
+    coverage_complete: coverageComplete,
+    files_total: totalFiles,
+    files_covered: coveredFiles,
+    test_report_sha256: reportEvidence.sha256,
+    defect_load: defectLoad,
+    score,
+    converged,
+    status: converged ? "clean" : "needs_fix",
+  };
+}
+
 export async function githubChecksSnapshot(context: CredentialBrokerContext): Promise<unknown> {
   const { token, binding, state } = await boundPull(context);
   const checks = await githubCheckRuns(token, binding, state.current_head_sha);
@@ -747,6 +909,7 @@ export async function githubChecksSnapshot(context: CredentialBrokerContext): Pr
 
 export async function githubRequiredChecks(context: CredentialBrokerContext): Promise<unknown> {
   const { token, binding, state } = await boundPull(context);
+  if (binding.required_checks.length === 0) throw new Error("required_checks is not configured for this run");
   const expectedHead = context.input.expected_head_sha === undefined
     ? state.current_head_sha
     : String(context.input.expected_head_sha).toLowerCase();
@@ -941,6 +1104,7 @@ function assertValidationRunActive(context: CredentialBrokerContext): void {
 export async function githubValidateHead(context: CredentialBrokerContext): Promise<unknown> {
   assertValidationRunActive(context);
   const { token, binding, state } = await boundPull(context);
+  if (binding.required_checks.length === 0) throw new Error("validate_head is not configured for this run");
   const expectedHead = String(context.input.expected_head_sha ?? "").toLowerCase();
   if (!SHA.test(expectedHead) || expectedHead !== state.current_head_sha) {
     throw new Error("validate_head expected head is stale or invalid");
