@@ -260,6 +260,11 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     expect(parsed.meta.agents?.analyzer).toBeUndefined();
     expect(source).not.toMatch(/action:\s*(?:validate_head|required_checks|checks_snapshot)/);
     expect(source).not.toMatch(/\bmax_[a-z_]*tool_calls[a-z_]*:/);
+    expect(source).toContain('{"version":1,"phase":"aggregate"');
+    expect(source).toContain('{"version":1,"phase":"fix"');
+    expect(source).toContain('"exit_code":0');
+    expect(source).toContain('"duration_ms":0');
+    expect(source).toContain("Do not add fields such as tests_passed");
     expect(source).toContain("result_required_workspace_files:");
     expect(source).toContain("required_workspace_files:");
     expect(source).toContain("clean_reviews_required: 2");

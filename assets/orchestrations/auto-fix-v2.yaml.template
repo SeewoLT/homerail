@@ -361,6 +361,16 @@ spec:
         .homerail/test-reports/aggregate.json in the same worktree. It must be
         TestReport JSON for the commands already run, bind the returned head_sha
         and manifest_sha256, and set status passed only if every command passed.
+        Use exactly this shape and no additional fields:
+        {"version":1,"phase":"aggregate","head_sha":"<commit result head_sha>",
+        "manifest_sha256":"<commit result manifest_sha256>","status":"passed",
+        "commands":[{"id":"<local_tests id>","command":"<exact command>",
+        "timeout_seconds":1,"status":"passed","exit_code":0,
+        "duration_ms":0,"output_tail":"<bounded observed output>"}],
+        "summary":"<bounded test summary>"}.
+        Copy each command and timeout_seconds from input/task-plan.json, record
+        its observed exit_code and elapsed duration_ms, and include every
+        local_tests entry exactly once. Do not add fields such as tests_passed.
         Compute its SHA-256 from the actual file bytes. Because the report is
         written after commit_workspace, it is evidence and must not enter the
         PR. Then hand off candidate with one content object
@@ -436,7 +446,17 @@ spec:
         path below .github. Only after commit_workspace succeeds, write
         .homerail/test-reports/fix.json in the same worktree with the TestReport
         command results, returned head_sha and manifest_sha256, then hash the
-        actual file. The report must not enter the PR. Hand off
+        actual file. Use exactly this shape and no additional fields:
+        {"version":1,"phase":"fix","head_sha":"<commit result head_sha>",
+        "manifest_sha256":"<commit result manifest_sha256>","status":"passed",
+        "commands":[{"id":"<local_tests id>","command":"<exact command>",
+        "timeout_seconds":1,"status":"passed","exit_code":0,
+        "duration_ms":0,"output_tail":"<bounded observed output>"}],
+        "summary":"<bounded test summary>"}.
+        Copy each command and timeout_seconds from input/task-plan.json, record
+        its observed exit_code and elapsed duration_ms, and include every
+        local_tests entry exactly once. Do not add fields such as tests_passed.
+        The report must not enter the PR. Hand off
         fixed with one content object containing exactly
         {"status":"fixed","previous_head_sha":"<snapshot head_sha>",
         "head_sha":"<commit result head_sha>",

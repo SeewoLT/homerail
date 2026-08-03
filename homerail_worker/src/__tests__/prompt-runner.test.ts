@@ -320,6 +320,51 @@ describe("prompt runner", () => {
     );
   });
 
+  it("permits only evidence-file repair before the corrected handoff", async () => {
+    let observedTools: string[] = [];
+    let observedContext: AgentRunContext | undefined;
+    const sent: string[] = [];
+    const mockAgent: AgentClient = {
+      run(_prompt, tools, context) {
+        observedTools = tools.map((tool) => tool.name);
+        observedContext = context;
+        return (async function* () {
+          await tools.find((tool) => tool.name === "handoff")!.handler({ port: "done", content: "corrected" });
+          yield { type: "done" as const };
+        })();
+      },
+    };
+    registerAgentBackend("test-correction-evidence", () => mockAgent);
+
+    await runPrompt(
+      {
+        task: "## input:context\n{}\n\n## input:correction\nDAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT aggregate.candidate: invalid TestReport",
+        sender: "test",
+        runId: "run-correction-evidence",
+        dagConfig: makeConfigWith({
+          allowed_dag_tools: ["handoff", "credential_broker_call"],
+          workspace_access: { writable_paths: ["repo"], readonly_paths: ["input"] },
+        }),
+      },
+      {
+        wsSend: (message) => sent.push(message),
+        agentBackend: "test-correction-evidence",
+      },
+    );
+
+    expect(observedTools).toEqual(["handoff"]);
+    expect(observedContext?.handoffOnly).toBe(false);
+    expect(observedContext?.workspaceAccess).toEqual({ writable_paths: ["repo"], readonly_paths: ["input"] });
+    expect(observedContext?.systemPrompt).toContain(
+      "inspect and rewrite only the declared .homerail workspace evidence JSON",
+    );
+    expect(observedContext?.systemPrompt).toContain("Do not modify source files, rerun tests, or repeat external side effects");
+    const policySnapshot = sent.map((message) => JSON.parse(message)).find((message) => (
+      message.type === "stream" && message.data?.event === "workspace_policy_snapshot"
+    ));
+    expect(policySnapshot?.data?.writable_paths).toEqual(["repo/.homerail"]);
+  });
+
   it("keeps the Claude Code preset for ordinary DAG work", async () => {
     let observedContext: AgentRunContext | undefined;
     const mockAgent: AgentClient = {

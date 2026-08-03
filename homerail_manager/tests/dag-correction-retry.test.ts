@@ -196,6 +196,73 @@ spec:
     expect(prompt).toContain("never use it merely to report this correction error");
   });
 
+  it("includes the exact workspace evidence contract when report repair is required", () => {
+    const parsed = parseWorkflowSource(`
+api_version: homerail.ai/v1
+kind: Workflow
+metadata: { id: correction-evidence, name: Correction Evidence }
+spec:
+  contracts:
+    Candidate:
+      type: object
+      required: [report]
+      properties:
+        report:
+          type: object
+          required: [path, sha256]
+          properties:
+            path: { type: string }
+            sha256: { type: string }
+    Report:
+      type: object
+      additionalProperties: false
+      required: [version, status]
+      properties:
+        version: { type: integer, const: 1 }
+        status: { type: string, const: passed }
+  agents:
+    worker: { system: Return a candidate. }
+  nodes:
+    start:
+      kind: agent
+      agent: worker
+      workspace_access: { writable_paths: [repo], readonly_paths: [] }
+      outputs:
+        candidate:
+          contract: Candidate
+          required_workspace_files:
+            - path_field: report.path
+              sha256_field: report.sha256
+              contract: Report
+    terminal:
+      kind: terminal
+      outcome: success
+      inputs:
+        result: { contract: Candidate }
+  edges:
+    - { from: start.candidate, to: terminal.result }
+  policies:
+    max_corrections_per_node: 1
+`);
+    parsed.meta.agents!.worker!.agent_type = "deterministic";
+    createActiveRun("run-correction-evidence", parsed);
+    const dispatcher = new FlakyDispatcher({ status: "dispatched", targetType: "fake", targetId: "first" });
+
+    expect(dispatchReadyNodes("run-correction-evidence", dispatcher)).toBe(1);
+    expect(requestNodeCorrection(
+      "run-correction-evidence",
+      "start",
+      "DAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT start.candidate: report is invalid",
+    ).status).toBe("scheduled");
+    expect(dispatchReadyNodes("run-correction-evidence", dispatcher)).toBe(1);
+
+    const prompt = String(dispatcher.calls[1].inputs.correction?.[0]);
+    expect(prompt).toContain("Exact workspace evidence requirements by port");
+    expect(prompt).toContain('"contract":"Report"');
+    expect(prompt).toContain('"version":{"const":1,"type":"integer"}');
+    expect(prompt).toContain("repair only the declared evidence JSON file under .homerail");
+  });
+
   it("restores success descendants skipped by the failed attempt", () => {
     const parsed = parseDAGYaml(correctionWithDownstreamYaml());
     createActiveRun("run-correction-descendants", parsed);
@@ -275,6 +342,8 @@ spec:
     )).not.toThrow();
     expect(getActiveRun("run-auto-handoff-contract")?.status).toBe("failed");
     expect(getActiveRun("run-auto-handoff-contract")?.dagRun.nodeStates.get("start")).toBe("FAILED");
+    expect(getActiveRun("run-auto-handoff-contract")?.counters.abort_reason)
+      .toBe("handoff failed after correction exhaustion: missing handoff");
   });
 
   it("settles pending descendants when a contracted auto-handoff failure leaves no runnable work", () => {

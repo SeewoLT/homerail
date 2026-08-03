@@ -46,6 +46,7 @@ import {
 } from "./worker-skill-context.js";
 import { DAG_ACTOR_SURFACE_PATCH_V1_CAPABILITY } from "./dag-tools/report-surface-state.js";
 import { resolveWorkerRuntimeIdentity } from "./runtime-version.js";
+import { CredentialBrokerRequestRegistry } from "./credential-broker-requests.js";
 
 // ── Env vars ─────────────────────────────────────────────────
 
@@ -102,25 +103,14 @@ let activePrompt:
     })
   | null = null;
 
-const pendingCredentialBrokerCalls = new Map<string, {
-  resolve: (result: DagCredentialBrokerCallResult) => void;
-  timer: ReturnType<typeof setTimeout>;
-}>();
+const pendingCredentialBrokerCalls = new CredentialBrokerRequestRegistry();
 
 function callCredentialBroker(
   request: DagCredentialBrokerCallRequest,
 ): Promise<DagCredentialBrokerCallResult> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      pendingCredentialBrokerCalls.delete(request.request_id);
-      resolve({
-        request_id: request.request_id,
-        ok: false,
-        error: "Credential broker call timed out",
-      });
-    }, 30_000);
-    pendingCredentialBrokerCalls.set(request.request_id, { resolve, timer });
-    client.send(JSON.stringify({ type: "credential_broker_call", data: request }));
+  return pendingCredentialBrokerCalls.call(request, (payload) => {
+    if (!client.isConnected) throw new Error("Manager connection is unavailable");
+    client.send(payload);
   });
 }
 
@@ -150,6 +140,7 @@ client.on("connected", () => {
 });
 
 client.on("disconnected", () => {
+  pendingCredentialBrokerCalls.close("Manager connection disconnected before credential broker completion");
   console.log("[homerail_worker] disconnected, will reconnect...");
 });
 
@@ -448,11 +439,7 @@ client.on("dag_actor_command", (msg) => {
 client.on("credential_broker_result", (msg) => {
   const data = (msg.data ?? msg) as Partial<DagCredentialBrokerCallResult>;
   if (typeof data.request_id !== "string" || typeof data.ok !== "boolean") return;
-  const pending = pendingCredentialBrokerCalls.get(data.request_id);
-  if (!pending) return;
-  clearTimeout(pending.timer);
-  pendingCredentialBrokerCalls.delete(data.request_id);
-  pending.resolve({
+  pendingCredentialBrokerCalls.settle({
     request_id: data.request_id,
     ok: data.ok,
     ...(data.result !== undefined ? { result: data.result } : {}),
@@ -518,11 +505,7 @@ async function shutdown() {
     await Promise.allSettled([...prompt.commandRoutes]);
   }
   client.close();
-  for (const [requestId, pending] of pendingCredentialBrokerCalls) {
-    clearTimeout(pending.timer);
-    pending.resolve({ request_id: requestId, ok: false, error: "Worker shutting down" });
-  }
-  pendingCredentialBrokerCalls.clear();
+  pendingCredentialBrokerCalls.close();
   process.exit(0);
 }
 

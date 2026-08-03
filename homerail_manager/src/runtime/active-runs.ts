@@ -2159,6 +2159,7 @@ function _correctionPrompt(
   successPorts: string[],
   failurePorts: string[],
   outputContracts: Record<string, { contract: string; schema: unknown }>,
+  workspaceFileContracts: Record<string, Array<WorkspaceFileRequirement & { schema: unknown }>>,
   brokerRequirements: BrokerActionRequirement[],
   brokerReceipts: BrokerActionReceipt[],
 ): string {
@@ -2167,6 +2168,12 @@ function _correctionPrompt(
     ? [
         "The handoff tool call shape is {\"port\":\"<declared port>\",\"content\":<value matching that port schema>}. Put contract fields only inside content.",
         `Exact output contracts by port (JSON Schema): ${JSON.stringify(outputContracts)}`,
+      ]
+    : [];
+  const workspaceEvidenceGuidance = Object.keys(workspaceFileContracts).length > 0
+    ? [
+        `Exact workspace evidence requirements by port: ${JSON.stringify(workspaceFileContracts)}`,
+        "If the previous error is a DAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT, inspect and repair only the declared evidence JSON file under .homerail; do not edit source files, rerun completed tests, or repeat external side effects. Recompute the file SHA-256 after the repair.",
       ]
     : [];
   const brokerActions = Array.from(new Set(brokerRequirements.map(
@@ -2196,6 +2203,7 @@ function _correctionPrompt(
     `Preferred success ports: ${successPorts.length > 0 ? successPorts.join(", ") : "none declared"}.`,
     `Failure ports: ${failurePorts.length > 0 ? failurePorts.join(", ") : "none declared"}.`,
     ...contractGuidance,
+    ...workspaceEvidenceGuidance,
     "A contract or transport error from the previous attempt is not a failure of the original task. Retry a preferred success port when the original work is complete.",
     "Use a failure port only when the original task itself cannot complete; never use it merely to report this correction error.",
     "Treat that error as authoritative. Preserve required field names and JSON array/object/number types exactly.",
@@ -2239,6 +2247,13 @@ export function requestNodeCorrection(
       ? [[port, { contract: contract.contract, schema: contract.schema }] as const]
       : [];
   }));
+  const workspaceFileContracts = Object.fromEntries(outputPorts.flatMap((port) => {
+    const requirements = _outputWorkspaceFileRequirements(run, nodeId, port).flatMap((requirement) => {
+      const schema = run.contracts?.[requirement.contract];
+      return schema === undefined ? [] : [{ ...requirement, schema }];
+    });
+    return requirements.length > 0 ? [[port, requirements] as const] : [];
+  }));
   const brokerRequirements = _outputBrokerActionRequirements(run, nodeId);
   const sessionId = run.nodeSessions.get(nodeId)?.sessionId;
   const brokerActionKeys = new Set(brokerRequirements.map(
@@ -2264,6 +2279,7 @@ export function requestNodeCorrection(
       successPorts,
       failurePorts,
       outputContracts,
+      workspaceFileContracts,
       brokerRequirements,
       brokerReceipts,
     ));
@@ -2313,6 +2329,13 @@ export function autoHandoffAfterCorrectionExhausted(
   const run = store.get(runId);
   if (!run || run.status !== "active" || !run.dagRun.nodeStates.has(nodeId)) return undefined;
   const port = _defaultSuccessPort(run, nodeId);
+  if (
+    _outputContract(run, nodeId, port)
+    || _outputBrokerActionRequirements(run, nodeId, port).length > 0
+    || _outputWorkspaceFileRequirements(run, nodeId, port).length > 0
+  ) {
+    return abortActiveRun(runId, `handoff failed after correction exhaustion: ${reason}`, nodeId);
+  }
   let next: ActiveRun | undefined;
   try {
     next = handoffActiveRun(runId, nodeId, port, {
