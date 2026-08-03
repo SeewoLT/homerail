@@ -292,7 +292,9 @@ describe("durable DAG review evidence", () => {
     expect(projection.schema).toBe("review-evidence-projection-v1");
     expect(projection.reviewer).toBe("qwen");
     expect(projection.accepted_findings).toHaveLength(1);
-    expect(fs.statSync(target!).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(target!).mode & 0o777).toBe(0o600);
+    }
   });
 
   it("survives database reopen (recovery-safe persistence)", () => {

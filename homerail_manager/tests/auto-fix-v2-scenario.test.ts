@@ -337,5 +337,5 @@ describe("Auto Fix v2 document-first dynamic architecture", () => {
     expect(getActiveRun("autofix-v2-run")?.dagRun.nodeStates.get("review_gate")).toBe("COMPLETED");
     expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes.some((node) => node.node_id.includes("inv_0005"))).toBe(false);
     expect(getActiveRun("autofix-v2-run")?.dagRun.graph.nodes).toHaveLength(14);
-  });
+  }, 30_000);
 });

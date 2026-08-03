@@ -224,13 +224,19 @@ function installPrepareCommandStub(
   ];
 }
 
-function productionPrepareCommand(): string {
+function productionPrepareCommand(gitShim?: string): string {
   const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
   const command = parsed.graph.nodes.find((node) => node.node_id === "prepare")?.gateway_config?.command;
   if (!Array.isArray(command) || typeof command[2] !== "string") {
     throw new Error("production prepare command is missing");
   }
-  return command[2];
+  if (!gitShim) return command[2];
+  const marker = "spawnSync('git', [...common, ...args], {";
+  if (!command[2].includes(marker)) throw new Error("production prepare git invocation is missing");
+  return command[2].replace(
+    marker,
+    `spawnSync(process.execPath, [${JSON.stringify(gitShim)}, ...common, ...args], {`,
+  );
 }
 
 function prepareCommandInput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -260,8 +266,6 @@ function commandCode(nodeId: string): { code: string; args: string[] } {
 }
 
 function installFakeGit(cwd: string, files: string[]): string {
-  const bin = path.join(cwd, "bin");
-  fs.mkdirSync(bin, { recursive: true });
   const head = "b".repeat(40);
   const patch = files.map((file) => [
     `diff --git a/${file} b/${file}`,
@@ -272,7 +276,7 @@ function installFakeGit(cwd: string, files: string[]): string {
     `+${"b".repeat(1600)}`,
     "",
   ].join("\n")).join("");
-  const fakeGit = path.join(bin, "fake-git.cjs");
+  const fakeGit = path.join(cwd, "fake-git.cjs");
   fs.writeFileSync(fakeGit, [
     "const fs = require('node:fs');",
     "const args = process.argv.slice(2);",
@@ -285,10 +289,7 @@ function installFakeGit(cwd: string, files: string[]): string {
     `else if (has('diff') && has('--shortstat')) process.stdout.write(${JSON.stringify(`${files.length} files changed`)});`,
     `else if (has('diff')) process.stdout.write(${JSON.stringify(patch)});`,
   ].join("\n"));
-  const git = path.join(bin, "git");
-  fs.writeFileSync(git, `#!/usr/bin/env node\nrequire(${JSON.stringify(fakeGit)});\n`);
-  fs.chmodSync(git, 0o755);
-  return bin;
+  return fakeGit;
 }
 
 class ReentrantDispatcher implements DAGDispatcher {
@@ -1262,13 +1263,12 @@ describe("PR Review scenario assets", () => {
     const cwd = path.join(tmpHome, "prepare-50-file-coverage");
     fs.mkdirSync(cwd, { recursive: true });
     const files = Array.from({ length: 50 }, (_, index) => `src/file-${String(index + 1).padStart(2, "0")}.ts`);
-    const bin = installFakeGit(cwd, files);
+    const fakeGit = installFakeGit(cwd, files);
 
-    const preparedResult = spawnSync(process.execPath, ["-e", productionPrepareCommand()], {
+    const preparedResult = spawnSync(process.execPath, ["-e", productionPrepareCommand(fakeGit)], {
       cwd,
       encoding: "utf8",
       input: JSON.stringify(prepareCommandInput()),
-      env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` },
       maxBuffer: 2_000_000,
     });
     if (preparedResult.status !== 0) throw new Error(preparedResult.stderr || preparedResult.stdout);
@@ -1333,13 +1333,12 @@ describe("PR Review scenario assets", () => {
     const cwd = path.join(tmpHome, "prepare-canonical-coverage");
     fs.mkdirSync(cwd, { recursive: true });
     const files = ["src/z.ts", "src/a.ts", "src/m.ts", "src/a.ts", "src/z.ts", "src/a.ts"];
-    const bin = installFakeGit(cwd, files);
+    const fakeGit = installFakeGit(cwd, files);
 
-    const preparedResult = spawnSync(process.execPath, ["-e", productionPrepareCommand()], {
+    const preparedResult = spawnSync(process.execPath, ["-e", productionPrepareCommand(fakeGit)], {
       cwd,
       encoding: "utf8",
       input: JSON.stringify(prepareCommandInput()),
-      env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` },
       maxBuffer: 2_000_000,
     });
     if (preparedResult.status !== 0) throw new Error(preparedResult.stderr || preparedResult.stdout);
@@ -1448,13 +1447,12 @@ describe("PR Review scenario assets", () => {
       const cwd = path.join(tmpHome, "prepare-chunk-grouping");
       fs.mkdirSync(cwd, { recursive: true });
       const files = Array.from({ length: 28 }, (_, index) => `src/file-${String(index + 1).padStart(2, "0")}.ts`);
-      const bin = installFakeGit(cwd, files);
+      const fakeGit = installFakeGit(cwd, files);
 
-      const result = spawnSync(process.execPath, ["-e", productionPrepareCommand()], {
+      const result = spawnSync(process.execPath, ["-e", productionPrepareCommand(fakeGit)], {
         cwd,
         encoding: "utf8",
         input: JSON.stringify(prepareCommandInput()),
-        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` },
         maxBuffer: 2_000_000,
       });
       if (result.status !== 0) throw new Error(result.stderr || result.stdout);

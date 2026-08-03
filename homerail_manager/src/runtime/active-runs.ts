@@ -3955,6 +3955,10 @@ function _pathIsWithin(root: string, target: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function _pathsReferToSameLocation(left: string, right: string): boolean {
+  return path.relative(left, right) === "" && path.relative(right, left) === "";
+}
+
 function _commandGatewayCwd(
   run: ActiveRun,
   configured: string | undefined,
@@ -4633,19 +4637,21 @@ function _assertFanoutGitCommitResult(
   let resolvedTopLevel: string;
   let resolvedCommonDir: string;
   let resolvedGitDir: string;
+  let expectedTopLevel: string;
   let expectedCommonDir: string;
   try {
     resolvedTopLevel = realpathSync(String(topLevel.stdout).trim());
     resolvedCommonDir = realpathSync(String(commonDir.stdout).trim());
     resolvedGitDir = realpathSync(String(gitDir.stdout).trim());
+    expectedTopLevel = realpathSync(workspace);
     expectedCommonDir = realpathSync(path.join(repository, ".git"));
   } catch {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree Git metadata could not be resolved");
   }
   if (
     topLevel.status !== 0 || commonDir.status !== 0 || gitDir.status !== 0
-    || resolvedTopLevel !== realpathSync(workspace)
-    || resolvedCommonDir !== expectedCommonDir
+    || !_pathsReferToSameLocation(resolvedTopLevel, expectedTopLevel)
+    || !_pathsReferToSameLocation(resolvedCommonDir, expectedCommonDir)
     || !_pathIsWithin(path.join(expectedCommonDir, "worktrees"), resolvedGitDir)
   ) {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree Git binding is invalid");
