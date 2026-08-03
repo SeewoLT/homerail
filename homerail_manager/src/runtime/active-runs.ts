@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getHomerailHome } from "../config/env.js";
@@ -4993,6 +4993,21 @@ function _findWorktreeAdminDirectory(worktreesRoot: string, target: string): str
   return undefined;
 }
 
+function _replaceExistingFileContents(target: string, content: string): void {
+  // Git for Windows marks the linked worktree `.git` pointer hidden. Opening a
+  // hidden file with CREATE_ALWAYS (Node's default `writeFileSync(path, ...)`
+  // behaviour) fails with EPERM even after its read-only bit is cleared. Open
+  // the already-validated file in place, then truncate and rewrite it through
+  // the same handle so its Windows attributes are preserved.
+  const fd = openSync(target, "r+");
+  try {
+    ftruncateSync(fd, 0);
+    writeFileSync(fd, content, { encoding: "utf8" });
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): void {
   const worktreeGitFile = path.join(target, ".git");
   const match = /^gitdir:\s*(.+?)\s*$/u.exec(readFileSync(worktreeGitFile, "utf8"));
@@ -5038,12 +5053,12 @@ function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): 
   // are invalid in the container. Relative pointers preserve the binding in
   // both namespaces and if the retained run workspace is moved as a unit.
   // Git for Windows marks linked-worktree pointer files read-only. Clear that
-  // attribute only after validating both ends of the binding; otherwise opening
-  // the already-existing `.git` file for replacement fails with EPERM.
+  // attribute only after validating both ends of the binding. Rewrite the
+  // existing files in place because Windows also marks the `.git` pointer hidden.
   chmodSync(worktreeGitFile, 0o600);
   chmodSync(adminBackPointer, 0o600);
-  writeFileSync(worktreeGitFile, `gitdir: ${_portableGitMetadataPath(target, portableAdminGitDir)}\n`, { mode: 0o600 });
-  writeFileSync(adminBackPointer, `${_portableGitMetadataPath(portableAdminGitDir, worktreeGitFile)}\n`, { mode: 0o600 });
+  _replaceExistingFileContents(worktreeGitFile, `gitdir: ${_portableGitMetadataPath(target, portableAdminGitDir)}\n`);
+  _replaceExistingFileContents(adminBackPointer, `${_portableGitMetadataPath(portableAdminGitDir, worktreeGitFile)}\n`);
 
   const verified = spawnManagerGitSync(target, ["rev-parse", "--is-inside-work-tree"], {
     timeout: 10_000,
