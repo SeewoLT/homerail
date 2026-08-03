@@ -630,7 +630,6 @@ spec:
     investigate:
       kind: agent
       agent: investigator
-      max_builtin_tool_calls: 40
       allowed_builtin_tools: [Read, Grep, Glob]
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [source] }
@@ -653,7 +652,6 @@ spec:
     implement:
       kind: agent
       agent: implementer
-      max_builtin_tool_calls: 60
       allowed_builtin_tools: [Bash, Read, Write, Edit, Grep, Glob]
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [source] }
@@ -823,7 +821,6 @@ spec:
     review_correctness_initial:
       kind: agent
       agent: correctness_reviewer
-      max_builtin_tool_calls: 40
       allowed_builtin_tools: [Read, Grep, Glob]
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [source] }
@@ -833,7 +830,6 @@ spec:
     review_regression_initial:
       kind: agent
       agent: regression_reviewer
-      max_builtin_tool_calls: 40
       allowed_builtin_tools: [Read, Grep, Glob]
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [source] }
@@ -843,7 +839,6 @@ spec:
     review_adversarial_initial:
       kind: agent
       agent: adversarial_reviewer
-      max_builtin_tool_calls: 40
       allowed_builtin_tools: [Read, Grep, Glob]
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [source] }
@@ -899,7 +894,6 @@ spec:
     revise:
       kind: agent
       agent: reviser
-      max_builtin_tool_calls: 60
       allowed_builtin_tools: [Bash, Read, Write, Edit, Grep, Glob]
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [source] }
@@ -1084,7 +1078,6 @@ spec:
     arbitrate:
       kind: agent
       agent: arbiter
-      max_builtin_tool_calls: 40
       allowed_builtin_tools: [Read, Grep, Glob]
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [source] }
@@ -1451,4 +1444,3 @@ spec:
     max_dispatches: 64
     max_handoffs: 80
     max_corrections_per_node: 4
-    max_tool_calls_per_node: 80

@@ -137,6 +137,7 @@ describe("Auto Fix scenario asset", () => {
 
     expect(source).not.toMatch(/\b(?:gh\s+pr|git\s+push|createPullRequest|test_command)\b/i);
     expect(source).not.toMatch(/^\s*credentials:/m);
+    expect(source).not.toMatch(/\bmax_[a-z_]*tool_calls[a-z_]*:/);
     expect(source).not.toContain("writable_paths: [.homerail-runtime]");
     const commands = canonical.nodes.filter((node) => node.kind === "command");
     expect(commands.map((node) => node.id)).toEqual([
@@ -162,11 +163,12 @@ describe("Auto Fix scenario asset", () => {
       expect(node?.config.workspace_access).toMatchObject({ readonly_paths: ["source"] });
       expect(node?.config.workspace_access?.writable_paths).toEqual([]);
       expect(node?.config.allowed_builtin_tools).toEqual(["Glob", "Grep", "Read"]);
-      expect(node?.config.max_builtin_tool_calls).toBe(40);
+      expect(node?.config.max_builtin_tool_calls).toBeUndefined();
     }
-    expect(canonical.nodes.find((node) => node.id === "investigate")?.config.max_builtin_tool_calls).toBe(40);
-    expect(canonical.nodes.find((node) => node.id === "implement")?.config.max_builtin_tool_calls).toBe(60);
-    expect(canonical.nodes.find((node) => node.id === "revise")?.config.max_builtin_tool_calls).toBe(60);
+    expect(canonical.nodes.find((node) => node.id === "investigate")?.config.max_builtin_tool_calls).toBeUndefined();
+    expect(canonical.nodes.find((node) => node.id === "implement")?.config.max_builtin_tool_calls).toBeUndefined();
+    expect(canonical.nodes.find((node) => node.id === "revise")?.config.max_builtin_tool_calls).toBeUndefined();
+    expect(canonical.policies.max_tool_calls_per_node).toBe(0);
     for (const agentId of [
       "correctness_reviewer",
       "regression_reviewer",
