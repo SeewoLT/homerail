@@ -450,6 +450,51 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     });
   });
 
+  it.skipIf(process.platform === "win32")(
+    "keeps fanout worktree metadata valid when the run home uses an alternate filesystem spelling",
+    () => {
+      const aliasedHome = `${home}-alias`;
+      fs.symlinkSync(home, aliasedHome, "dir");
+      try {
+        process.env.HOMERAIL_HOME = aliasedHome;
+        closeDb();
+        _clearActiveRuns();
+
+        const { planContent } = createRun();
+        const dispatcher = new RecordingDispatcher();
+        const executor = new GraphExecutor(dispatcher);
+        handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", planContent);
+        executor.tick("autofix-v2-run");
+
+        const implementer = dispatcher.dispatched.find((entry) => entry.nodeId === "implement__item_0001");
+        const abortReason = getActiveRun("autofix-v2-run")?.counters.abort_reason;
+        expect(implementer, `fanout did not dispatch: ${String(abortReason ?? "unknown reason")}`)
+          .toBeDefined();
+        const workerWorkspace = path.join(
+          aliasedHome,
+          "workspace",
+          "autofix-v2-run",
+          "workers",
+          "implement",
+          "inv_0001",
+          "item_0001",
+        );
+        expect(git(workerWorkspace, ["rev-parse", "--is-inside-work-tree"])).toBe("true");
+        const pointer = fs.readFileSync(path.join(workerWorkspace, ".git"), "utf8")
+          .replace(/^gitdir:\s*/u, "")
+          .trim();
+        const lexicalRunRoot = path.join(aliasedHome, "workspace", "autofix-v2-run");
+        const lexicalAdminPath = path.resolve(workerWorkspace, pointer);
+        expect(path.relative(lexicalRunRoot, lexicalAdminPath)).not.toMatch(/^\.\.(?:[\\/]|$)/u);
+      } finally {
+        _clearActiveRuns();
+        closeDb();
+        process.env.HOMERAIL_HOME = home;
+        fs.unlinkSync(aliasedHome);
+      }
+    },
+  );
+
   it("requires a valid report, runs a second real fixer, then converges after two fresh clean reviews", async () => {
     const { planContent } = createRun();
     const dispatcher = new RecordingDispatcher();

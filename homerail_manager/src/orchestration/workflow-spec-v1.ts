@@ -327,6 +327,31 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       ...(hint ? { hint } : {}),
     }));
   };
+  const validateWorkspacePolicyPaths = (
+    access: { writable_paths: string[]; readonly_paths?: string[] } | undefined,
+    basePath: string,
+  ): void => {
+    if (!access) return;
+    const reservedSegments = new Set([".git", ".homerail-runtime", "node_modules"]);
+    for (const [field, paths] of [
+      ["writable_paths", access.writable_paths],
+      ["readonly_paths", access.readonly_paths ?? []],
+    ] as const) {
+      paths.forEach((declared, index) => {
+        const normalized = declared.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+        const reserved = normalized.split("/").find((segment) => reservedSegments.has(segment));
+        if (!reserved) return;
+        add(
+          `${basePath}/${field}/${index}`,
+          "DAG_SEMANTIC_RESERVED_WORKSPACE_PATH",
+          `workspace policy path '${declared}' enters runtime-owned segment '${reserved}'`,
+          reserved === ".homerail-runtime"
+            ? "Remove this path: HomeRail mounts .homerail-runtime separately for trusted runtime telemetry."
+            : `Declare the project root instead; HomeRail handles '${reserved}' as protected metadata.`,
+        );
+      });
+    }
+  };
 
   const awaitCommandNodeIds = Object.entries(nodes)
     .filter(([, node]) => node.kind === "await_command")
@@ -470,6 +495,7 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
       add(`${nodePath}/agent`, "DAG_SEMANTIC_UNKNOWN_AGENT", `unknown agent '${node.agent}'`);
     }
     if (node.kind === "agent") {
+      validateWorkspacePolicyPaths(node.workspace_access, `${nodePath}/workspace_access`);
       if (
         node.workspace_access?.git_metadata_read_only === true
         && (
@@ -681,6 +707,10 @@ function semanticDiagnostics(context: SourceContext, workflow: WorkflowSpecV1): 
         add(`${nodePath}/config/max_parallelism`, "DAG_SEMANTIC_INVALID_PARALLELISM", "max_parallelism cannot exceed max_items");
       }
       const workerPolicy = node.config.worker_policy;
+      validateWorkspacePolicyPaths(
+        workerPolicy?.workspace_access,
+        `${nodePath}/config/worker_policy/workspace_access`,
+      );
       const resultBrokerRequirements = node.config.result_required_broker_actions ?? [];
       const resultWorkspaceFiles = node.config.result_required_workspace_files ?? [];
       if (

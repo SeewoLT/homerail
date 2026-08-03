@@ -61,6 +61,9 @@ export function snapshotWorkspace(root: string, policy: DagWorkspaceAccess): Wor
       if (!includesPath(writable, rootPath)) gitMetadataRoots.add(`${rootPath}/.git`);
     }
   }
+  for (const rootPath of writable) {
+    gitMetadataRoots.add(rootPath === "." ? ".git" : `${rootPath}/.git`);
+  }
   if (policy.git_metadata_read_only === true) gitMetadataRoots.add(`${writable[0]}/.git`);
   const excluded = (policy.snapshot_exclude_paths ?? []).map(normalizedPolicyPath);
   const files: Record<string, string> = {};

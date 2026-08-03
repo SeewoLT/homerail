@@ -914,6 +914,31 @@ describe("bounded GitHub Draft PR credential broker", () => {
     expect(jobLogRequests).toEqual([]);
   });
 
+  it("does not fetch a different GitHub Actions job named by a mismatched details URL", async () => {
+    const mismatchedCheck = {
+      id: 42,
+      name: "unit",
+      status: "completed",
+      conclusion: "failure",
+      details_url: "https://github.com/acme/widget/actions/runs/99/job/4242",
+      app: { slug: "github-actions" },
+      output: { title: "mismatched failure", summary: "", text: "" },
+    };
+    checkRunsResponses = [[mismatchedCheck], [mismatchedCheck]];
+    jobLogs.set(4242, "must not be returned");
+
+    const failed = await call("reviewer", "validate_head", {
+      expected_head_sha: INITIAL_HEAD,
+      manifest_sha256: "a".repeat(64),
+      summary: "candidate",
+      tests: [],
+    });
+
+    expect(failed).toMatchObject({ ok: true, result: { status: "failed" } });
+    expect(JSON.stringify(failed)).not.toContain("must not be returned");
+    expect(jobLogRequests).toEqual([]);
+  });
+
   it("rejects validation when the expected head no longer matches the bound PR", async () => {
     const stale = await call("reviewer", "validate_head", {
       expected_head_sha: "9".repeat(40),

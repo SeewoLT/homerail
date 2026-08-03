@@ -213,7 +213,7 @@ describe("runtime pattern worker tools", () => {
     }
   });
 
-  it("audits repository Git metadata when the physical overlay was not requested", () => {
+  it("ignores Git metadata directly beneath a declared writable checkout", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-writable-git-"));
     try {
       fs.mkdirSync(path.join(root, "repo", ".git"), { recursive: true });
@@ -222,7 +222,7 @@ describe("runtime pattern worker tools", () => {
       const before = snapshotWorkspace(root, policy);
       fs.writeFileSync(path.join(root, "repo", ".git", "config"), "after");
       expect(verifyWorkspacePolicy(before, snapshotWorkspace(root, policy), policy).changed_paths)
-        .toEqual(["repo/.git/config"]);
+        .toEqual([]);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

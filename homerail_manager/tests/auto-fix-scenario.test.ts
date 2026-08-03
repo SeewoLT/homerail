@@ -55,7 +55,7 @@ describe("Auto Fix scenario asset", () => {
       },
     });
     expect(canonical.nodes.find((node) => node.id === "investigate")?.config.workspace_access).toMatchObject({
-      writable_paths: [".homerail-runtime"],
+      writable_paths: [],
       readonly_paths: ["source"],
     });
     expect(canonical.nodes.find((node) => node.id === "investigate")?.config.allowed_builtin_tools).toEqual([
@@ -84,7 +84,7 @@ describe("Auto Fix scenario asset", () => {
       agent: "arbiter",
     });
     expect(canonical.nodes.find((node) => node.id === "publish")?.config.workspace_access).toMatchObject({
-      writable_paths: [".homerail-runtime"],
+      writable_paths: [],
       readonly_paths: ["source"],
     });
     expect(canonical.nodes.find((node) => node.id === "publish")).toMatchObject({
@@ -137,6 +137,7 @@ describe("Auto Fix scenario asset", () => {
 
     expect(source).not.toMatch(/\b(?:gh\s+pr|git\s+push|createPullRequest|test_command)\b/i);
     expect(source).not.toMatch(/^\s*credentials:/m);
+    expect(source).not.toContain("writable_paths: [.homerail-runtime]");
     const commands = canonical.nodes.filter((node) => node.kind === "command");
     expect(commands.map((node) => node.id)).toEqual([
       "aggregate_reviews",
@@ -159,7 +160,7 @@ describe("Auto Fix scenario asset", () => {
     ]) {
       const node = canonical.nodes.find((candidate) => candidate.id === nodeId);
       expect(node?.config.workspace_access).toMatchObject({ readonly_paths: ["source"] });
-      expect(node?.config.workspace_access?.writable_paths).not.toContain("source");
+      expect(node?.config.workspace_access?.writable_paths).toEqual([]);
       expect(node?.config.allowed_builtin_tools).toEqual(["Glob", "Grep", "Read"]);
       expect(node?.config.max_builtin_tool_calls).toBe(40);
     }

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getHomerailHome } from "../config/env.js";
@@ -4465,7 +4465,25 @@ function _pathIsWithin(root: string, target: string): boolean {
 }
 
 function _pathsReferToSameLocation(left: string, right: string): boolean {
-  return path.relative(left, right) === "" && path.relative(right, left) === "";
+  if (path.relative(left, right) === "" && path.relative(right, left) === "") return true;
+  try {
+    const leftStat = statSync(left, { bigint: true });
+    const rightStat = statSync(right, { bigint: true });
+    return leftStat.ino !== 0n && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+  } catch {
+    return false;
+  }
+}
+
+function _pathIsWithinFilesystemLocation(root: string, target: string): boolean {
+  let cursor = target;
+  for (let depth = 0; depth < 1_024; depth++) {
+    if (_pathsReferToSameLocation(root, cursor)) return true;
+    const parent = path.dirname(cursor);
+    if (parent === cursor) return false;
+    cursor = parent;
+  }
+  return false;
 }
 
 function _commandGatewayCwd(
@@ -4973,14 +4991,33 @@ function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): 
   // the bidirectional linked-worktree binding.
   const commonGitDir = realpathSync.native(path.join(repository, ".git"));
   const worktreesRoot = realpathSync.native(path.join(commonGitDir, "worktrees"));
-  const adminGitDir = realpathSync.native(path.resolve(target, match[1]));
-  if (!_pathIsWithin(worktreesRoot, adminGitDir)) {
+  const referencedAdminGitDir = path.resolve(target, match[1]);
+  const adminGitDir = realpathSync.native(referencedAdminGitDir);
+  if (!_pathIsWithin(worktreesRoot, adminGitDir)
+    && !_pathIsWithinFilesystemLocation(worktreesRoot, adminGitDir)) {
     throw new Error("fanout git worktree metadata escaped the repository");
   }
 
-  const adminBackPointer = path.join(adminGitDir, "gitdir");
+  // Rebuild the relative pointers from HomeRail's run-workspace spelling, not
+  // from Git's host-specific absolute spelling. Git for Windows can write an
+  // 8.3 path into one side of the link even though the Manager opened the run
+  // through its long path. Mixing those spellings in path.relative() embeds a
+  // route out to the runner temp root and is no longer relocatable when the run
+  // workspace is mounted into a Worker.
+  const portableAdminGitDir = path.join(
+    repository,
+    ".git",
+    "worktrees",
+    path.basename(referencedAdminGitDir),
+  );
+  const resolvedPortableAdminGitDir = realpathSync.native(portableAdminGitDir);
+  if (!_pathsReferToSameLocation(resolvedPortableAdminGitDir, adminGitDir)) {
+    throw new Error("fanout git worktree metadata is not bound to the declared repository");
+  }
+
+  const adminBackPointer = path.join(portableAdminGitDir, "gitdir");
   const backPointerValue = readFileSync(adminBackPointer, "utf8").trim();
-  const resolvedBackPointer = realpathSync.native(path.resolve(adminGitDir, backPointerValue));
+  const resolvedBackPointer = realpathSync.native(path.resolve(portableAdminGitDir, backPointerValue));
   const resolvedWorktreeGitFile = realpathSync.native(worktreeGitFile);
   if (!_pathsReferToSameLocation(resolvedBackPointer, resolvedWorktreeGitFile)) {
     throw new Error("fanout git worktree metadata is not bidirectionally bound");
@@ -4990,8 +5027,8 @@ function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): 
   // Workers see the whole run workspace mounted at /workspace, so those paths
   // are invalid in the container. Relative pointers preserve the binding in
   // both namespaces and if the retained run workspace is moved as a unit.
-  writeFileSync(worktreeGitFile, `gitdir: ${_portableGitMetadataPath(target, adminGitDir)}\n`, { mode: 0o600 });
-  writeFileSync(adminBackPointer, `${_portableGitMetadataPath(adminGitDir, worktreeGitFile)}\n`, { mode: 0o600 });
+  writeFileSync(worktreeGitFile, `gitdir: ${_portableGitMetadataPath(target, portableAdminGitDir)}\n`, { mode: 0o600 });
+  writeFileSync(adminBackPointer, `${_portableGitMetadataPath(portableAdminGitDir, worktreeGitFile)}\n`, { mode: 0o600 });
 
   const verified = spawnManagerGitSync(target, ["rev-parse", "--is-inside-work-tree"], {
     timeout: 10_000,

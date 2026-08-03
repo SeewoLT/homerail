@@ -283,6 +283,29 @@ describe("WorkflowSpec v1", () => {
     }));
   });
 
+  it("rejects runtime-owned workspace policy paths during compilation", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.execute.workspace_access = {
+      writable_paths: [".homerail-runtime"],
+      readonly_paths: ["repo/.git"],
+    };
+
+    const result = compileWorkflowSource(YAML.stringify(workflow));
+
+    expect(result.valid).toBe(false);
+    expect(result.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DAG_SEMANTIC_RESERVED_WORKSPACE_PATH",
+        path: "/spec/nodes/execute/workspace_access/writable_paths/0",
+        hint: expect.stringContaining("Remove this path"),
+      }),
+      expect.objectContaining({
+        code: "DAG_SEMANTIC_RESERVED_WORKSPACE_PATH",
+        path: "/spec/nodes/execute/workspace_access/readonly_paths/0",
+      }),
+    ]));
+  });
+
   it("canonicalizes explicit Codex sandbox policy and rejects maximum access for read-only nodes", () => {
     const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
     workflow.spec.nodes.execute.builtin_tool_policy = "backend_native";

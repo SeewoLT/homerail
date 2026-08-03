@@ -145,6 +145,13 @@ root or a protected file changed and restored before the final snapshot;
 OS-level containment remains the responsibility of the selected agent backend
 or container sandbox.
 
+Workspace policy paths cannot enter `.git`, `.homerail-runtime`, or
+`node_modules`. Declare the repository or project root instead. In particular,
+do not add `.homerail-runtime` to `writable_paths`: Node already overlays that
+directory for trusted Worker telemetry even when the model workspace is
+read-only, and the compiler reports the obsolete declaration before a run is
+created.
+
 Agent nodes may declare `allowed_builtin_tools` and `allowed_dag_tools` as exact
 allowlists for backend-provided shell/file tools and HomeRail DAG tools.
 Omitting either field preserves that tool set's default; `[]` disables it.

@@ -1053,6 +1053,10 @@ function githubActionsJobId(
     || !/^\d+$/.test(segments[6] ?? "")
   ) return undefined;
   const jobId = Number(segments[6]);
+  // A GitHub Actions workflow job is represented by the check run with the
+  // same numeric ID (the workflow-jobs API exposes its check_run_url with this
+  // ID). Keep that identity fence so a malformed details_url cannot redirect
+  // diagnostics to a different job in the bound repository.
   return Number.isSafeInteger(jobId) && jobId === check.id ? jobId : undefined;
 }
 
