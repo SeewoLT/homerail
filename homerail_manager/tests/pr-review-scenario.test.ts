@@ -198,7 +198,10 @@ describe("PR Review scenario assets", () => {
       .toEqual([...modelNodes].sort());
     for (const nodeId of modelNodes) {
       expect(nodes.find((node) => node.id === nodeId)).toMatchObject({
-        outputs: expect.arrayContaining([expect.objectContaining({ name: "voted", contract: "VerificationVote" })]),
+        outputs: expect.arrayContaining([
+          expect.objectContaining({ name: "voted", contract: "VerificationVote" }),
+          expect.objectContaining({ name: "failed", contract: "VerificationVote" }),
+        ]),
         config: expect.objectContaining({
           allowed_builtin_tools: ["Glob", "Grep", "LS", "Read"],
           allowed_dag_tools: ["handoff"],
@@ -231,7 +234,7 @@ describe("PR Review scenario assets", () => {
       max_parallelism: 3,
       max_dispatches: 12,
       max_corrections_per_node: 2,
-      max_tool_calls_per_node: 50,
+      max_tool_calls_per_node: 0,
     });
 
     const contracts = parseWorkflowSource(source).meta.contracts ?? {};
@@ -254,6 +257,8 @@ describe("PR Review scenario assets", () => {
       expect(agents[agentId]?.system).toMatch(/copy\s+input\.context\.changed_files exactly/);
       expect(agents[agentId]?.system).toContain("including lockfiles");
       expect(agents[agentId]?.system).toContain("untrusted source");
+      expect(agents[agentId]?.system).toContain("never call it as a probe or test");
+      expect(agents[agentId]?.system).toContain("never use the failed port");
     }
   });
 
@@ -345,6 +350,21 @@ describe("PR Review scenario assets", () => {
       evidence_truncated: true,
       findings: [],
     });
+  });
+
+  it("rejects an unstructured reviewer failure-port probe for correction", () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-failure-port-probe";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    expect(() => handoffActiveRun(runId, "kimi_review", "failed", "probe"))
+      .toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
+    expect(getActiveRun(runId)?.dagRun.handoffedNodes.has("kimi_review")).toBe(false);
   });
 
   it("executes the compact graph with exactly three model calls", async () => {

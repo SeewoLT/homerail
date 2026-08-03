@@ -350,6 +350,9 @@ spec:
         findings is empty or request_changes when findings is non-empty.
         Do not end with prose. Your final action MUST call handoff on voted with:
         {"reviewer":"qwen","status":"complete|failed","vote":"approve|request_changes|abstain","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"runtime|security|tests|frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        The handoff call is terminal: never call it as a probe or test, and
+        never use the failed port. An incomplete review must still submit a
+        structured status=failed, vote=abstain result on voted.
         If input:correction exists, do not re-analyze or call any tool except
         handoff; immediately resubmit the existing review in the exact shape.
 
@@ -377,6 +380,9 @@ spec:
         when no actionable finding remains after your challenge.
         Do not end with prose. Your final action MUST call handoff on voted with:
         {"reviewer":"kimi","status":"complete|failed","vote":"approve|request_changes|abstain","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"runtime|security|tests|frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        The handoff call is terminal: never call it as a probe or test, and
+        never use the failed port. An incomplete review must still submit a
+        structured status=failed, vote=abstain result on voted.
         If input:correction exists, do not re-analyze or call any tool except
         handoff; immediately resubmit the existing review in the exact shape.
 
@@ -403,6 +409,9 @@ spec:
         empty, and approve only when there are no actionable findings.
         Do not end with prose. Your final action MUST call handoff on voted with:
         {"reviewer":"glm","status":"complete|failed","vote":"approve|request_changes|abstain","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"runtime|security|tests|frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        The handoff call is terminal: never call it as a probe or test, and
+        never use the failed port. An incomplete review must still submit a
+        structured status=failed, vote=abstain result on voted.
         If input:correction exists, do not re-analyze or call any tool except
         handoff; immediately resubmit the existing review in the exact shape.
 
@@ -770,7 +779,7 @@ spec:
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
-      outputs: { voted: { contract: VerificationVote }, failed: {} }
+      outputs: { voted: { contract: VerificationVote }, failed: { contract: VerificationVote } }
 
     kimi_review:
       kind: agent
@@ -779,7 +788,7 @@ spec:
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
-      outputs: { voted: { contract: VerificationVote }, failed: {} }
+      outputs: { voted: { contract: VerificationVote }, failed: { contract: VerificationVote } }
 
     glm_review:
       kind: agent
@@ -788,7 +797,7 @@ spec:
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
-      outputs: { voted: { contract: VerificationVote }, failed: {} }
+      outputs: { voted: { contract: VerificationVote }, failed: { contract: VerificationVote } }
 
     decide:
       kind: command
@@ -889,4 +898,3 @@ spec:
     max_dispatches: 12
     max_handoffs: 24
     max_corrections_per_node: 2
-    max_tool_calls_per_node: 50

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getHomerailHome } from "../config/env.js";
@@ -5037,6 +5037,11 @@ function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): 
   // Workers see the whole run workspace mounted at /workspace, so those paths
   // are invalid in the container. Relative pointers preserve the binding in
   // both namespaces and if the retained run workspace is moved as a unit.
+  // Git for Windows marks linked-worktree pointer files read-only. Clear that
+  // attribute only after validating both ends of the binding; otherwise opening
+  // the already-existing `.git` file for replacement fails with EPERM.
+  chmodSync(worktreeGitFile, 0o600);
+  chmodSync(adminBackPointer, 0o600);
   writeFileSync(worktreeGitFile, `gitdir: ${_portableGitMetadataPath(target, portableAdminGitDir)}\n`, { mode: 0o600 });
   writeFileSync(adminBackPointer, `${_portableGitMetadataPath(portableAdminGitDir, worktreeGitFile)}\n`, { mode: 0o600 });
 
