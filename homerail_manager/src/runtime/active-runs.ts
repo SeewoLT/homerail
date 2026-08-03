@@ -5009,9 +5009,12 @@ function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): 
 
   const adminBackPointer = path.join(portableAdminGitDir, "gitdir");
   const backPointerValue = readFileSync(adminBackPointer, "utf8").trim();
-  const resolvedBackPointer = realpathSync.native(path.resolve(portableAdminGitDir, backPointerValue));
-  const resolvedWorktreeGitFile = realpathSync.native(worktreeGitFile);
-  if (!_pathsReferToSameLocation(resolvedBackPointer, resolvedWorktreeGitFile)) {
+  const backPointer = path.resolve(portableAdminGitDir, backPointerValue);
+  // On Windows, realpathSync.native() can return EPERM when the target is the
+  // linked worktree's ordinary `.git` pointer file. Compare the paths directly
+  // and fall back to their stat identity instead; this still requires both
+  // sides of the Git link to reference the exact same filesystem object.
+  if (!_pathsReferToSameLocation(backPointer, worktreeGitFile)) {
     throw new Error("fanout git worktree metadata is not bidirectionally bound");
   }
 
