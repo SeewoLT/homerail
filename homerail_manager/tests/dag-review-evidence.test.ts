@@ -28,7 +28,7 @@ import {
   type ReviewEvidenceFence,
   type ReviewEvidenceIdentity,
 } from "../src/persistence/dag-review-evidence.js";
-import { reviewFindingDedupKey } from "homerail-protocol";
+import { REVIEW_FINDING_FIELD_LIMITS, reviewFindingDedupKey } from "homerail-protocol";
 
 function identity(overrides: Partial<ReviewEvidenceIdentity> = {}): ReviewEvidenceIdentity {
   return {
@@ -269,7 +269,9 @@ describe("durable DAG review evidence", () => {
       finding: finding({ evidence: "x".repeat(20000) }),
     });
     expect(bounded.status).toBe("inserted");
-    expect(loaded.findings[0]?.evidence.length ?? 0).toBeLessThanOrEqual(4000);
+    const reloaded = loadReviewEvidence("run-1", "qwen");
+    expect(reloaded.findings[0]?.evidence.length ?? 0)
+      .toBeLessThanOrEqual(REVIEW_FINDING_FIELD_LIMITS.evidence);
     expect(() => recordReviewFinding({
       identity: identity(),
       finding: finding({ title: "y".repeat(301) }),

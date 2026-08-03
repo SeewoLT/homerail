@@ -1049,9 +1049,10 @@ spec:
               const failure=last(input,'failure');
               if(!trusted||typeof trusted!=='object'||!Array.isArray(trusted.changed_files)||!trusted.coverage||typeof trusted.coverage!=='object')throw new Error('trusted review context is missing');
               const changed=trusted.changed_files;
+              const canonicalCoverageCount=(files)=>{const unique=[];const seen=new Set();for(const file of files){if(typeof file!=='string')continue;const normalized=file.trim();if(!normalized||seen.has(normalized))continue;seen.add(normalized);unique.push(normalized)}return unique.length};
               const candidate=success&&typeof success==='object'?success:(failure&&typeof failure==='object'?failure:null);
               const attestation=candidate&&typeof candidate==='object'&&candidate.coverage&&typeof candidate.coverage==='object'?candidate.coverage:null;
-              const coverageValid=Boolean(attestation&&typeof attestation.digest==='string'&&attestation.digest===trusted.coverage.digest&&attestation.count===trusted.coverage.count&&trusted.coverage.count===changed.length);
+              const coverageValid=Boolean(attestation&&typeof attestation.digest==='string'&&attestation.digest===trusted.coverage.digest&&attestation.count===trusted.coverage.count&&trusted.coverage.count===canonicalCoverageCount(changed));
               const evidenceValid=!evidence||(typeof evidence==='object'&&(!evidence.reviewer||evidence.reviewer===reviewerNode));
               const attempts=(evidenceValid&&evidence&&Array.isArray(evidence.attempt_diagnostics))?evidence.attempt_diagnostics.filter(attempt=>attempt&&typeof attempt==='object'&&Number.isInteger(attempt.attempt)&&attempt.attempt>=1):[];
               const accepted=(evidenceValid&&evidence&&Array.isArray(evidence.accepted_findings))?evidence.accepted_findings.filter(validFinding):[];
@@ -1112,9 +1113,10 @@ spec:
               const failure=last(input,'failure');
               if(!trusted||typeof trusted!=='object'||!Array.isArray(trusted.changed_files)||!trusted.coverage||typeof trusted.coverage!=='object')throw new Error('trusted review context is missing');
               const changed=trusted.changed_files;
+              const canonicalCoverageCount=(files)=>{const unique=[];const seen=new Set();for(const file of files){if(typeof file!=='string')continue;const normalized=file.trim();if(!normalized||seen.has(normalized))continue;seen.add(normalized);unique.push(normalized)}return unique.length};
               const candidate=success&&typeof success==='object'?success:(failure&&typeof failure==='object'?failure:null);
               const attestation=candidate&&typeof candidate==='object'&&candidate.coverage&&typeof candidate.coverage==='object'?candidate.coverage:null;
-              const coverageValid=Boolean(attestation&&typeof attestation.digest==='string'&&attestation.digest===trusted.coverage.digest&&attestation.count===trusted.coverage.count&&trusted.coverage.count===changed.length);
+              const coverageValid=Boolean(attestation&&typeof attestation.digest==='string'&&attestation.digest===trusted.coverage.digest&&attestation.count===trusted.coverage.count&&trusted.coverage.count===canonicalCoverageCount(changed));
               const evidenceValid=!evidence||(typeof evidence==='object'&&(!evidence.reviewer||evidence.reviewer===reviewerNode));
               const attempts=(evidenceValid&&evidence&&Array.isArray(evidence.attempt_diagnostics))?evidence.attempt_diagnostics.filter(attempt=>attempt&&typeof attempt==='object'&&Number.isInteger(attempt.attempt)&&attempt.attempt>=1):[];
               const accepted=(evidenceValid&&evidence&&Array.isArray(evidence.accepted_findings))?evidence.accepted_findings.filter(validFinding):[];
@@ -1175,9 +1177,10 @@ spec:
               const failure=last(input,'failure');
               if(!trusted||typeof trusted!=='object'||!Array.isArray(trusted.changed_files)||!trusted.coverage||typeof trusted.coverage!=='object')throw new Error('trusted review context is missing');
               const changed=trusted.changed_files;
+              const canonicalCoverageCount=(files)=>{const unique=[];const seen=new Set();for(const file of files){if(typeof file!=='string')continue;const normalized=file.trim();if(!normalized||seen.has(normalized))continue;seen.add(normalized);unique.push(normalized)}return unique.length};
               const candidate=success&&typeof success==='object'?success:(failure&&typeof failure==='object'?failure:null);
               const attestation=candidate&&typeof candidate==='object'&&candidate.coverage&&typeof candidate.coverage==='object'?candidate.coverage:null;
-              const coverageValid=Boolean(attestation&&typeof attestation.digest==='string'&&attestation.digest===trusted.coverage.digest&&attestation.count===trusted.coverage.count&&trusted.coverage.count===changed.length);
+              const coverageValid=Boolean(attestation&&typeof attestation.digest==='string'&&attestation.digest===trusted.coverage.digest&&attestation.count===trusted.coverage.count&&trusted.coverage.count===canonicalCoverageCount(changed));
               const evidenceValid=!evidence||(typeof evidence==='object'&&(!evidence.reviewer||evidence.reviewer===reviewerNode));
               const attempts=(evidenceValid&&evidence&&Array.isArray(evidence.attempt_diagnostics))?evidence.attempt_diagnostics.filter(attempt=>attempt&&typeof attempt==='object'&&Number.isInteger(attempt.attempt)&&attempt.attempt>=1):[];
               const accepted=(evidenceValid&&evidence&&Array.isArray(evidence.accepted_findings))?evidence.accepted_findings.filter(validFinding):[];

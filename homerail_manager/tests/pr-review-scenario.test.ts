@@ -1379,6 +1379,48 @@ describe("PR Review scenario assets", () => {
     }, files).valid).toBe(false);
   }, 30_000);
 
+  it("accepts an exact coverage attestation when changed_files contains duplicates", () => {
+    const files = ["src/z.ts", "src/a.ts", "src/m.ts", "src/a.ts", "src/z.ts", "src/a.ts"];
+    const trusted = trustedContext(files);
+    const attestation = coverageFor(files);
+    expect(trusted.changed_files).toHaveLength(6);
+    expect(attestation.count).toBe(3);
+
+    for (const nodeId of [
+      "normalize_qwen_review",
+      "normalize_kimi_review",
+      "normalize_glm_review",
+    ] as const) {
+      const { code, args } = commandCode(nodeId);
+      const reviewer = nodeId.replace("normalize_", "").replace("_review", "");
+      const normalizedResult = spawnSync(process.execPath, ["-e", code, ...args], {
+        encoding: "utf8",
+        input: JSON.stringify({
+          trusted: [trusted],
+          evidence: [],
+          success: [{
+            reviewer,
+            status: "complete",
+            vote: "request_changes",
+            summary: "Complete review.",
+            coverage: attestation,
+            findings: [finding],
+          }],
+          failure: [],
+        }),
+      });
+      expect(normalizedResult.status, normalizedResult.stderr).toBe(0);
+      expect(JSON.parse(normalizedResult.stdout)).toMatchObject({
+        reviewer,
+        status: "complete",
+        vote: "request_changes",
+        coverage: attestation,
+        reviewed_files: files,
+        unreviewed_files: [],
+      });
+    }
+  }, 30_000);
+
   it("rejects hostile clone URLs before invoking git", () => {
     const cwd = path.join(tmpHome, "prepare-url-validation");
     fs.mkdirSync(cwd, { recursive: true });
