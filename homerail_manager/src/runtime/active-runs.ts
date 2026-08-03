@@ -4967,17 +4967,22 @@ function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): 
   const match = /^gitdir:\s*(.+?)\s*$/u.exec(readFileSync(worktreeGitFile, "utf8"));
   if (!match?.[1]) throw new Error("fanout git worktree metadata is malformed");
 
-  const commonGitDir = realpathSync(path.join(repository, ".git"));
-  const worktreesRoot = realpathSync(path.join(commonGitDir, "worktrees"));
-  const adminGitDir = realpathSync(path.resolve(target, match[1]));
+  // Git for Windows can expand an 8.3 path (for example RUNNER~1) while
+  // Node's portable realpath keeps the caller's spelling. Resolve every side
+  // through the native filesystem identity before enforcing containment and
+  // the bidirectional linked-worktree binding.
+  const commonGitDir = realpathSync.native(path.join(repository, ".git"));
+  const worktreesRoot = realpathSync.native(path.join(commonGitDir, "worktrees"));
+  const adminGitDir = realpathSync.native(path.resolve(target, match[1]));
   if (!_pathIsWithin(worktreesRoot, adminGitDir)) {
     throw new Error("fanout git worktree metadata escaped the repository");
   }
 
   const adminBackPointer = path.join(adminGitDir, "gitdir");
   const backPointerValue = readFileSync(adminBackPointer, "utf8").trim();
-  const resolvedBackPointer = realpathSync(path.resolve(adminGitDir, backPointerValue));
-  if (resolvedBackPointer !== realpathSync(worktreeGitFile)) {
+  const resolvedBackPointer = realpathSync.native(path.resolve(adminGitDir, backPointerValue));
+  const resolvedWorktreeGitFile = realpathSync.native(worktreeGitFile);
+  if (!_pathsReferToSameLocation(resolvedBackPointer, resolvedWorktreeGitFile)) {
     throw new Error("fanout git worktree metadata is not bidirectionally bound");
   }
 

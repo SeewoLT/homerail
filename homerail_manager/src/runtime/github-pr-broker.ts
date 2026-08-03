@@ -1396,6 +1396,10 @@ function isPathInside(root: string, target: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function pathsReferToSameLocation(left: string, right: string): boolean {
+  return path.relative(left, right) === "" && path.relative(right, left) === "";
+}
+
 function git(workspace: string, args: string[], maxBuffer = 2 * 1024 * 1024): string {
   const result = spawnManagerGitSync(workspace, args, {
     timeout: 30_000,
@@ -1459,14 +1463,16 @@ function writableWorkspace(context: CredentialBrokerContext): { relative: string
   if (context.input.workspace_path !== relative) {
     throw new Error("commit_workspace workspace_path does not match the node write boundary");
   }
-  const runRoot = fs.realpathSync(runWorkspacePath(runId));
+  const runRoot = fs.realpathSync.native(runWorkspacePath(runId));
   const candidate = path.resolve(runRoot, ...relative.split("/"));
-  const absolute = fs.realpathSync(candidate);
+  const absolute = fs.realpathSync.native(candidate);
   if (!isPathInside(runRoot, absolute)) throw new Error("commit_workspace path escapes the run workspace");
-  const topLevel = fs.realpathSync(git(absolute, ["rev-parse", "--show-toplevel"]).trim());
-  if (topLevel !== absolute) throw new Error("commit_workspace path is not the declared Git worktree root");
-  const gitDir = fs.realpathSync(git(absolute, ["rev-parse", "--path-format=absolute", "--git-dir"]).trim());
-  const commonDir = fs.realpathSync(git(absolute, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
+  const topLevel = fs.realpathSync.native(git(absolute, ["rev-parse", "--show-toplevel"]).trim());
+  if (!pathsReferToSameLocation(topLevel, absolute)) {
+    throw new Error("commit_workspace path is not the declared Git worktree root");
+  }
+  const gitDir = fs.realpathSync.native(git(absolute, ["rev-parse", "--path-format=absolute", "--git-dir"]).trim());
+  const commonDir = fs.realpathSync.native(git(absolute, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
   if (!isPathInside(runRoot, gitDir) || !isPathInside(runRoot, commonDir)) {
     throw new Error("commit_workspace Git metadata escapes the run workspace");
   }
