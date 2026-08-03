@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getHomerailHome } from "../config/env.js";
@@ -4475,17 +4475,6 @@ function _pathsReferToSameLocation(left: string, right: string): boolean {
   }
 }
 
-function _pathIsWithinFilesystemLocation(root: string, target: string): boolean {
-  let cursor = target;
-  for (let depth = 0; depth < 1_024; depth++) {
-    if (_pathsReferToSameLocation(root, cursor)) return true;
-    const parent = path.dirname(cursor);
-    if (parent === cursor) return false;
-    cursor = parent;
-  }
-  return false;
-}
-
 function _commandGatewayCwd(
   run: ActiveRun,
   configured: string | undefined,
@@ -4980,6 +4969,15 @@ function _portableGitMetadataPath(from: string, to: string): string {
   return relative.split(path.sep).join("/");
 }
 
+function _findWorktreeAdminDirectory(worktreesRoot: string, target: string): string | undefined {
+  for (const entry of readdirSync(worktreesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(worktreesRoot, entry.name);
+    if (_pathsReferToSameLocation(candidate, target)) return candidate;
+  }
+  return undefined;
+}
+
 function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): void {
   const worktreeGitFile = path.join(target, ".git");
   const match = /^gitdir:\s*(.+?)\s*$/u.exec(readFileSync(worktreeGitFile, "utf8"));
@@ -4990,29 +4988,23 @@ function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): 
   // through the native filesystem identity before enforcing containment and
   // the bidirectional linked-worktree binding.
   const commonGitDir = realpathSync.native(path.join(repository, ".git"));
-  const worktreesRoot = realpathSync.native(path.join(commonGitDir, "worktrees"));
+  const portableWorktreesRoot = path.join(repository, ".git", "worktrees");
+  const worktreesRoot = realpathSync.native(portableWorktreesRoot);
   const referencedAdminGitDir = path.resolve(target, match[1]);
   const adminGitDir = realpathSync.native(referencedAdminGitDir);
-  if (!_pathIsWithin(worktreesRoot, adminGitDir)
-    && !_pathIsWithinFilesystemLocation(worktreesRoot, adminGitDir)) {
-    throw new Error("fanout git worktree metadata escaped the repository");
+  if (!_pathsReferToSameLocation(worktreesRoot, realpathSync.native(path.join(commonGitDir, "worktrees")))) {
+    throw new Error("fanout git worktree metadata root is not bound to the declared repository");
   }
 
-  // Rebuild the relative pointers from HomeRail's run-workspace spelling, not
-  // from Git's host-specific absolute spelling. Git for Windows can write an
-  // 8.3 path into one side of the link even though the Manager opened the run
-  // through its long path. Mixing those spellings in path.relative() embeds a
-  // route out to the runner temp root and is no longer relocatable when the run
-  // workspace is mounted into a Worker.
-  const portableAdminGitDir = path.join(
-    repository,
-    ".git",
-    "worktrees",
-    path.basename(referencedAdminGitDir),
-  );
-  const resolvedPortableAdminGitDir = realpathSync.native(portableAdminGitDir);
-  if (!_pathsReferToSameLocation(resolvedPortableAdminGitDir, adminGitDir)) {
-    throw new Error("fanout git worktree metadata is not bound to the declared repository");
+  // Enumerate the repository's own worktree entries instead of rebuilding a
+  // path from Git's host-specific spelling. Git for Windows may write an 8.3
+  // alias into the worktree pointer; readdir returns the actual directory name
+  // under HomeRail's run-workspace spelling. Finding the same filesystem object
+  // also proves that the referenced admin directory is a direct child of this
+  // repository's worktree metadata root.
+  const portableAdminGitDir = _findWorktreeAdminDirectory(portableWorktreesRoot, adminGitDir);
+  if (!portableAdminGitDir) {
+    throw new Error("fanout git worktree metadata escaped the repository or is not bound to it");
   }
 
   const adminBackPointer = path.join(portableAdminGitDir, "gitdir");

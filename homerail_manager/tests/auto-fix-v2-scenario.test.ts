@@ -286,13 +286,16 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     const { planContent } = createRun();
     handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", planContent);
     executor.tick("autofix-v2-run");
-    const implementer = dispatcher.dispatched.find((entry) => entry.nodeId === "implement__item_0001")!;
+    const implementer = dispatcher.dispatched.find((entry) => entry.nodeId === "implement__item_0001");
+    const abortReason = getActiveRun("autofix-v2-run")?.counters.abort_reason;
+    expect(implementer, `fanout did not dispatch: ${String(abortReason ?? "unknown reason")}`)
+      .toBeDefined();
     const workerPath = "workers/implement/inv_0001/item_0001";
     fs.writeFileSync(
       path.join(home, "workspace", "autofix-v2-run", workerPath, "worker.txt"),
       "implemented\n",
     );
-    handoffActiveRun("autofix-v2-run", implementer.nodeId, "result", {
+    handoffActiveRun("autofix-v2-run", implementer!.nodeId, "result", {
       status: "implemented",
       task_id: "runtime",
       workspace_path: workerPath,
@@ -441,7 +444,10 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     executor.tick("autofix-v2-run");
 
     const implementer = dispatcher.dispatched.find((entry) => entry.nodeId === "implement__item_0001");
+    const abortReason = getActiveRun("autofix-v2-run")?.counters.abort_reason;
     expect(parsed.graph.nodes.find((node) => node.node_id === "implement")?.extra?.workflow_spec_v1)
+      .toBeDefined();
+    expect(implementer, `fanout did not dispatch: ${String(abortReason ?? "unknown reason")}`)
       .toBeDefined();
     expect(implementer?.workspaceAccess).toMatchObject({
       writable_paths: ["workers/implement/inv_0001/item_0001"],
@@ -502,11 +508,14 @@ describe("Auto Fix v2 local-test convergence architecture", () => {
     handoffActiveRun("autofix-v2-run", "prepare_repository", "ready", planContent);
     executor.tick("autofix-v2-run");
 
-    const implementer = dispatcher.dispatched.find((entry) => entry.nodeId === "implement__item_0001")!;
+    const implementer = dispatcher.dispatched.find((entry) => entry.nodeId === "implement__item_0001");
+    const abortReason = getActiveRun("autofix-v2-run")?.counters.abort_reason;
+    expect(implementer, `fanout did not dispatch: ${String(abortReason ?? "unknown reason")}`)
+      .toBeDefined();
     const workerPath = "workers/implement/inv_0001/item_0001";
     const workerWorkspace = path.join(home, "workspace", "autofix-v2-run", workerPath);
     fs.writeFileSync(path.join(workerWorkspace, "worker.txt"), "implemented\n");
-    handoffActiveRun("autofix-v2-run", implementer.nodeId, "result", {
+    handoffActiveRun("autofix-v2-run", implementer!.nodeId, "result", {
       status: "implemented",
       task_id: "runtime",
       workspace_path: workerPath,
