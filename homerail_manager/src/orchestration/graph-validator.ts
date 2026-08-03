@@ -188,12 +188,6 @@ function _validateGatewayConfigs(graph: DAGGraphData, errors: string[]): void {
       if (dependencies.size === 0) {
         errors.push(`Join gateway ${node.node_id} requires at least one after dependency`);
       }
-      const missingInputs = Array.from(dependencies).filter((dependency) => !routedSources.has(dependency));
-      if (missingInputs.length > 0) {
-        errors.push(
-          `Join gateway ${node.node_id} is missing routed input from after dependencies: ${missingInputs.sort().join(", ")}`,
-        );
-      }
       const unawaitedInputs = Array.from(routedSources).filter((source) => !dependencies.has(source));
       if (unawaitedInputs.length > 0) {
         errors.push(
@@ -208,9 +202,9 @@ function _validateGatewayConfigs(graph: DAGGraphData, errors: string[]): void {
         const threshold = config?.threshold;
         if (!Number.isInteger(threshold) || (threshold ?? 0) < 1) {
           errors.push(`Join gateway ${node.node_id} requires a positive integer threshold for n_of_m mode`);
-        } else if ((threshold ?? 0) > dependencies.size) {
+        } else if ((threshold ?? 0) > routedSources.size) {
           errors.push(
-            `Join gateway ${node.node_id} threshold ${threshold} exceeds its ${dependencies.size} after dependencies`,
+            `Join gateway ${node.node_id} threshold ${threshold} exceeds its ${routedSources.size} routed inputs`,
           );
         }
       }

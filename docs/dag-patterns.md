@@ -25,8 +25,10 @@ concrete instances reference the catalog instead of duplicating it.
 
 ### Join Gateway
 
-`join_gateway` waits for its normal `after` dependencies, collects all input
-mailboxes, and emits one aggregate payload. Configure:
+`join_gateway` waits for all normal `after` dependencies, including
+completion-only barriers, collects the routed input mailboxes, and emits one
+aggregate payload. Completion-only dependencies do not contribute values or
+count toward an `n_of_m` threshold. Configure:
 
 - `mode`: `all`, `any`, or `n_of_m`.
 - `field`: optional dotted field read from each input.

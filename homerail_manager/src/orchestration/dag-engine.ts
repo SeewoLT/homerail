@@ -135,7 +135,11 @@ function _joinHasEnoughRoutedInputs(
     .map((dep) => dep.from_node));
   const routed = Array.from(routedDependencies).filter((dependency) => routedInputs.has(dependency)).length;
   const mode = node.gateway_config?.mode ?? "all";
-  if (mode === "all") return routed >= routedDependencies.size;
+  if (mode === "all") {
+    const satisfiedDependencies = run.afterSatisfied.get(nodeId);
+    return routed >= routedDependencies.size
+      && deps.every((dependency) => satisfiedDependencies?.has(dependency.from_node));
+  }
   const settled = new Set<NodeState>(["COMPLETED", "FAILED", "CANCELLED", "SKIPPED"]);
   const allDependenciesSettled = deps.every((dependency) => settled.has(run.nodeStates.get(dependency.from_node)!));
   // An any/n-of-m join must still execute its failed port when the available

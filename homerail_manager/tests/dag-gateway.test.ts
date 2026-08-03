@@ -601,6 +601,50 @@ nodes:
     expect(run?.dagRun.nodeStates.get("rejected")).toBe("READY");
   });
 
+  it("keeps an all-join pending until its completion-only dependency finishes", () => {
+    const parsed = parseWorkflowSource(`
+api_version: homerail.ai/v1
+kind: Workflow
+metadata: { id: join-completion-barrier, name: Join completion barrier }
+spec:
+  agents:
+    worker: { system: Return one result. }
+  nodes:
+    producer:
+      kind: agent
+      agent: worker
+      outputs: { result: {} }
+    barrier:
+      kind: agent
+      agent: worker
+      outputs: { done: {} }
+    barrier_done: { kind: terminal, outcome: success, inputs: { result: {} } }
+    merge:
+      kind: join
+      depends_on: [barrier]
+      inputs: { result: {} }
+      outputs: { ready: {}, missing: {} }
+      config:
+        mode: all
+        passed_port: ready
+        failed_port: missing
+    done: { kind: terminal, outcome: success, inputs: { result: {} } }
+    failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+  edges:
+    - { from: producer.result, to: merge.result }
+    - { from: barrier.done, to: barrier_done.result }
+    - { from: merge.ready, to: done.result }
+    - { from: merge.missing, to: failed.result, condition: on_failure }
+`);
+    createActiveRun("run-join-completion-barrier", parsed);
+
+    handoffActiveRun("run-join-completion-barrier", "producer", "result", { accepted: true });
+    expect(getActiveRun("run-join-completion-barrier")?.dagRun.nodeStates.get("merge")).toBe("PENDING");
+
+    handoffActiveRun("run-join-completion-barrier", "barrier", "done", { complete: true });
+    expect(getActiveRun("run-join-completion-barrier")?.dagRun.nodeStates.get("merge")).toBe("READY");
+  });
+
   it("opens an any-join after one mutually exclusive branch is routed", () => {
     const parsed = parseWorkflowSource(`
 api_version: homerail.ai/v1
