@@ -105,7 +105,41 @@ describe("PR closeout evidence validation", () => {
 
     expect(validate({
       handoffs: [{ fromNode: "decide", port: "decided", content: value }],
-    })).toMatchObject({ valid: false, passed: false, error: expect.stringContaining("failed pr-review reviewer") });
+    })).toMatchObject({ valid: false, passed: false, error: expect.stringContaining("does not preserve every reviewer finding") });
+  });
+
+  it("accepts a failed reviewer finding only when the final report retains it", () => {
+    const value = publication();
+    const report = value.report as Record<string, unknown>;
+    const reviewers = report.reviewer_results as Array<Record<string, unknown>>;
+    const retainedFinding = {
+      category: "runtime",
+      severity: "high",
+      title: "Recovered failure",
+      file: "src/index.ts",
+      line: 1,
+      evidence: "The durable evidence bridge retained a bounded finding.",
+      recommendation: "Fix the recovered defect before merging.",
+      confidence: "high",
+    };
+    reviewers[2] = {
+      ...reviewers[2],
+      status: "failed",
+      vote: "abstain",
+      reviewed_files: [],
+      unreviewed_files: ["src/index.ts"],
+      evidence_truncated: true,
+      findings: [retainedFinding],
+    };
+    report.status = "findings";
+    report.confidence = "medium";
+    report.actionable_count = 1;
+    report.findings = [retainedFinding];
+    value.quorum = { passed: false, successes: 2, total: 3, threshold: 2 };
+
+    expect(validate({
+      handoffs: [{ fromNode: "decide", port: "decided", content: value }],
+    })).toMatchObject({ valid: true, passed: false, report_status: "findings", actionable_count: 1 });
   });
 
   it("rejects an unrelated workflow even when nested content claims pass", () => {

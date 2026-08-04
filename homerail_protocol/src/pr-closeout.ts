@@ -224,13 +224,17 @@ export function validatePrReviewCloseoutEvidence(
       } else {
         return invalid("a complete pr-review reviewer must cast a decisive vote", partial);
       }
-    } else if (
-      reviewer.vote !== "abstain" ||
-      reviewer.evidence_truncated !== true ||
-      reviewer.reviewed_files.length !== 0 ||
-      reviewer.findings.length !== 0
-    ) {
-      return invalid("a failed pr-review reviewer must abstain with incomplete evidence", partial);
+    } else {
+      if (reviewer.vote !== "abstain") {
+        return invalid("a failed pr-review reviewer must abstain", partial);
+      }
+      if (reviewer.reviewed_files.length > 0 && reviewer.unreviewed_files.length > 0) {
+        return invalid("a failed pr-review reviewer cannot claim both reviewed and unreviewed files", partial);
+      }
+      if (reviewer.evidence_truncated !== true && reviewer.unreviewed_files.length > 0) {
+        return invalid("a deliberate pr-review abstention cannot leave files unreviewed", partial);
+      }
+      for (const finding of reviewer.findings) reviewerFindingKeys.add(findingKey(finding)!);
     }
   }
   if (reviewerIds.size !== REVIEWER_IDS.size) {
@@ -240,7 +244,7 @@ export function validatePrReviewCloseoutEvidence(
     reviewerFindingKeys.size !== reportedFindingKeys.size ||
     [...reviewerFindingKeys].some((key) => !reportedFindingKeys.has(key))
   ) {
-    return invalid("pr-review report does not preserve every complete reviewer finding", partial);
+    return invalid("pr-review report does not preserve every reviewer finding", partial);
   }
   const completeReviews = approvals + changesRequested;
   const expectedConfidence = completeReviews === 3 ? "high" : completeReviews === 2 ? "medium" : "low";
@@ -274,9 +278,6 @@ export function validatePrReviewCloseoutEvidence(
   }
   if (reportStatus === "pass" && (approvals < 2 || changesRequested !== 0)) {
     return invalid("a passing pr-review report requires two approvals and no change request", partial);
-  }
-  if (reportStatus === "findings" && changesRequested < 1) {
-    return invalid("a findings pr-review report requires a change request", partial);
   }
   if (reportStatus === "inconclusive" && (approvals >= 2 || actionableCount !== 0)) {
     return invalid("an inconclusive pr-review report cannot have approval quorum or findings", partial);

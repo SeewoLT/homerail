@@ -13,6 +13,8 @@ import type {
   DagWorkerSkillVisualDataContractV1,
   DagWorkspaceAccess,
   Edge,
+  ReviewContractStage,
+  ReviewToolArgumentParseState,
 } from "homerail-protocol";
 import type { DagToolDefinition } from "../agent/types.js";
 import { createHandoffTool } from "./handoff.js";
@@ -80,6 +82,11 @@ export interface DagToolsState {
   /** Whether handoff has been called this turn. */
   yielded: boolean;
   handoffData: unknown | null;
+  /** Bounded provider-neutral state of the last handoff tool-argument parse. */
+  toolArgumentParseState: ReviewToolArgumentParseState;
+  toolArgumentParseError?: string;
+  /** Bounded provider-neutral contract stage reached by this turn. */
+  contractStage: ReviewContractStage;
   /** Incoming message inbox. */
   inbox: unknown[];
   /** Waiters for receive_message (nodeId → callback). */
@@ -147,6 +154,8 @@ export function createDagToolsState(
     incomingEdges: config.incoming_edges,
     yielded: false,
     handoffData: null,
+    toolArgumentParseState: "unknown",
+    contractStage: "unknown",
     inbox: [],
     waiters: new Map(),
     wsSend,

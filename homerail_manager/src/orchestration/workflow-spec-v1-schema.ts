@@ -644,6 +644,16 @@ export const WorkflowSpecV1Schema = Type.Object({
     workspace: Type.Optional(Type.Object({
       mode: Type.Union([Type.Literal("isolated"), Type.Literal("shared")]),
     }, { additionalProperties: false })),
+    capabilities: Type.Optional(Type.Array(
+      Type.Union([
+        Type.Literal("runtime_evidence"),
+      ]),
+      {
+        uniqueItems: true,
+        maxItems: 16,
+        description: "Explicit WorkflowSpec capabilities. runtime_evidence gates Manager-owned bounded reviewer evidence persistence and injection; unrelated workflows must not declare or use it.",
+      },
+    )),
     contracts: Type.Optional(Type.Record(ContractIdentifier, ContractSchema, { maxProperties: 128 })),
     artifacts: Type.Optional(Type.Array(WorkflowArtifact, { maxItems: 128 })),
     triggers: Type.Optional(Type.Record(Identifier, Type.Union([

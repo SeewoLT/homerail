@@ -81,6 +81,8 @@ describe("DAG tools", () => {
       });
       expect(state.handoffData).not.toHaveProperty("round_id");
       expect(state.yielded).toBe(true);
+      expect(state.toolArgumentParseState).toBe("valid");
+      expect(state.contractStage).toBe("tool_arguments");
     });
 
     it("stages the dispatch transport fence in the authoritative handoff", async () => {
@@ -152,6 +154,28 @@ describe("DAG tools", () => {
 
       expect(result.is_error).toBe(true);
       expect(wsSend).not.toHaveBeenCalled();
+      expect(state.toolArgumentParseState).toBe("invalid");
+      expect(state.yielded).toBe(false);
+    });
+
+    it("records missing and invalid tool-argument parse states without yielding", async () => {
+      const tools = createDagTools(state);
+      const handoffTool = tools.find((t) => t.name === "handoff")!;
+
+      const missing = await handoffTool.handler({ port: "done" });
+      expect(missing.is_error).toBe(true);
+      expect(state.toolArgumentParseState).toBe("missing");
+      expect(state.yielded).toBe(false);
+
+      const invalid = await handoffTool.handler({
+        port: "done",
+        content: "x",
+        unexpected: true,
+      });
+      expect(invalid.is_error).toBe(true);
+      expect(state.toolArgumentParseState).toBe("invalid");
+      expect(state.toolArgumentParseError).toContain("unexpected");
+      expect(state.yielded).toBe(false);
     });
 
     it("rejects contract fields outside content without consuming the handoff", async () => {

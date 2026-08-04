@@ -48,6 +48,8 @@ export function createHandoffTool(state: DagToolsState): DagToolDefinition {
     },
     handler: async (args: Record<string, unknown>) => {
       if (state.yielded) {
+        state.toolArgumentParseState = "invalid";
+        state.toolArgumentParseError = "handoff already yielded this turn";
         return {
           content: [
             {
@@ -60,6 +62,8 @@ export function createHandoffTool(state: DagToolsState): DagToolDefinition {
       }
       const unexpectedKeys = Object.keys(args).filter((key) => !["port", "content", "summary"].includes(key));
       if (unexpectedKeys.length > 0) {
+        state.toolArgumentParseState = "invalid";
+        state.toolArgumentParseError = `unexpected keys: ${unexpectedKeys.join(", ")}`;
         return {
           content: [
             {
@@ -72,12 +76,27 @@ export function createHandoffTool(state: DagToolsState): DagToolDefinition {
           is_error: true,
         };
       }
+      if (args.port === undefined || args.content === undefined) {
+        state.toolArgumentParseState = "missing";
+        state.toolArgumentParseError = "port and content are required";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "无效的 handoff 参数: port 和 content 都是必填字段。",
+            },
+          ],
+          is_error: true,
+        };
+      }
       const port = String(args.port ?? "");
       const content = normalizeHandoffContent(args.content ?? "");
       const summary = String(args.summary ?? "");
 
       // Validate port
       if (!state.availablePorts.includes(port)) {
+        state.toolArgumentParseState = "invalid";
+        state.toolArgumentParseError = `invalid output port: ${port}`;
         return {
           content: [
             {
@@ -91,6 +110,10 @@ export function createHandoffTool(state: DagToolsState): DagToolDefinition {
 
       if (state.surfaceReportingRequired && !state.surfaceReportingComplete) {
         const fatal = state.surfaceReportingFatalError;
+        state.toolArgumentParseState = "invalid";
+        state.toolArgumentParseError = fatal
+          ? fatal.message
+          : `required surface phase ${state.surfaceExpectedPhase ?? "unknown"} incomplete`;
         return {
           content: [{
             type: "text" as const,
@@ -130,6 +153,8 @@ export function createHandoffTool(state: DagToolsState): DagToolDefinition {
 
       // PromptRunner owns terminal transport so Manager contract correction
       // cannot race the still-active prompt lifecycle.
+      state.toolArgumentParseState = "valid";
+      state.contractStage = "tool_arguments";
       state.yielded = true;
       state.handoffData = payload;
 
