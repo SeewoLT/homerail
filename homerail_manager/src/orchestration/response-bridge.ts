@@ -40,7 +40,13 @@ export type ResponseBridgeResult =
     }
   | { status: "malformed_payload"; reason: string }
   | { status: "unknown_run"; runId: string }
-  | { status: "handoff_failed"; runId: string; nodeId: string; reason: string };
+  | {
+      status: "handoff_failed";
+      runId: string;
+      nodeId: string;
+      reason: string;
+      rejectedHandoff: { port: string; content: unknown };
+    };
 
 function transportMetadataError(obj: Record<string, unknown>): string | undefined {
   for (const field of ["round_id", "actor_id", "command_id"] as const) {
@@ -341,6 +347,7 @@ export function applyResponseHandoff(
       runId: obj.runId,
       nodeId: obj.nodeId,
       reason,
+      rejectedHandoff: { port: obj.port, content: obj.content },
     };
   }
   if (!run) {

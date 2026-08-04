@@ -60,10 +60,11 @@ metadata.
    emits a failed/abstain result. A complete vote is accepted only when the
    reviewer accounted for every changed file and its findings agree with its
    vote.
-4. A deterministic command counts the three model votes. Two approvals produce
-   `pass` and are the only result that passes the check. Two request-changes
-   votes produce blocking `findings`; otherwise the result is `inconclusive`.
-   No model can alter the vote count.
+4. A deterministic command retains the deduplicated union of findings from
+   every complete reviewer. A `pass` requires at least two approvals and zero
+   retained findings; one complete request-changes vote is therefore enough to
+   produce blocking `findings`. Fewer than two complete reviews with no finding
+   produce `inconclusive`. No model can alter the vote or finding accounting.
 5. Manager materializes the structured JSON artifact. After the run reaches a
    terminal state, the stable runner renders Markdown deterministically from
    that JSON plus `command.json`, so the exact Manager run id cannot be invented
@@ -74,13 +75,13 @@ metadata.
 - `pr-review.json`
 - `pr-review.md`
 - three normalized reviews and votes from distinct models
-- deterministic quorum payload
+- deterministic approval-threshold and finding-veto payload
 - Manager audit summary and per-node metrics
 - HomeRail run id and replayable event history
 
 The workflow does not modify the reviewed repository, submit a GitHub review,
 approve a PR, or merge code. Its GitHub Check passes only when at least two
-models approve.
+models approve and no complete reviewer reports an actionable finding.
 
 ## CI Adapter
 
@@ -95,11 +96,12 @@ uploads both files as CI evidence, and copies the Markdown into the GitHub Check
 summary. The run and its event history remain visible in the normal production
 UI. Workflow contracts and deterministic quorum remain authoritative; the
 adapter does not reconstruct a report from raw handoffs.
-The adapter verifies that the run reached the terminal state implied by quorum,
-all artifacts are structured and non-empty, the quorum is 2-of-3, and Markdown
-contains the exact HomeRail run id and report identity. A request-changes
-majority is retained as `cancelled` plus `findings`; a split vote or abstention
-without a majority is retained as `cancelled` plus `inconclusive`.
+The adapter verifies that the run reached the terminal state implied by the
+gate, all artifacts are structured and non-empty, at least two approvals exist
+for a pass, every complete reviewer finding is preserved, and Markdown contains
+the exact HomeRail run id and report identity. Any request-changes finding is
+retained as `cancelled` plus `findings`; fewer than two complete approvals with
+no findings is retained as `cancelled` plus `inconclusive`.
 Infrastructure and artifact-integrity failures also fail the check. Whether
 that check blocks merging is a repository branch-protection decision; findings
 and inconclusive results remain complete diagnostic outputs.
@@ -131,6 +133,11 @@ Runner repository configuration:
 - `HOMERAIL_PR_REVIEW_THIRD_MODEL`: a third distinct active setting that drives
   the final review vote. All three settings must expose Anthropic-compatible
   endpoints because these DAG workers use the Claude Agent SDK harness.
+
+The production profile binds `qwen_reviewer` to the released `qwen3.8-max`
+Aliyun Token Plan setting, `kimi_reviewer` to K3, and `glm_reviewer` to
+GLM-5.2. Do not retain `qwen3.8-max-preview` as the primary selector after the
+released model is available.
 
 The GitHub Actions adapter supplies `github.api_url` as
 `HOMERAIL_GITHUB_API_BASE_URL`, so credential-free-accessible GitHub Enterprise

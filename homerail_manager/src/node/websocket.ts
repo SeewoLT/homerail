@@ -268,8 +268,15 @@ export function setupNodeWebSocket(
         dagNodeId: string,
         reason: string,
         diagnostics?: unknown,
+        rejectedHandoff?: { port: string; content: unknown },
       ): boolean => {
-        const correction = requestNodeCorrection(runId, dagNodeId, reason, diagnostics);
+        const correction = requestNodeCorrection(
+          runId,
+          dagNodeId,
+          reason,
+          diagnostics,
+          rejectedHandoff,
+        );
         if (correction.status === "scheduled") {
           options.onHandoffApplied?.(runId);
           return true;
@@ -526,6 +533,7 @@ export function setupNodeWebSocket(
                 result.nodeId,
                 result.reason,
                 responseData?.attempt_diagnostics,
+                result.rejectedHandoff,
               );
             }
           }

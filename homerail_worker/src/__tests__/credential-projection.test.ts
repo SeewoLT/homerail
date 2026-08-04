@@ -111,6 +111,14 @@ describe("turn-scoped credential projection", () => {
       broker: "lark_bot",
       action: "bot_info",
     });
+    expect(tool.input_schema).toMatchObject({
+      properties: {
+        credential_ref: { enum: ["lark-bot"] },
+        action: { enum: ["bot_info"] },
+      },
+    });
+    expect(tool.description).toContain("lark-bot: bot_info");
+    expect(tool.description).toContain("input: {}");
 
     const denied = await tool.handler({ credential_ref: "lark-bot", action: "send_message", input: {} });
     expect(denied.is_error).toBe(true);

@@ -7,9 +7,10 @@ Manager Agent or another trusted client, but must review it before staging.
 The run binds the staged document by SHA-256. Do not edit the staged content in
 place. A task change creates a new document revision and a new run.
 
-PR number, repository, branches, base/head SHAs, credentials, and executable
-validation commands are structured control-plane inputs. They must not be
-copied into this document as authoritative runtime configuration.
+PR number, repository, branches, base/head SHAs, and credentials are structured
+control-plane inputs. Executable local validation commands belong in the
+immutable `task-plan.json`; they must not be copied into this document as
+authoritative runtime configuration.
 
 ---
 
@@ -44,10 +45,10 @@ and recovery behavior where relevant.
 
 ## Proposed Design
 
-Provide the implementation direction in enough detail that the K3 planner can
-divide it without rediscovering the architecture. Identify the preferred
-product layer and explain any Manager change under the allowed Manager
-categories.
+Provide the implementation direction and worker division in enough detail that
+the trusted caller can emit `task-plan.json` without another Agent
+rediscovering the architecture. Identify the preferred product layer and
+explain any Manager change under the allowed Manager categories.
 
 ```text
 Layer Decision:
@@ -89,15 +90,15 @@ Allowed paths must be explicit repository-relative prefixes;
 
 ## Work Decomposition Guidance
 
-List likely independent areas, if known. These are hints rather than dynamic
-graph instructions.
+List the exact parallel-safe work items the caller should encode in the
+immutable `task_plan` run input.
 
 1. `<parallel-safe area and expected output>`
 2. `<parallel-safe area and expected output>`
 
-If two areas depend on uncommitted output from each other, say so. The first
-Auto Fix v2 release must combine dependent work into one WorkItem rather than
-pretending it is parallel-safe.
+If two areas depend on uncommitted output from each other, combine them into
+one WorkItem. Auto Fix v2 executes the supplied plan exactly and does not run a
+second in-DAG analyzer to reinterpret it.
 
 ## Acceptance Criteria
 
@@ -108,13 +109,17 @@ pretending it is parallel-safe.
 
 ## Validation Requirements
 
-Name the expected trusted validation profile and the evidence it must produce.
-Raw commands in this document are explanatory only; the DAG executes commands
-from the operator-approved scenario policy.
+Name the bounded container checks that should predict whether later repository
+CI will pass. The trusted caller must encode every executable command as a
+`local_tests` item in `task-plan.json`; raw commands here are explanatory only.
+Auto Fix v2 does not dispatch or wait for GitHub CI inside its review/fix loop.
+Every item must include a `timeout_seconds` value from 1 through 1800. This
+bounds the test process only; it is never a model or tool-call budget.
 
-- Validation profile: `<registered profile id>`
+- Local test id: `<stable id used in task-plan.json>`
 - Focused evidence: `<test suite, fixture, or behavior>`
-- Required final evidence: `<build/typecheck/test/scan subset>`
+- Why this bounded set predicts CI: `<coverage rationale>`
+- Deferred post-convergence CI: `<repository workflow/check set run later>`
 
 ## Risks And Edge Cases
 
@@ -129,4 +134,4 @@ from the operator-approved scenario policy.
 ## Human Review Notes
 
 Call out anything the final human reviewer must verify that cannot be proven by
-the trusted validation profile.
+the bounded local tests and two-review convergence gate.

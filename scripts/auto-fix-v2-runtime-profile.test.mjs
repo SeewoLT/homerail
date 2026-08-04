@@ -16,24 +16,25 @@ const setting = (id, model, endpoint) => ({
 });
 
 const settings = [
-  setting("k3", "Kimi K3", { anthropic_base_url: "https://models.example/v1" }),
-  setting("deepseek-v4-flash", "DeepSeek V4 Flash", { anthropic_base_url: "https://models.example/v1" }),
+  setting("qwen3.8-max", "Qwen3.8-Max", { responses_base_url: "https://models.example/v1/responses" }),
   setting("glm-5-2", "GLM-5.2", { anthropic_base_url: "https://models.example/v1" }),
 ];
-const analyzer = selectAutoFixV2Setting(settings, "k3", "analyzer");
-const implementation = selectAutoFixV2Setting(settings, "deepseek-v4-flash", "implementation");
+const implementation = selectAutoFixV2Setting(settings, "qwen3.8-max", "implementation");
 const review = selectAutoFixV2Setting(settings, "glm-5-2", "review");
-const yaml = autoFixV2RuntimeProfileYaml({ profileId: "pilot", analyzer, implementation, review });
+const yaml = autoFixV2RuntimeProfileYaml({ profileId: "pilot", implementation, review });
 
 assert.match(yaml, /workflow_id: auto-fix-v2/);
-assert.match(yaml, /analyzer:\n    llm_setting_id: "k3"\n    agent_type: claude-sdk/);
+assert.doesNotMatch(yaml, /analyzer:/);
 for (const id of ["implementer", "aggregator", "fixer"]) {
-  assert.match(yaml, new RegExp(`${id}:\\n    llm_setting_id: "deepseek-v4-flash"`));
+  assert.match(yaml, new RegExp(`${id}:\\n    llm_setting_id: "qwen3.8-max"\\n    agent_type: codex_appserver\\n    reasoning_effort: max`));
 }
 assert.match(yaml, /reviewer:\n    llm_setting_id: "glm-5-2"/);
-assert.throws(() => selectAutoFixV2Setting(settings, "glm-5-2", "analyzer"), /required model family/);
+assert.throws(() => selectAutoFixV2Setting(settings, "glm-5-2", "implementation"), /required model family/);
 assert.throws(() => selectAutoFixV2Setting([
-  setting("k3-no-anthropic", "Kimi K3", { base_url: "https://kimi.example/v1" }),
-], "k3-no-anthropic", "analyzer"), /no Anthropic-compatible endpoint/);
+  setting("qwen3.8-max-preview", "Qwen3.8-Max-Preview", { responses_base_url: "https://models.example/v1/responses" }),
+], "qwen3.8-max-preview", "implementation"), /required model family/);
+assert.throws(() => selectAutoFixV2Setting([
+  setting("qwen-no-responses", "Qwen3.8-Max", { anthropic_base_url: "https://models.example/v1" }),
+], "qwen-no-responses", "implementation"), /no Responses endpoint for Codex/);
 
 process.stdout.write("auto-fix-v2 runtime profile tests passed\n");

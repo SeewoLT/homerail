@@ -70,6 +70,7 @@ export type DAGEventType =
   | "dag:approval_decided"
   | "dag:approval_expired"
   | "dag:fanout_started"
+  | "dag:fanout_git_commit_created"
   | "dag:fanout_completed"
   | "dag:trigger_skipped"
   | "dag:trigger_dispatched"
@@ -148,6 +149,7 @@ export const DAG_EVENT_TYPES: DAGEventType[] = [
   "dag:approval_decided",
   "dag:approval_expired",
   "dag:fanout_started",
+  "dag:fanout_git_commit_created",
   "dag:fanout_completed",
   "dag:trigger_skipped",
   "dag:trigger_dispatched",
