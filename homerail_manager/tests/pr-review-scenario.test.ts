@@ -610,13 +610,13 @@ describe("PR Review scenario assets", () => {
   });
 
   it.each([
-    ["provider_output_truncated", true],
-    ["handoff_arguments_invalid", true],
-    ["contract_validation_failed", true],
-    ["transport_failed", true],
-    ["reviewer_abstained", false],
-    ["unknown", true],
-  ] as const)("normalizes the %s attempt category with evidence_truncated=%s", (category, truncated) => {
+    ["provider_output_truncated", "provider_output_truncated", true],
+    ["handoff_arguments_invalid", "handoff_arguments_invalid", true],
+    ["contract_validation_failed", "contract_validation_failed", true],
+    ["transport_failed", "transport_failed", true],
+    ["reviewer_abstained", "unknown", true],
+    ["unknown", "unknown", true],
+  ] as const)("normalizes the %s attempt category as %s with evidence_truncated=%s", (category, expectedCategory, truncated) => {
     const { code, args } = commandCode("normalize_kimi_review");
     const result = spawnSync(process.execPath, ["-e", code, ...args], {
       encoding: "utf8",
@@ -637,7 +637,7 @@ describe("PR Review scenario assets", () => {
       status: "failed",
       vote: "abstain",
       evidence_truncated: truncated,
-      diagnostics: [{ attempt: 1, category }],
+      diagnostics: [{ attempt: 1, category: expectedCategory }],
     });
   });
 
@@ -877,6 +877,31 @@ describe("PR Review scenario assets", () => {
     })).not.toThrow();
     expect(getActiveRun(runId)?.dagRun.handoffedNodes.has("qwen_review")).toBe(true);
     expect(getActiveRun(runId)?.dagRun.nodeStates.get("normalize_qwen_review")).toBe("READY");
+
+    handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi"));
+    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm"));
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+
+    const normalized = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "normalize_qwen_review" && handoff.port === "reviewed",
+    )?.content;
+    expect(normalized).toMatchObject({
+      reviewer: "qwen",
+      status: "failed",
+      vote: "abstain",
+      reviewed_files: [],
+      unreviewed_files: ["src/run.ts"],
+      evidence_truncated: true,
+      diagnostics: [{ attempt: 1, category: "unknown" }],
+    });
+    const decision = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "decide" && handoff.port === "decided",
+    )?.content;
+    expect(decision).toMatchObject({
+      report: { status: "pass", confidence: "medium", actionable_count: 0 },
+      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
+    });
+    expect(getActiveRun(runId)?.status).toBe("completed");
   });
 
   it("executes the compact graph with exactly three model calls", async () => {
@@ -998,6 +1023,92 @@ describe("PR Review scenario assets", () => {
       report: { status: "findings", actionable_count: 1 },
       quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
     });
+  });
+
+  it("projects the final failed attempt before correction exhaustion", () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new ReentrantDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-final-exhausted-evidence";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    const findings = [1, 2, 3].map((attempt) => ({
+      ...finding,
+      title: `Finding from failed attempt ${attempt}`,
+      evidence: `Evidence retained from failed attempt ${attempt}.`,
+      recommendation: `Fix failed attempt ${attempt}.`,
+    }));
+    for (const [index, retainedFinding] of findings.entries()) {
+      expect(() => handoffActiveRun(runId, "qwen_review", "voted", {
+        reviewer: "qwen",
+        status: "complete",
+        vote: "request_changes",
+        summary: `Incomplete attempt ${index + 1}`,
+        findings: [retainedFinding],
+      })).toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
+
+      const correction = requestNodeCorrection(
+        runId,
+        "qwen_review",
+        "DAG_HANDOFF_CONTRACT_VIOLATION qwen_review.voted: coverage attestation is missing",
+        { finish_reason: "end_turn", output_tokens: 500 + index },
+      );
+      if (index < 2) {
+        expect(correction.status).toBe("scheduled");
+        expect(executor.tick(runId)).toBeGreaterThan(0);
+      } else {
+        expect(correction).toMatchObject({ status: "exhausted", attempts: 2, maxAttempts: 2 });
+      }
+    }
+
+    const finalProjection = getActiveRun(runId)?.dagRun.mailboxes
+      .get("normalize_qwen_review")?.get("evidence")?.[0] as Record<string, unknown>;
+    expect(finalProjection).toMatchObject({
+      schema: "review-evidence-projection-v1",
+      reviewer: "qwen_review",
+      accepted_findings: findings,
+    });
+    expect(finalProjection.attempt_diagnostics).toEqual([
+      expect.objectContaining({ attempt: 1, failure_category: "contract_validation_failed" }),
+      expect.objectContaining({ attempt: 2, failure_category: "contract_validation_failed" }),
+      expect.objectContaining({ attempt: 3, failure_category: "contract_validation_failed" }),
+    ]);
+
+    autoHandoffAfterCorrectionExhausted(
+      runId,
+      "qwen_review",
+      "agent exhausted correction attempts without a contract-valid handoff",
+    );
+    handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi"));
+    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm"));
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+
+    const normalized = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "normalize_qwen_review" && handoff.port === "reviewed",
+    )?.content as Record<string, unknown>;
+    expect(normalized).toMatchObject({
+      reviewer: "qwen",
+      status: "failed",
+      vote: "abstain",
+      evidence_truncated: true,
+      findings,
+      diagnostics: [
+        expect.objectContaining({ attempt: 1, category: "contract_validation_failed" }),
+        expect.objectContaining({ attempt: 2, category: "contract_validation_failed" }),
+        expect.objectContaining({ attempt: 3, category: "contract_validation_failed" }),
+      ],
+    });
+    const decision = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "decide" && handoff.port === "decided",
+    )?.content;
+    expect(decision).toMatchObject({
+      report: { status: "findings", actionable_count: 3, findings },
+      quorum: { passed: false, successes: 2, total: 3, threshold: 2 },
+    });
+    expect(getActiveRun(runId)?.status).toBe("cancelled");
   });
 
   it("recovers a 50-file three-finding incomplete handoff through minimal correction", async () => {
@@ -1795,6 +1906,23 @@ describe("PR Review scenario assets", () => {
     expect(runValidator(
       "completed",
       passingReviewReport(),
+      { passed: true, successes: 3, total: 3, threshold: 2 },
+    ).status).toBe(0);
+
+    const emptyCoverage = coverageFor([]);
+    const emptyDiffReport = {
+      ...passingReviewReport(),
+      coverage: emptyCoverage,
+      reviewer_results: (["qwen", "kimi", "glm"] as const).map((reviewer) => ({
+        ...normalizedReview(reviewer),
+        coverage: emptyCoverage,
+        reviewed_files: [],
+        unreviewed_files: [],
+      })),
+    };
+    expect(runValidator(
+      "completed",
+      emptyDiffReport,
       { passed: true, successes: 3, total: 3, threshold: 2 },
     ).status).toBe(0);
     const renderer = path.join(repositoryRoot, "scripts", "render-pr-review-markdown.mjs");

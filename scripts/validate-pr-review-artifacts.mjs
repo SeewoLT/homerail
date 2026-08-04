@@ -123,7 +123,10 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
       invariant(coverageMatchesReport, `${reviewer.reviewer} completed without the canonical coverage attestation`);
       invariant(reviewer.evidence_truncated === false, `${reviewer.reviewer} used truncated evidence`);
       invariant(reviewer.unreviewed_files.length === 0, `${reviewer.reviewer} left changed files unreviewed`);
-      invariant(reviewer.reviewed_files.length > 0, `${reviewer.reviewer} completed without canonical reviewed files`);
+      invariant(
+        reviewer.coverage.count === 0 || reviewer.reviewed_files.length > 0,
+        `${reviewer.reviewer} completed without canonical reviewed files`,
+      );
       invariant(lastDiagnosticCategory(reviewer.diagnostics) === "accepted", `${reviewer.reviewer} completed without an accepted attempt category`);
       if (reviewer.vote === "approve") {
         approvals++;

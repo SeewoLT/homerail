@@ -1722,6 +1722,40 @@ function _reviewEvidenceContext(
   };
 }
 
+function _refreshReviewEvidenceProjection(
+  run: ActiveRun,
+  nodeId: string,
+  evidenceContext: ReviewEvidenceIdentity,
+): void {
+  try {
+    // Select only the authoritative node/session/round/generation fence.
+    // Aggregating run/reviewer rows would leak stale dispatch evidence into
+    // correction and downstream ReviewEvidenceState mailboxes.
+    const projection = buildReviewEvidenceProjectionFor(evidenceContext);
+    if (!projection) return;
+    run.dagRun.mailboxes.get(nodeId)?.set("review_evidence", [projection]);
+    writeReviewEvidenceProjectionFile(evidenceContext);
+    // Deliver the same bounded projection to downstream command nodes whose
+    // ReviewEvidenceState inputs normalize persisted accepted evidence. This
+    // must happen before correction-exhaustion returns so the final failed
+    // attempt remains visible to the review gate.
+    for (const edge of run.dagRun.graph.edges) {
+      if (edge.from_node !== nodeId || !edge.to_node || edge.label === "after_dep") continue;
+      const target = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === edge.to_node);
+      const targetSpec = target?.extra?.workflow_spec_v1;
+      if (!targetSpec || typeof targetSpec !== "object" || Array.isArray(targetSpec)) continue;
+      const inputContracts = (targetSpec as Record<string, unknown>).input_contracts;
+      if (!inputContracts || typeof inputContracts !== "object" || Array.isArray(inputContracts)) continue;
+      for (const [portName, contract] of Object.entries(inputContracts as Record<string, unknown>)) {
+        if (contract !== "ReviewEvidenceState") continue;
+        run.dagRun.mailboxes.get(edge.to_node)?.set(portName, [projection]);
+      }
+    }
+  } catch {
+    // Evidence projection is best-effort and never blocks correction.
+  }
+}
+
 export function isCurrentNodeSession(runId: string, nodeId: string, sessionId: string | undefined): boolean {
   if (!sessionId) return true;
   const current = getCurrentNodeSession(runId, nodeId);
@@ -2411,6 +2445,7 @@ export function requestNodeCorrection(
     } catch {
       // Evidence persistence is best-effort and never blocks correction.
     }
+    _refreshReviewEvidenceProjection(run, nodeId, evidenceContext);
   }
   if (previousAttempts >= maxAttempts) {
     return { status: "exhausted", run, attempts: previousAttempts, maxAttempts };
@@ -2471,33 +2506,6 @@ export function requestNodeCorrection(
       rejectedHandoff,
     ));
     mailbox.set("correction", values);
-    if (evidenceContext) {
-      // Select only the authoritative node/session/round/generation fence.
-      // Aggregating run/reviewer rows would leak stale dispatch evidence into
-      // the correction mailbox and downstream ReviewEvidenceState consumers.
-      const projection = buildReviewEvidenceProjectionFor(evidenceContext);
-      if (projection) {
-        mailbox.set("review_evidence", [projection]);
-        writeReviewEvidenceProjectionFile(evidenceContext);
-        // Deliver the same bounded projection to downstream command nodes
-        // whose ReviewEvidenceState inputs normalize persisted accepted
-        // evidence. Only workflows declaring the runtime_evidence capability
-        // may declare that contract, so this cannot leak into unrelated DAGs.
-        for (const edge of run.dagRun.graph.edges) {
-          if (edge.from_node !== nodeId || !edge.to_node || edge.label === "after_dep") continue;
-          const target = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === edge.to_node);
-          const targetSpec = target?.extra?.workflow_spec_v1;
-          if (!targetSpec || typeof targetSpec !== "object" || Array.isArray(targetSpec)) continue;
-          const inputContracts = (targetSpec as Record<string, unknown>).input_contracts;
-          if (!inputContracts || typeof inputContracts !== "object" || Array.isArray(inputContracts)) continue;
-          for (const [portName, contract] of Object.entries(inputContracts as Record<string, unknown>)) {
-            if (contract !== "ReviewEvidenceState") continue;
-            const targetMailbox = run.dagRun.mailboxes.get(edge.to_node);
-            if (targetMailbox) targetMailbox.set(portName, [projection]);
-          }
-        }
-      }
-    }
   }
   resetSkippedSuccessDescendants(run.dagRun, nodeId);
   run.dagRun.nodeStates.set(nodeId, "READY");
