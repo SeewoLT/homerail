@@ -351,8 +351,7 @@ spec:
     )).not.toThrow();
     expect(getActiveRun("run-auto-handoff-contract")?.status).toBe("failed");
     expect(getActiveRun("run-auto-handoff-contract")?.dagRun.nodeStates.get("start")).toBe("FAILED");
-    expect(getActiveRun("run-auto-handoff-contract")?.counters.abort_reason)
-      .toBe("handoff failed after correction exhaustion: missing handoff");
+    expect(getActiveRun("run-auto-handoff-contract")?.counters.abort_reason).toBeUndefined();
   });
 
   it("uses a canonical broker result instead of failing after handoff correction exhaustion", () => {

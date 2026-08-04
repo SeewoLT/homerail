@@ -2411,7 +2411,7 @@ export function autoHandoffAfterCorrectionExhausted(
     || _outputBrokerActionRequirements(run, nodeId, port).length > 0
     || _outputWorkspaceFileRequirements(run, nodeId, port).length > 0
   ) {
-    return abortActiveRun(runId, `handoff failed after correction exhaustion: ${reason}`, nodeId);
+    return failActiveRun(runId, nodeId, `handoff failed after correction exhaustion: ${reason}`);
   }
   let next: ActiveRun | undefined;
   try {

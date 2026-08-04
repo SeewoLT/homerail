@@ -19,7 +19,7 @@ import { getRunArtifactBlobPath } from "../src/persistence/run-artifacts.js";
 import { loadRunSnapshot } from "../src/persistence/store.js";
 import {
   _clearActiveRuns,
-  failActiveRun,
+  autoHandoffAfterCorrectionExhausted,
   getActiveRun,
   handoffActiveRun,
 } from "../src/runtime/active-runs.js";
@@ -443,7 +443,7 @@ describe("PR Review scenario assets", () => {
       .toMatchObject({ report: { status: "findings" }, quorum: { passed: false, successes: 2 } });
   });
 
-  it("turns one failed model into abstain while retaining another model's finding", () => {
+  it("turns one correction-exhausted model into abstain while retaining another model's finding", () => {
     const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
     installPrepareCommandStub(parsed);
@@ -455,7 +455,14 @@ describe("PR Review scenario assets", () => {
 
     handoffActiveRun(runId, "qwen_review", "voted", modelReview("qwen"));
     handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi", "request_changes"));
-    failActiveRun(runId, "glm_review", "agent ended without a contract-valid handoff");
+    autoHandoffAfterCorrectionExhausted(
+      runId,
+      "glm_review",
+      "agent ended without a contract-valid handoff",
+    );
+    expect(getActiveRun(runId)?.status).toBe("active");
+    expect(getActiveRun(runId)?.dagRun.nodeStates.get("glm_review")).toBe("FAILED");
+    expect(getActiveRun(runId)?.dagRun.nodeStates.get("normalize_glm_review")).toBe("READY");
     expect(executor.tick(runId)).toBeGreaterThan(0);
     const normalized = loadRunSnapshot(runId)?.handoffs.find(
       (handoff) => handoff.fromNode === "normalize_glm_review" && handoff.port === "reviewed",
