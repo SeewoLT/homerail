@@ -577,11 +577,16 @@ On Linux Docker Nodes, Manager derives a trusted `codex_nested_sandbox` worker
 provisioning flag only from the combination of Codex app-server and
 `backend_native`; it is not a WorkflowSpec field. Node maps that boolean to the
 fixed Docker options `seccomp=unconfined` and `apparmor=unconfined`, which let
-Codex create its inner unprivileged `bwrap` namespace. These Workers are not
-privileged and receive no added Linux capabilities. Docker mount, network,
-user, cgroup, and workspace boundaries remain in force, while model-issued
-commands remain constrained by Codex's inner `workspace-write` sandbox. Other
-Worker backends and Plugin Runtime isolation are unchanged.
+Codex create an inner unprivileged `bwrap` namespace when the dispatch retains
+an inner sandbox. These Workers are not privileged and receive no added Linux
+capabilities. Auto Fix v2's writable coding roles explicitly select
+`codex_sandbox: danger-full-access`, so their model-issued commands are **not**
+constrained by Codex's inner `workspace-write` sandbox. Their containment relies
+on the disposable Worker container's mount, network, user, and cgroup
+boundaries, HomeRail's post-turn workspace-policy verification, and the
+Manager's credential and GitHub broker fences. Dispatches that do not opt into
+`danger-full-access` may still retain Codex's inner sandbox. Other Worker
+backends and Plugin Runtime isolation are unchanged.
 
 Writable Codex dispatches also receive a trusted dependency projection when
 the checked-out HomeRail dependency metadata matches the metadata baked
