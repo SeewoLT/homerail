@@ -21,6 +21,7 @@ import {
 } from "../src/orchestration/dag-dispatcher.js";
 import { GraphExecutor } from "../src/orchestration/graph-executor.js";
 import { validateJsonContract } from "../src/orchestration/json-contract.js";
+import { subscribe } from "../src/events/bus.js";
 import {
   compileWorkflowSource,
   parseWorkflowSource,
@@ -439,6 +440,9 @@ describe("PR Review scenario assets", () => {
       }],
       accepted_findings: [finding],
       coverage_attestation: null,
+      projection_truncated: false,
+      omitted_findings: 0,
+      omitted_diagnostics: 0,
     })).toMatchObject({ valid: true });
 
     const agents = parseWorkflowSource(source).meta.agents ?? {};
@@ -1106,6 +1110,92 @@ describe("PR Review scenario assets", () => {
     )?.content;
     expect(decision).toMatchObject({
       report: { status: "findings", actionable_count: 3, findings },
+      quorum: { passed: false, successes: 2, total: 3, threshold: 2 },
+    });
+    expect(getActiveRun(runId)?.status).toBe("cancelled");
+  });
+
+  it("keeps an oversized accepted-finding set fail-closed through the bounded projection", () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new ReentrantDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-oversized-evidence-projection";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    const largeFindings = Array.from({ length: 10 }, (_, index) => ({
+      ...finding,
+      severity: index === 9 ? "critical" : "medium",
+      title: `Large retained finding ${index + 1}`,
+      file: `src/large-${index + 1}.ts`,
+      line: index + 1,
+      evidence: String(index + 1).repeat(12_000),
+      recommendation: `R${index + 1}`.repeat(4_000),
+    }));
+    expect(() => handoffActiveRun(runId, "qwen_review", "voted", {
+      reviewer: "qwen",
+      status: "complete",
+      vote: "request_changes",
+      summary: "Large accepted findings with a missing coverage attestation.",
+      findings: largeFindings,
+    })).toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
+    const projectionEvents: unknown[] = [];
+    const unsubscribe = subscribe("dag:review_evidence_projection_truncated", (payload) => {
+      projectionEvents.push(payload);
+    });
+    expect(requestNodeCorrection(
+      runId,
+      "qwen_review",
+      "DAG_HANDOFF_CONTRACT_VIOLATION qwen_review.voted: coverage attestation is missing",
+      { finish_reason: "end_turn", output_tokens: 1200 },
+    ).status).toBe("scheduled");
+    unsubscribe();
+
+    const projection = getActiveRun(runId)?.dagRun.mailboxes
+      .get("normalize_qwen_review")?.get("evidence")?.[0] as Record<string, unknown>;
+    expect(projection).toMatchObject({
+      schema: "review-evidence-projection-v1",
+      reviewer: "qwen_review",
+      projection_truncated: true,
+    });
+    const retained = projection.accepted_findings as Array<Record<string, unknown>>;
+    expect(retained.length).toBeGreaterThan(0);
+    expect(retained.length).toBeLessThan(largeFindings.length);
+    expect(projection.omitted_findings).toBe(largeFindings.length - retained.length);
+    expect(retained[0]?.severity).toBe("critical");
+    expect(projectionEvents).toContainEqual(expect.objectContaining({
+      runId,
+      nodeId: "qwen_review",
+      omittedFindings: largeFindings.length - retained.length,
+    }));
+
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+    autoHandoffAfterCorrectionExhausted(
+      runId,
+      "qwen_review",
+      "agent ended without a contract-valid handoff",
+    );
+    handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi"));
+    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm"));
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+
+    const normalized = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "normalize_qwen_review" && handoff.port === "reviewed",
+    )?.content as Record<string, unknown>;
+    expect(normalized).toMatchObject({
+      reviewer: "qwen",
+      status: "failed",
+      vote: "abstain",
+      evidence_truncated: true,
+      findings: retained.map(({ id: _id, ...publicFinding }) => publicFinding),
+    });
+    const decision = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "decide" && handoff.port === "decided",
+    )?.content;
+    expect(decision).toMatchObject({
+      report: { status: "findings", actionable_count: retained.length },
       quorum: { passed: false, successes: 2, total: 3, threshold: 2 },
     });
     expect(getActiveRun(runId)?.status).toBe("cancelled");

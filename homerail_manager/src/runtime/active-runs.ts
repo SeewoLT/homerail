@@ -1735,6 +1735,14 @@ function _refreshReviewEvidenceProjection(
     if (!projection) return;
     run.dagRun.mailboxes.get(nodeId)?.set("review_evidence", [projection]);
     writeReviewEvidenceProjectionFile(evidenceContext);
+    if (projection.projection_truncated) {
+      emit("dag:review_evidence_projection_truncated", {
+        runId: run.runId,
+        nodeId,
+        omittedFindings: projection.omitted_findings,
+        omittedDiagnostics: projection.omitted_diagnostics,
+      });
+    }
     // Deliver the same bounded projection to downstream command nodes whose
     // ReviewEvidenceState inputs normalize persisted accepted evidence. This
     // must happen before correction-exhaustion returns so the final failed

@@ -7,6 +7,7 @@ export type DAGEventType =
   | "dag:node_state_changed"
   | "dag:node_chat_updated"
   | "dag:node_correction_requested"
+  | "dag:review_evidence_projection_truncated"
   | "dag:node_auto_handoff"
   | "dag:node_dispatch_retry"
   | "dag:node_session_reset"
@@ -86,6 +87,7 @@ export const DAG_EVENT_TYPES: DAGEventType[] = [
   "dag:status_update",
   "dag:node_state_changed",
   "dag:node_correction_requested",
+  "dag:review_evidence_projection_truncated",
   "dag:node_auto_handoff",
   "dag:node_dispatch_retry",
   "dag:node_session_reset",

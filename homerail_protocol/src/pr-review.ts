@@ -113,6 +113,9 @@ export interface ReviewEvidenceProjectionV1 {
   accepted_findings: ReviewFindingV1[];
   attempt_diagnostics: AttemptDiagnosticV1[];
   coverage_attestation?: ChangedFileCoverageAttestationV1 | null;
+  projection_truncated: boolean;
+  omitted_findings: number;
+  omitted_diagnostics: number;
 }
 
 function validationResult(valid: boolean, errors: Array<{ path: string; message: string }> = []): ValidationResultShape {
@@ -415,9 +418,6 @@ function normalizeEvidenceSubmission(
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
   };
   if (attestation) submission.coverage_attestation = attestation;
-  if (Buffer.byteLength(JSON.stringify(submission), "utf8") > REVIEW_EVIDENCE_PROJECTION_MAX_BYTES) {
-    return undefined;
-  }
   return submission;
 }
 
@@ -451,11 +451,11 @@ export function buildReviewEvidenceProjection(input: {
     ? input.reviewer.trim().slice(0, 256)
     : "";
   if (!reviewer) return undefined;
-  const findings: ReviewFindingV1[] = [];
+  const findings: Array<{ finding: ReviewFindingV1; index: number }> = [];
   for (const item of input.findings) {
     const finding = normalizeReviewFinding(item);
-    if (finding && !findings.some((existing) => existing.id === finding.id)) {
-      findings.push(finding);
+    if (finding && !findings.some((existing) => existing.finding.id === finding.id)) {
+      findings.push({ finding, index: findings.length });
     }
     if (findings.length >= REVIEW_MAX_FINDINGS) break;
   }
@@ -464,18 +464,51 @@ export function buildReviewEvidenceProjection(input: {
     const diagnostic = sanitizeAttemptDiagnostic(item);
     if (diagnostic) diagnostics.push(diagnostic);
   }
+  const severityRank: Record<ReviewFindingSeverity, number> = {
+    critical: 0,
+    high: 1,
+    medium: 2,
+    low: 3,
+  };
+  findings.sort((left, right) => (
+    severityRank[left.finding.severity] - severityRank[right.finding.severity]
+    || left.index - right.index
+  ));
   const projection: ReviewEvidenceProjectionV1 = {
     schema: REVIEW_EVIDENCE_PROJECTION_SCHEMA_ID,
     reviewer,
-    accepted_findings: findings,
-    attempt_diagnostics: diagnostics,
+    accepted_findings: [],
+    attempt_diagnostics: [],
     ...(input.coverage_attestation
       ? { coverage_attestation: input.coverage_attestation }
       : { coverage_attestation: null }),
+    projection_truncated: true,
+    omitted_findings: findings.length,
+    omitted_diagnostics: diagnostics.length,
   };
-  if (Buffer.byteLength(JSON.stringify(projection), "utf8") > REVIEW_EVIDENCE_PROJECTION_MAX_BYTES) {
-    return undefined;
+  const withinProjectionLimit = (): boolean => (
+    Buffer.byteLength(JSON.stringify(projection), "utf8") <= REVIEW_EVIDENCE_PROJECTION_MAX_BYTES
+  );
+  for (const { finding } of findings) {
+    projection.accepted_findings.push(finding);
+    projection.omitted_findings = findings.length - projection.accepted_findings.length;
+    if (!withinProjectionLimit()) {
+      projection.accepted_findings.pop();
+      projection.omitted_findings = findings.length - projection.accepted_findings.length;
+    }
   }
+  // Diagnostics are advisory when space is constrained. Select newest first
+  // so the normalizer retains the authoritative terminal attempt, then restore
+  // chronological order in the projection.
+  for (let index = diagnostics.length - 1; index >= 0; index--) {
+    projection.attempt_diagnostics.unshift(diagnostics[index]!);
+    projection.omitted_diagnostics = diagnostics.length - projection.attempt_diagnostics.length;
+    if (!withinProjectionLimit()) {
+      projection.attempt_diagnostics.shift();
+      projection.omitted_diagnostics = diagnostics.length - projection.attempt_diagnostics.length;
+    }
+  }
+  projection.projection_truncated = projection.omitted_findings > 0 || projection.omitted_diagnostics > 0;
   return projection;
 }
 
@@ -502,12 +535,41 @@ export function validateReviewEvidenceProjection(value: unknown): ValidationResu
   } else if (projection.attempt_diagnostics.some((item) => !sanitizeAttemptDiagnostic(item))) {
     errors.push({ path: "attempt_diagnostics", message: "attempt_diagnostics contains an invalid diagnostic" });
   }
+  if (typeof projection.projection_truncated !== "boolean") {
+    errors.push({ path: "projection_truncated", message: "projection_truncated must be a boolean" });
+  }
+  for (const field of ["omitted_findings", "omitted_diagnostics"] as const) {
+    const maximum = field === "omitted_findings" ? REVIEW_MAX_FINDINGS : REVIEW_MAX_DIAGNOSTICS;
+    if (
+      !Number.isSafeInteger(projection[field])
+      || Number(projection[field]) < 0
+      || Number(projection[field]) > maximum
+    ) {
+      errors.push({ path: field, message: `${field} must be an integer between 0 and ${maximum}` });
+    }
+  }
+  if (
+    projection.projection_truncated === false
+    && (projection.omitted_findings !== 0 || projection.omitted_diagnostics !== 0)
+  ) {
+    errors.push({ path: "projection_truncated", message: "an untruncated projection cannot omit evidence" });
+  }
+  if (
+    projection.projection_truncated === true
+    && projection.omitted_findings === 0
+    && projection.omitted_diagnostics === 0
+  ) {
+    errors.push({ path: "projection_truncated", message: "a truncated projection must report omitted evidence" });
+  }
   if (
     projection.coverage_attestation !== null
     && projection.coverage_attestation !== undefined
     && !validateChangedFileCoverageAttestationShape(projection.coverage_attestation).valid
   ) {
     errors.push({ path: "coverage_attestation", message: "coverage_attestation is invalid" });
+  }
+  if (Buffer.byteLength(JSON.stringify(projection), "utf8") > REVIEW_EVIDENCE_PROJECTION_MAX_BYTES) {
+    errors.push({ path: "", message: "evidence projection exceeds the bounded byte limit" });
   }
   return validationResult(errors.length === 0, errors);
 }

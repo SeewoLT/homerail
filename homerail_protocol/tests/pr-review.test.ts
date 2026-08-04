@@ -12,6 +12,7 @@ import {
   findingDedupKey,
   isFullGitRevision,
   normalizeReviewFinding,
+  REVIEW_EVIDENCE_PROJECTION_MAX_BYTES,
   REVIEW_EVIDENCE_SCHEMA_ID,
   sanitizeAttemptDiagnostic,
   validateChangedFileCoverageAttestation,
@@ -278,7 +279,51 @@ describe("review evidence submission and projection", () => {
     expect(projection?.accepted_findings).toHaveLength(1);
     expect(projection?.attempt_diagnostics).toHaveLength(1);
     expect(projection?.coverage_attestation).toEqual(attestation);
+    expect(projection).toMatchObject({
+      projection_truncated: false,
+      omitted_findings: 0,
+      omitted_diagnostics: 0,
+    });
     expect(validateReviewEvidenceProjection({ ...projection, reviewer: "" }).valid).toBe(false);
     expect(validateReviewEvidenceProjection({ ...projection, coverage_attestation: { digest: "bad" } }).valid).toBe(false);
+  });
+
+  it("retains high-severity findings and marks oversized projections instead of dropping all evidence", () => {
+    const findings = Array.from({ length: 10 }, (_, index) => sampleFinding({
+      id: reviewFindingDedupKey(`src/large-${index}.ts`, index + 1, `Large finding ${index}`),
+      severity: index === 9 ? "critical" : "medium",
+      title: `Large finding ${index}`,
+      file: `src/large-${index}.ts`,
+      line: index + 1,
+      evidence: String(index).repeat(12_000),
+      recommendation: `R${index}`.repeat(4_000),
+    }));
+    const submission = extractReviewEvidence({
+      reviewer: "qwen",
+      findings,
+      coverage: { digest: attestation.digest, count: attestation.count },
+    });
+    expect(submission?.findings).toHaveLength(findings.length);
+
+    const projection = buildReviewEvidenceProjection({
+      reviewer: "qwen",
+      findings: submission!.findings,
+      diagnostics: Array.from({ length: 8 }, (_, index) => ({
+        attempt: index + 1,
+        finish_reason: `attempt-${index + 1}`,
+        failure_category: "contract_validation_failed",
+      })),
+      coverage_attestation: attestation,
+    });
+    expect(projection).toBeDefined();
+    expect(Buffer.byteLength(JSON.stringify(projection), "utf8"))
+      .toBeLessThanOrEqual(REVIEW_EVIDENCE_PROJECTION_MAX_BYTES);
+    expect(projection).toMatchObject({ projection_truncated: true });
+    expect(projection!.accepted_findings.length).toBeGreaterThan(0);
+    expect(projection!.accepted_findings.length).toBeLessThan(findings.length);
+    expect(projection!.omitted_findings).toBe(findings.length - projection!.accepted_findings.length);
+    expect(projection!.accepted_findings[0]?.severity).toBe("critical");
+    expect(projection!.attempt_diagnostics.at(-1)?.attempt).toBe(8);
+    expect(validateReviewEvidenceProjection(projection).valid).toBe(true);
   });
 });
