@@ -1082,7 +1082,33 @@ function _applyOrphanedNodeDemotion(run: ActiveRun): string[] {
     });
   }
 
-  const skippedBlockedNodes = reconcileFailedDependencies(run.dagRun);
+  const skippedBlockedNodes = new Set(reconcileFailedDependencies(run.dagRun));
+
+  // A loop gateway is deliberately left RUNNING while it waits for feedback,
+  // so it is not an orphan merely because the Manager restarted. It does become
+  // stranded when every path that could still produce feedback was settled by
+  // the orphan demotion above. Fail that dormant gateway as well; otherwise its
+  // untaken terminal branches stay PENDING and the recovered run can never
+  // become terminal.
+  const strandedLoopSources = Array.from(run.dagRun.loopSources)
+    .filter((nodeId) => (
+      run.dagRun.nodeStates.get(nodeId) === "RUNNING"
+      && !_loopSourceHasLiveFeedbackPath(run, nodeId, new Set([nodeId]))
+    ));
+  for (const nodeId of strandedLoopSources) {
+    const reason = "loop feedback path lost: manager process restarted";
+    const current = run.nodeSessions.get(nodeId);
+    if (current) {
+      _persistNodeSession(run, nodeId, { ...current, status: "failed" });
+    }
+    failNode(run.dagRun, nodeId, { error: reason });
+    demotedFromRunning.push(nodeId);
+    emit("dag:node_failed", { runId: run.runId, nodeId, reason });
+  }
+
+  for (const nodeId of reconcileFailedDependencies(run.dagRun)) {
+    skippedBlockedNodes.add(nodeId);
+  }
   for (const nodeId of skippedBlockedNodes) {
     _markNodeSessionStatus(run, nodeId, "cancelled");
   }
@@ -1107,6 +1133,36 @@ function _applyOrphanedNodeDemotion(run: ActiveRun): string[] {
   }
 
   return demotedFromRunning;
+}
+
+function _loopSourceHasLiveFeedbackPath(
+  run: ActiveRun,
+  nodeId: string,
+  visiting: Set<string>,
+): boolean {
+  const mailbox = run.dagRun.mailboxes.get(nodeId);
+  if (mailbox && Array.from(mailbox.values()).some((values) => values.length > 0)) return true;
+
+  const feedbackSources = run.dagRun.graph.edges
+    .filter((edge) => edge.to_node === nodeId && edge.label !== "after_dep" && edge.from_node)
+    .map((edge) => edge.from_node);
+  return feedbackSources.some((sourceId) => _nodeHasLivePath(run, sourceId, visiting));
+}
+
+function _nodeHasLivePath(run: ActiveRun, nodeId: string, visiting: Set<string>): boolean {
+  if (visiting.has(nodeId)) return false;
+  const state = run.dagRun.nodeStates.get(nodeId);
+  if (state === "READY" || state === "WAITING_FOR_APPROVAL" || state === "WAITING_FOR_COMMAND") return true;
+  if (state === "RUNNING" && !run.dagRun.loopSources.has(nodeId)) return true;
+  if (state !== "PENDING" && state !== "RUNNING") return false;
+
+  const nextVisiting = new Set(visiting).add(nodeId);
+  if (state === "RUNNING") {
+    return _loopSourceHasLiveFeedbackPath(run, nodeId, nextVisiting);
+  }
+  return run.dagRun.graph.edges
+    .filter((edge) => edge.to_node === nodeId && edge.from_node)
+    .some((edge) => _nodeHasLivePath(run, edge.from_node, nextVisiting));
 }
 
 function _skipPendingNodesWhenFailureStalls(run: ActiveRun): string[] {
