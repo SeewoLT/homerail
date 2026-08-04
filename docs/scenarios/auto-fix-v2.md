@@ -13,12 +13,12 @@ predates the runtime and broker support described below.
 
 - `task_document`, `task_plan`, and `pr_context` are staged as content-addressed
   Manager artifacts and projected read-only below `/workspace/input`.
-- The trusted caller owns worker decomposition. Dynamic DeepSeek V4 Flash
+- The trusted caller owns worker decomposition. Dynamic Qwen3.8-Max
   implementers receive the validated plan, isolated Git worktrees, and no
   GitHub credential. Their worker policy must explicitly
   declare `{{fanout_workspace}}`; Manager resolves it to the unique child
   worktree, so isolation never creates an implicit write grant.
-- DeepSeek coding roles explicitly select
+- Qwen3.8-Max coding roles explicitly select
   `builtin_tool_policy: backend_native`. This is a Codex-only opt-in to the
   native sandboxed shell/patch surface, is mutually exclusive with the exact
   Claude-style `allowed_builtin_tools` field, and requires `workspace_access`.
@@ -42,7 +42,7 @@ predates the runtime and broker support described below.
   prompts require build/typecheck/test to run directly against these projected
   dependencies rather than `npm ci`. Tasks that change package metadata need a future trusted
   dependency-update service outside the model container.
-- The DeepSeek aggregator may read and update only the bound Draft PR through
+- The Qwen3.8-Max aggregator may read and update only the bound Draft PR through
   the `github_pr` Manager broker. `commit_workspace` derives every dirty path
   and byte from the node's single declared writable worktree and publishes one
   commit, so the model cannot omit a file or spend output context on base64.
@@ -72,7 +72,7 @@ predates the runtime and broker support described below.
   nested writable mount only at `/workspace/.homerail-runtime` for trusted
   Worker audit/session telemetry. This prevents audit writer startup from
   crashing a read-only Worker without granting repository writes.
-- Each review with actionable defects creates one fresh dynamic DeepSeek fixer.
+- Each review with actionable defects creates one fresh dynamic Qwen3.8-Max fixer.
   The loop permits at most four fixes. Aggregation and every fix run all
   caller-authored `local_tests` inside their disposable container worktree and
   submit a mandatory SHA-256-bound `TestReport` file. Manager verifies the file
@@ -243,17 +243,17 @@ stale-head report cannot reach review.
 
 ## Model profile
 
-The stable Manager must contain an active Responses-compatible DeepSeek V4
-Flash setting and an active Anthropic-compatible GLM-5.2 setting. Configure the
+The stable Manager must contain an active Responses-compatible Qwen3.8-Max
+Token Plan setting and an active Anthropic-compatible GLM-5.2 setting. Configure the
 profile with:
 
 ```bash
-export HOMERAIL_AUTO_FIX_V2_IMPLEMENTATION_MODEL='<DeepSeek V4 Flash setting id>'
+export HOMERAIL_AUTO_FIX_V2_IMPLEMENTATION_MODEL='<Qwen3.8-Max setting id>'
 export HOMERAIL_AUTO_FIX_V2_REVIEW_MODEL='<GLM-5.2 setting id>'
 node scripts/configure-auto-fix-v2-runtime-profile.mjs
 ```
 
-DeepSeek implementers, aggregator, and fixers use the Codex app-server harness
+Qwen3.8-Max implementers, aggregator, and fixers use the Codex app-server harness
 against the Responses endpoint with `reasoning_effort: max`. Long multi-minute
 reasoning and high tool counts are expected; operators must not treat elapsed
 thinking time as a stuck worker. Codex app-server emits a content-free

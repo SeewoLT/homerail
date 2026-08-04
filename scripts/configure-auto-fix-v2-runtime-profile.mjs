@@ -3,7 +3,7 @@
 import { pathToFileURL } from "node:url";
 
 const ROLE_PATTERNS = Object.freeze({
-  implementation: /deepseek.*v4.*flash|v4.*flash.*deepseek/i,
+  implementation: /(?:^|\s)qwen[-_. /]*3(?:[-_. /]*8|\.8)[-_. /]*max(?:\s|$)/i,
   review: /glm[-_. /]*5(?:[-_. /]*2|\.2)/i,
 });
 
@@ -60,7 +60,7 @@ export function autoFixV2RuntimeProfileYaml({ profileId, implementation, review 
   return [
     `profile_id: ${yamlString(profileId)}`,
     "workflow_id: auto-fix-v2",
-    "description: Caller-authored task plan, DeepSeek V4 Flash Codex/max implementation/fix/aggregation, and fresh GLM-5.2 review.",
+    "description: Caller-authored task plan, Qwen3.8-Max Codex/max implementation/fix/aggregation, and fresh GLM-5.2 review.",
     "agents:",
     ...agentEntry("implementer", implementation, "codex_appserver", "max"),
     ...agentEntry("aggregator", implementation, "codex_appserver", "max"),

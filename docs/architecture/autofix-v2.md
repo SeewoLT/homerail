@@ -43,10 +43,10 @@ to stand in for durable task state and deterministic evidence.
 - Bind every mutable PR operation to an exact repository, PR number, branch,
   base SHA, and expected head SHA.
 - Require the trusted caller to supply a bounded, immutable work plan.
-- Dynamically fan out one to three independent DeepSeek V4 Flash implementers.
-- Use a DeepSeek V4 Flash aggregator to integrate worker patches.
+- Dynamically fan out one to three independent Qwen3.8-Max implementers.
+- Use a Qwen3.8-Max aggregator to integrate worker patches.
 - Use a fresh-context GLM-5.2 reviewer for every review round.
-- Dynamically create a fresh DeepSeek V4 Flash fixer when review rejects the
+- Dynamically create a fresh Qwen3.8-Max fixer when review rejects the
   current candidate.
 - Bound the loop to four fixes and require two consecutive clean fresh-context
   reviews of the final unchanged head.
@@ -98,9 +98,9 @@ to stand in for durable task state and deterministic evidence.
 caller creates immutable task + task-plan inputs and identifies an existing Draft PR
   -> bind task SHA + immutable PR base/head snapshot
   -> validate the caller-authored 1..3 parallel-safe WorkItems
-  -> dynamic DeepSeek implementers work in isolated worktrees
+  -> dynamic Qwen3.8-Max implementers work in isolated worktrees
   -> deterministic patch collection and safety checks
-  -> DeepSeek aggregator integrates patches in declared order
+  -> Qwen3.8-Max aggregator integrates patches in declared order
        -> run every immutable local_tests command
        -> broker fast-forward pushes candidate round 1 to Draft PR
        -> write and hash required local TestReport outside the PR commit
@@ -108,8 +108,8 @@ caller creates immutable task + task-plan inputs and identifies an existing Draf
        -> Manager assesses weighted defect load + 100% coverage + TestReport
        -> clean: second fresh GLM repeats full review on the unchanged head
             -> clean again: ready_for_ci
-            -> defect: fresh DeepSeek fixer
-       -> defect: fresh DeepSeek fixer
+            -> defect: fresh Qwen3.8-Max fixer
+       -> defect: fresh Qwen3.8-Max fixer
   -> fixer runs every local_test, publishes one fenced commit, writes TestReport
        -> fresh primary review, then clean confirmation
   -> fourth unsuccessful fix cycle: needs_human
@@ -353,7 +353,7 @@ declared worktree policy. Manager then creates and validates one commit per
 successful worker, preserving a durable exact proposal without granting the
 model access to the shared repository's `.git` directory.
 
-The DeepSeek aggregator receives the immutable task, WorkPlan, bounded worker
+The Qwen3.8-Max aggregator receives the immutable task, WorkPlan, bounded worker
 reports, Manager-created commits, and conflict metadata. It inspects those
 commits read-only and copies or applies their file changes in WorkPlan order to
 the integration checkout; it does not stage, commit, merge, or cherry-pick. It
@@ -442,7 +442,7 @@ workers. `session_scope: dispatch` means:
 GLM receives only the immutable task, current PR context and diff, the current
 TestReport reference, and exact-head repository bytes returned by the read-only
 `read_file` broker action. It has no local repository mount, so an uncommitted
-integration or fixer worktree cannot be mistaken for the Draft PR. A new DeepSeek fixer
+integration or fixer worktree cannot be mistaken for the Draft PR. A new Qwen3.8-Max fixer
 receives those inputs plus the current structured findings. Neither receives
 previous review prose that is absent from the current contract.
 
@@ -539,10 +539,10 @@ the pair and its action-specific input.
 | --- | --- | --- | --- |
 | Binder | trusted command | fixed command only | `pull_request_snapshot` |
 | Caller plan validator | trusted command | fixed command only | none |
-| DeepSeek implementer | isolated worktree | bounded read/write/shell | none |
-| DeepSeek aggregator | integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
+| Qwen3.8-Max implementer | isolated worktree | bounded read/write/shell | none |
+| Qwen3.8-Max aggregator | integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
 | GLM reviewer | immutable input only; exact diffs/files via broker | Read/Grep/Glob | `pull_request_snapshot`, `read_diff`, `read_file`, `assess_review` |
-| DeepSeek fixer | fresh integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
+| Qwen3.8-Max fixer | fresh integration worktree | bounded read/write/shell | `pull_request_snapshot`, `commit_workspace` |
 
 Reviewer mutation is intentionally excluded. If operator-visible comments are
 required later, add only `post_comment`; never grant review approval or merge
@@ -555,12 +555,12 @@ profile:
 
 | Agent role | Required setting |
 | --- | --- |
-| `implementer` | DeepSeek V4 Flash |
-| `aggregator` | DeepSeek V4 Flash |
-| `fixer` | DeepSeek V4 Flash |
+| `implementer` | Qwen3.8-Max |
+| `aggregator` | Qwen3.8-Max |
+| `fixer` | Qwen3.8-Max |
 | `reviewer` | GLM-5.2 |
 
-All DeepSeek V4 Flash roles use the container Codex app-server Responses
+All Qwen3.8-Max roles use the container Codex app-server Responses
 harness with explicit `reasoning_effort: max` and explicit
 `builtin_tool_policy: backend_native`; their long reasoning phase is normal and
 is not an execution timeout signal. The adapter waits until a notification,
@@ -600,9 +600,9 @@ closed without opening network access.
 Before a real run, the stable adapter resolves each selector to exactly one
 active LLM setting, confirms the required compatible harness and endpoint, and
 runs bounded capability smokes for tool use, structured handoff, and fresh
-session behavior. DeepSeek V4 Flash is not currently a built-in catalog model,
-so the pilot must treat it as an explicitly configured custom setting rather
-than silently selecting another DeepSeek model.
+session behavior. Qwen3.8-Max is selected from the built-in Aliyun Token Plan
+catalog and must expose the Responses endpoint; the profile fails closed rather
+than silently selecting `qwen3.8-max-preview` or another Qwen model.
 
 ## Recovery And Durable State
 

@@ -16,8 +16,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const primary = {
   id: "setting-qwen38",
-  display_name: "qwen3.8-max-preview",
-  model_name: "qwen3.8-max-preview",
+  display_name: "qwen3.8-max",
+  model_name: "qwen3.8-max",
   is_active: true,
   supports_llm: true,
   anthropic_base_url: "https://qwen.example.test/anthropic",
@@ -40,7 +40,7 @@ const third = {
 };
 
 test("selects one active Anthropic-compatible stable Manager model", () => {
-  assert.equal(selectRuntimeSetting([primary, arbiter], "qwen3.8-max-preview", "primary"), primary);
+  assert.equal(selectRuntimeSetting([primary, arbiter], "qwen3.8-max", "primary"), primary);
   assert.equal(selectRuntimeSetting([primary, arbiter], "setting-k3", "arbiter"), arbiter);
   assert.throws(
     () => selectRuntimeSetting([primary, { ...primary, id: "other" }], primary.model_name, "primary"),

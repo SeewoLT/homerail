@@ -134,6 +134,11 @@ Runner repository configuration:
   the final review vote. All three settings must expose Anthropic-compatible
   endpoints because these DAG workers use the Claude Agent SDK harness.
 
+The production profile binds `qwen_reviewer` to the released `qwen3.8-max`
+Aliyun Token Plan setting, `kimi_reviewer` to K3, and `glm_reviewer` to
+GLM-5.2. Do not retain `qwen3.8-max-preview` as the primary selector after the
+released model is available.
+
 The GitHub Actions adapter supplies `github.api_url` as
 `HOMERAIL_GITHUB_API_BASE_URL`, so credential-free-accessible GitHub Enterprise
 repositories use the correct metadata and checkout host instead of deriving a

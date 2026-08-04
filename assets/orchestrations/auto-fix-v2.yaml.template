@@ -11,14 +11,14 @@ metadata:
 spec:
   description: |
     A document-first Auto Fix workflow. The trusted caller supplies a bounded,
-    immutable worker plan; dynamic DeepSeek V4 Flash workers implement its
-    isolated sub-tasks, one DeepSeek aggregator publishes a candidate through
+    immutable worker plan; dynamic Qwen3.8-Max workers implement its isolated
+    sub-tasks, one Qwen3.8-Max aggregator publishes a candidate through
     the GitHub broker, and fresh-context GLM-5.2 reviewers drive at most four
     fix rounds. Aggregation and every fix must submit a Manager-verified local
     TestReport; the loop never dispatches GitHub CI. Convergence requires zero
     weighted actionable defects, complete exact-head diff coverage, passing
     local evidence, and two consecutive clean reviews of the same head.
-    Revisions are performed by newly generated DeepSeek workers. The immutable
+    Revisions are performed by newly generated Qwen3.8-Max workers. The immutable
     task document, worker plan, and PR binding are mounted below /workspace/input.
 
   workspace: { mode: shared }
@@ -381,7 +381,7 @@ spec:
 
   agents:
     implementer:
-      description: DeepSeek V4 Flash isolated implementation worker
+      description: Qwen3.8-Max isolated implementation worker
       system: |
         Implement only the caller-authored input.item inside
         input.workspace_path. The immutable task plan owns worker division;
@@ -400,7 +400,7 @@ spec:
         committing.
 
     aggregator:
-      description: DeepSeek V4 Flash candidate integrator
+      description: Qwen3.8-Max candidate integrator
       system: |
         Treat the dynamic worker results as proposals. Inspect every
         Manager-created commit read-only, then copy or apply its file changes
@@ -501,7 +501,7 @@ spec:
         alter the score yourself.
 
     fixer:
-      description: DeepSeek V4 Flash dynamically generated PR fixer
+      description: Qwen3.8-Max dynamically generated PR fixer
       system: |
         You are a newly generated fixer for one review round. Work only in
         input.workspace_path. Use credential_broker_call with credential_ref

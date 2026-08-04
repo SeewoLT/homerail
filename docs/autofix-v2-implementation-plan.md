@@ -38,7 +38,7 @@ Required before the first real low-risk Issue pilot:
 - create the same-repository Draft PR and immutable `pr-context.json`;
 - install `github-autofix` as an encrypted fine-grained PAT or GitHub App
   credential;
-- verify the stable Manager still has active, runnable DeepSeek V4 Flash and
+- verify the stable Manager still has active, runnable Qwen3.8-Max and
   GLM-5.2 settings after deploying the v2-capable release;
 - sync the opt-in workflow and mixed-model profile, then run a
   broker-write-disabled real PR snapshot dry run;
@@ -53,14 +53,14 @@ Deliver a manual `auto-fix-v2` workflow in which:
   Draft PR context;
 - the DAG validates and executes the caller-authored one to three parallel-safe
   work items without repeating analysis inside the execution graph;
-- dynamically created DeepSeek V4 Flash implementers work without remote
+- dynamically created Qwen3.8-Max implementers work without remote
   credentials in isolated worktrees;
-- a DeepSeek V4 Flash aggregator integrates their patches;
+- a Qwen3.8-Max aggregator integrates their patches;
 - aggregation and every fix submit a Manager-verified exact-head TestReport;
 - GLM-5.2 reviews each candidate with a fresh provider context;
 - Manager quantifies convergence from full diff coverage, weighted actionable
   findings, passing local evidence, and two clean reviews of one unchanged head;
-- a new DeepSeek V4 Flash fixer handles each rejected round;
+- a new Qwen3.8-Max fixer handles each rejected round;
 - no more than four fix rounds run;
 - only the aggregator and fixers can request fast-forward PR writes through a
   least-privilege Manager broker;
@@ -269,14 +269,14 @@ Tests:
 - [ ] Require a versioned immutable `task_plan` with one to three independent
       WorkItems bound to `task_document_sha256`.
 - [ ] Reject arbitrary graph mutation and dependent parallel tasks.
-- [ ] Dynamically create one DeepSeek V4 Flash implementer per item.
+- [ ] Dynamically create one Qwen3.8-Max implementer per item.
 - [ ] Run each child in its isolated worktree without a PR broker.
 - [ ] Capture and validate one patch artifact per successful child.
 
 ### AFV2-503: Build aggregation and local evidence
 
 - [ ] Apply worker patches in the WorkPlan's declared order.
-- [ ] Give DeepSeek V4 Flash an integration worktree and bounded conflict
+- [ ] Give Qwen3.8-Max an integration worktree and bounded conflict
       metadata.
 - [ ] Deterministically collect the aggregate patch.
 - [ ] Let the aggregator push the patch-safe first candidate through the
@@ -292,7 +292,7 @@ Tests:
       fencing; write its local TestReport only after source publication so the
       report does not enter the PR.
 - [ ] Dispatch GLM-5.2 with fresh context against the exact pushed head.
-- [ ] On rejection, dynamically create one fresh DeepSeek V4 Flash fixer.
+- [ ] On rejection, dynamically create one fresh Qwen3.8-Max fixer.
 - [ ] Make every fix produce a new fenced patch, broker receipt, and TestReport.
 - [ ] Require defect load zero, coverage 1.0, passing exact-head evidence, and
       two consecutive clean fresh-context reviews on the unchanged head.
@@ -301,15 +301,15 @@ Tests:
 
 ### AFV2-505: Add the mixed-model runtime profile
 
-- [ ] Resolve one active DeepSeek V4 Flash setting for `implementer`,
+- [ ] Resolve one active Qwen3.8-Max setting for `implementer`,
       `aggregator`, and `fixer`.
 - [ ] Resolve one active GLM-5.2 setting for `reviewer`.
 - [ ] Require Codex app-server Responses with `reasoning_effort: max` for every
-      DeepSeek role and Claude Agent SDK for GLM review.
+      Qwen3.8-Max role and Claude Agent SDK for GLM review.
 - [ ] Add preflight smokes for built-in tools, structured handoff, and fresh
       context.
-- [ ] Fail explicitly when DeepSeek V4 Flash is unavailable; do not substitute
-      `deepseek-chat`, `deepseek-reasoner`, or another model.
+- [ ] Fail explicitly when Qwen3.8-Max is unavailable; do not substitute
+      `qwen3.8-max-preview`, `qwen3.7-max`, or another model.
 
 Likely new assets:
 
