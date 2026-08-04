@@ -81,6 +81,43 @@ describe("prompt runner", () => {
     expect(activities.map((activity) => activity.sequence)).toEqual([1, 2]);
   });
 
+  it("renews activity for reasoning without streaming or persisting its content", async () => {
+    const mockAgent: AgentClient = {
+      run() {
+        return (async function* () {
+          yield { type: "thinking" as const, text: "private chain of thought" };
+          yield { type: "thinking" as const, text: "more private reasoning" };
+          yield { type: "done" as const };
+        })();
+      },
+    };
+    registerAgentBackend("test-reasoning-heartbeat", () => mockAgent);
+
+    const sent: string[] = [];
+    await runPrompt(
+      {
+        task: "reason for a long time",
+        sender: "test",
+        runId: "run-reasoning-heartbeat",
+        dagConfig: makeConfig(),
+      },
+      {
+        wsSend: (data) => sent.push(data),
+        agentBackend: "test-reasoning-heartbeat",
+      },
+    );
+
+    const serialized = sent.join("\n");
+    expect(serialized).not.toContain("private chain of thought");
+    expect(serialized).not.toContain("more private reasoning");
+    const activities = sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === "stream" && message.data?.event === "dag_activity")
+      .map((message) => message.data.activity);
+    expect(activities.map((activity) => activity.type)).toEqual(["started", "progress", "failed"]);
+    expect(activities[1]?.payload).toEqual({ message: "model reasoning" });
+  });
+
   it("sends node_error with agent error when a prompt ends without handoff", async () => {
     const mockAgent: AgentClient = {
       run() {
@@ -281,6 +318,51 @@ describe("prompt runner", () => {
     expect(observedContext?.systemPrompt).toContain(
       "declared credential broker verification calls followed by exactly one handoff",
     );
+  });
+
+  it("permits only evidence-file repair before the corrected handoff", async () => {
+    let observedTools: string[] = [];
+    let observedContext: AgentRunContext | undefined;
+    const sent: string[] = [];
+    const mockAgent: AgentClient = {
+      run(_prompt, tools, context) {
+        observedTools = tools.map((tool) => tool.name);
+        observedContext = context;
+        return (async function* () {
+          await tools.find((tool) => tool.name === "handoff")!.handler({ port: "done", content: "corrected" });
+          yield { type: "done" as const };
+        })();
+      },
+    };
+    registerAgentBackend("test-correction-evidence", () => mockAgent);
+
+    await runPrompt(
+      {
+        task: "## input:context\n{}\n\n## input:correction\nDAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT aggregate.candidate: invalid TestReport",
+        sender: "test",
+        runId: "run-correction-evidence",
+        dagConfig: makeConfigWith({
+          allowed_dag_tools: ["handoff", "credential_broker_call"],
+          workspace_access: { writable_paths: ["repo"], readonly_paths: ["input"] },
+        }),
+      },
+      {
+        wsSend: (message) => sent.push(message),
+        agentBackend: "test-correction-evidence",
+      },
+    );
+
+    expect(observedTools).toEqual(["handoff"]);
+    expect(observedContext?.handoffOnly).toBe(false);
+    expect(observedContext?.workspaceAccess).toEqual({ writable_paths: ["repo"], readonly_paths: ["input"] });
+    expect(observedContext?.systemPrompt).toContain(
+      "inspect and rewrite only the declared .homerail workspace evidence JSON",
+    );
+    expect(observedContext?.systemPrompt).toContain("Do not modify source files, rerun tests, or repeat external side effects");
+    const policySnapshot = sent.map((message) => JSON.parse(message)).find((message) => (
+      message.type === "stream" && message.data?.event === "workspace_policy_snapshot"
+    ));
+    expect(policySnapshot?.data?.writable_paths).toEqual(["repo/.homerail"]);
   });
 
   it("keeps the Claude Code preset for ordinary DAG work", async () => {
@@ -584,6 +666,65 @@ describe("prompt runner", () => {
         message: "allowed_builtin_tools is not enforced by agent backend 'kimi_code'",
       }),
     }));
+  });
+
+  it("allows explicit backend-native tools only for sandboxed Codex DAG turns", async () => {
+    let called = false;
+    const mockAgent: AgentClient = {
+      run(_prompt, _tools, context) {
+        called = true;
+        expect(context.workspaceAccess).toEqual({ writable_paths: ["repo"], readonly_paths: ["input"] });
+        return (async function* () {
+          yield { type: "done" as const };
+        })();
+      },
+    };
+    registerAgentBackend("codex_appserver", () => mockAgent);
+
+    const sent: string[] = [];
+    await runPrompt({
+      task: "use the native coding surface",
+      sender: "test",
+      runId: "run-codex-native-tools",
+      llmProtocol: "responses_compatible",
+      dagConfig: makeConfigWith({
+        agent_type: "codex_appserver",
+        builtin_tool_policy: "backend_native",
+        workspace_access: { writable_paths: ["repo"], readonly_paths: ["input"] },
+      }),
+    }, {
+      wsSend: (data) => sent.push(data),
+      agentBackend: "codex_appserver",
+    });
+
+    expect(called).toBe(true);
+    expect(sent.map((message) => JSON.parse(message)).filter((message) => message.type === "node_error"))
+      .toEqual([expect.objectContaining({ data: expect.objectContaining({ message: "agent ended without DAG handoff" }) })]);
+
+    for (const invalid of [
+      makeConfigWith({ builtin_tool_policy: "backend_native" }),
+      makeConfigWith({
+        builtin_tool_policy: "backend_native",
+        allowed_builtin_tools: ["Write"],
+        workspace_access: { writable_paths: ["repo"] },
+      }),
+    ]) {
+      const rejected: string[] = [];
+      await runPrompt({
+        task: "reject",
+        sender: "test",
+        runId: "run-invalid-native-tools",
+        llmProtocol: "anthropic_compatible",
+        dagConfig: invalid,
+      }, {
+        wsSend: (data) => rejected.push(data),
+        agentBackend: "claude-sdk",
+      });
+      expect(rejected.map((message) => JSON.parse(message))).toContainEqual(expect.objectContaining({
+        type: "node_error",
+        data: expect.objectContaining({ message: expect.stringMatching(/backend_native|mutually exclusive/) }),
+      }));
+    }
   });
 
   it("defers node_error delivery to the worker lifecycle when requested", async () => {

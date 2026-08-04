@@ -19,7 +19,7 @@ import { getRunArtifactBlobPath } from "../src/persistence/run-artifacts.js";
 import { loadRunSnapshot } from "../src/persistence/store.js";
 import {
   _clearActiveRuns,
-  failActiveRun,
+  autoHandoffAfterCorrectionExhausted,
   getActiveRun,
   handoffActiveRun,
 } from "../src/runtime/active-runs.js";
@@ -69,14 +69,14 @@ function passingReviewReport(): Record<string, unknown> {
     base: "a".repeat(40),
     head: "b".repeat(40),
     status: "pass",
-    confidence: "medium",
-    summary: "Three-model review: 2 approve, 1 request changes, 0 abstain.",
+    confidence: "high",
+    summary: "Three-model review: 3 approve, 0 request changes, 0 abstain; 0 retained actionable findings.",
     actionable_count: 0,
     findings: [],
     reviewer_results: [
       modelReview("qwen"),
       modelReview("kimi"),
-      modelReview("glm", "request_changes"),
+      modelReview("glm"),
     ],
   };
 }
@@ -198,7 +198,10 @@ describe("PR Review scenario assets", () => {
       .toEqual([...modelNodes].sort());
     for (const nodeId of modelNodes) {
       expect(nodes.find((node) => node.id === nodeId)).toMatchObject({
-        outputs: expect.arrayContaining([expect.objectContaining({ name: "voted", contract: "VerificationVote" })]),
+        outputs: expect.arrayContaining([
+          expect.objectContaining({ name: "voted", contract: "VerificationVote" }),
+          expect.objectContaining({ name: "failed", contract: "VerificationVote" }),
+        ]),
         config: expect.objectContaining({
           allowed_builtin_tools: ["Glob", "Grep", "LS", "Read"],
           allowed_dag_tools: ["handoff"],
@@ -231,7 +234,7 @@ describe("PR Review scenario assets", () => {
       max_parallelism: 3,
       max_dispatches: 12,
       max_corrections_per_node: 2,
-      max_tool_calls_per_node: 50,
+      max_tool_calls_per_node: 0,
     });
 
     const contracts = parseWorkflowSource(source).meta.contracts ?? {};
@@ -254,10 +257,12 @@ describe("PR Review scenario assets", () => {
       expect(agents[agentId]?.system).toMatch(/copy\s+input\.context\.changed_files exactly/);
       expect(agents[agentId]?.system).toContain("including lockfiles");
       expect(agents[agentId]?.system).toContain("untrusted source");
+      expect(agents[agentId]?.system).toContain("never call it as a probe or test");
+      expect(agents[agentId]?.system).toContain("never use the failed port");
     }
   });
 
-  it("counts approvals deterministically and blocks request-changes or split votes", () => {
+  it("retains every complete finding and passes only with two approvals plus zero findings", () => {
     const { code, args } = commandCode("decide");
     const context = {
       repo: "xiaotianfotos/homerail",
@@ -282,8 +287,8 @@ describe("PR Review scenario assets", () => {
       modelReview("kimi"),
       modelReview("glm", "request_changes"),
     ])).toMatchObject({
-      report: { status: "pass", actionable_count: 0 },
-      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
+      report: { status: "findings", actionable_count: 1 },
+      quorum: { passed: false, successes: 2, total: 3, threshold: 2 },
     });
     expect(execute([
       modelReview("qwen", "request_changes"),
@@ -294,8 +299,27 @@ describe("PR Review scenario assets", () => {
       quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
     });
     expect(execute([
+      modelReview("qwen", "request_changes"),
+      {
+        ...modelReview("kimi", "request_changes"),
+        findings: [{ ...finding, evidence: "A distinct exact-line failure mode." }],
+      },
+      modelReview("glm"),
+    ])).toMatchObject({
+      report: { status: "findings", actionable_count: 2 },
+      quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
+    });
+    expect(execute([
       modelReview("qwen"),
       modelReview("kimi", "request_changes"),
+      modelReview("glm", "abstain"),
+    ])).toMatchObject({
+      report: { status: "findings", actionable_count: 1 },
+      quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
+    });
+    expect(execute([
+      modelReview("qwen"),
+      modelReview("kimi", "abstain"),
       modelReview("glm", "abstain"),
     ])).toMatchObject({
       report: { status: "inconclusive", actionable_count: 0 },
@@ -328,6 +352,21 @@ describe("PR Review scenario assets", () => {
     });
   });
 
+  it("rejects an unstructured reviewer failure-port probe for correction", () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-failure-port-probe";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    expect(() => handoffActiveRun(runId, "kimi_review", "failed", "probe"))
+      .toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
+    expect(getActiveRun(runId)?.dagRun.handoffedNodes.has("kimi_review")).toBe(false);
+  });
+
   it("executes the compact graph with exactly three model calls", async () => {
     const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
@@ -345,7 +384,7 @@ describe("PR Review scenario assets", () => {
     ]);
     handoffActiveRun(runId, "qwen_review", "voted", modelReview("qwen"));
     handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi"));
-    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm", "request_changes"));
+    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm"));
 
     expect(executor.tick(runId)).toBeGreaterThan(0);
     expect(dispatcher.dispatched.map((envelope) => envelope.nodeId)).toEqual([
@@ -360,9 +399,9 @@ describe("PR Review scenario assets", () => {
       report: { status: "pass", reviewer_results: expect.arrayContaining([
         expect.objectContaining({ reviewer: "qwen", vote: "approve" }),
         expect.objectContaining({ reviewer: "kimi", vote: "approve" }),
-        expect.objectContaining({ reviewer: "glm", vote: "request_changes" }),
+        expect.objectContaining({ reviewer: "glm", vote: "approve" }),
       ]) },
-      quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
+      quorum: { passed: true, successes: 3, total: 3, threshold: 2 },
     });
 
     expect(getActiveRun(runId)?.status).toBe("completed");
@@ -370,10 +409,41 @@ describe("PR Review scenario assets", () => {
       expect.objectContaining({ name: "pr-review.json", status: "ready" }),
     ]);
     expect(JSON.parse(fs.readFileSync(getRunArtifactBlobPath(runId, "pr-review.json")!, "utf8")))
-      .toMatchObject({ report: { status: "pass" }, quorum: { passed: true, successes: 2 } });
+      .toMatchObject({ report: { status: "pass" }, quorum: { passed: true, successes: 3 } });
   });
 
-  it("turns one failed model into abstain and keeps a split decision inconclusive", () => {
+  it("completes with retained findings when two models approve and one requests changes", async () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-finding-veto-runtime";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    handoffActiveRun(runId, "qwen_review", "voted", modelReview("qwen"));
+    handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi"));
+    handoffActiveRun(runId, "glm_review", "voted", modelReview("glm", "request_changes"));
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+
+    const decision = loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "decide" && handoff.port === "decided",
+    )?.content;
+    expect(decision).toMatchObject({
+      report: { status: "findings", actionable_count: 1 },
+      quorum: { passed: false, successes: 2, total: 3, threshold: 2 },
+    });
+    expect(getActiveRun(runId)?.status).toBe("cancelled");
+    expect(getActiveRun(runId)?.dagRun.nodeStates.get("decision_failed")).not.toBe("COMPLETED");
+    expect(await finalizeRunArtifacts(runId, "failure")).toEqual([
+      expect.objectContaining({ name: "pr-review.json", status: "ready", publish: "always" }),
+    ]);
+    expect(JSON.parse(fs.readFileSync(getRunArtifactBlobPath(runId, "pr-review.json")!, "utf8")))
+      .toMatchObject({ report: { status: "findings" }, quorum: { passed: false, successes: 2 } });
+  });
+
+  it("turns one correction-exhausted model into abstain while retaining another model's finding", () => {
     const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
     installPrepareCommandStub(parsed);
@@ -385,7 +455,14 @@ describe("PR Review scenario assets", () => {
 
     handoffActiveRun(runId, "qwen_review", "voted", modelReview("qwen"));
     handoffActiveRun(runId, "kimi_review", "voted", modelReview("kimi", "request_changes"));
-    failActiveRun(runId, "glm_review", "agent ended without a contract-valid handoff");
+    autoHandoffAfterCorrectionExhausted(
+      runId,
+      "glm_review",
+      "agent ended without a contract-valid handoff",
+    );
+    expect(getActiveRun(runId)?.status).toBe("active");
+    expect(getActiveRun(runId)?.dagRun.nodeStates.get("glm_review")).toBe("FAILED");
+    expect(getActiveRun(runId)?.dagRun.nodeStates.get("normalize_glm_review")).toBe("READY");
     expect(executor.tick(runId)).toBeGreaterThan(0);
     const normalized = loadRunSnapshot(runId)?.handoffs.find(
       (handoff) => handoff.fromNode === "normalize_glm_review" && handoff.port === "reviewed",
@@ -401,7 +478,7 @@ describe("PR Review scenario assets", () => {
       (handoff) => handoff.fromNode === "decide" && handoff.port === "decided",
     )?.content;
     expect(decision).toMatchObject({
-      report: { status: "inconclusive" },
+      report: { status: "findings", actionable_count: 1 },
       quorum: { passed: false, successes: 1, total: 3, threshold: 2 },
     });
   });
@@ -623,7 +700,7 @@ describe("PR Review scenario assets", () => {
     expect(runValidator(
       "completed",
       passingReviewReport(),
-      { passed: true, successes: 2, total: 3, threshold: 2 },
+      { passed: true, successes: 3, total: 3, threshold: 2 },
     ).status).toBe(0);
     const renderer = path.join(repositoryRoot, "scripts", "render-pr-review-markdown.mjs");
     const rendered = spawnSync(process.execPath, [renderer, commandPath, reportPath], { encoding: "utf8" });
@@ -634,7 +711,7 @@ describe("PR Review scenario assets", () => {
     expect(runValidator(
       "completed",
       passingReviewReport(),
-      { passed: true, successes: 2, total: 3, threshold: 2 },
+      { passed: true, successes: 3, total: 3, threshold: 2 },
       rendered.stdout,
     ).status).toBe(0);
 
@@ -645,14 +722,14 @@ describe("PR Review scenario assets", () => {
       findings: [finding],
       reviewer_results: [
         modelReview("qwen", "request_changes"),
-        modelReview("kimi", "request_changes"),
+        modelReview("kimi"),
         modelReview("glm"),
       ],
     };
     expect(runValidator(
       "cancelled",
       findingsReport,
-      { passed: false, successes: 1, total: 3, threshold: 2 },
+      { passed: false, successes: 2, total: 3, threshold: 2 },
     ).status).toBe(0);
 
     const inconclusiveReport = {
@@ -661,7 +738,7 @@ describe("PR Review scenario assets", () => {
       confidence: "low",
       reviewer_results: [
         modelReview("qwen"),
-        modelReview("kimi", "request_changes"),
+        modelReview("kimi", "abstain"),
         modelReview("glm", "abstain"),
       ],
     };
@@ -674,7 +751,7 @@ describe("PR Review scenario assets", () => {
     const contradictory = runValidator(
       "completed",
       passingReviewReport(),
-      { passed: true, successes: 3, total: 3, threshold: 2 },
+      { passed: true, successes: 2, total: 3, threshold: 2 },
     );
     expect(contradictory.status).toBe(1);
     expect(contradictory.stderr).toContain("does not match the model approval votes");
@@ -682,7 +759,7 @@ describe("PR Review scenario assets", () => {
     const placeholder = runValidator(
       "completed",
       passingReviewReport(),
-      { passed: true, successes: 2, total: 3, threshold: 2 },
+      { passed: true, successes: 3, total: 3, threshold: 2 },
       "# Review\n\n**HomeRail Run ID:** `${run_id}`",
     );
     expect(placeholder.status).toBe(1);

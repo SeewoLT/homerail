@@ -264,6 +264,7 @@ describe("response bridge transport fence", () => {
       runId: "run-2",
       nodeId: "actor-node",
       reason: "DAG_HANDOFF_CONTRACT_VIOLATION actor-node.done",
+      rejectedHandoff: { port: "done", content: { invalid: true } },
     });
     expect(mocks.handoffActiveRun).toHaveBeenCalledTimes(1);
   });

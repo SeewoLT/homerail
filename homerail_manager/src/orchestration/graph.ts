@@ -32,6 +32,8 @@ export interface DAGAgentConfig {
   extra?: Record<string, unknown>;
 }
 
+export type DAGCodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+
 export interface DAGOutputRoute {
   to: string | string[];
   condition?: "on_success" | "on_failure" | "always" | string;
@@ -47,8 +49,8 @@ export interface DAGNodeRequirements {
 }
 
 export interface DAGGatewayConfig {
-  type?: "loop" | "condition" | "join" | "while" | "command" | "approval" | "state" | "fanout" | "await_command" | string;
-  kind?: "loop" | "condition" | "join" | "while" | "command" | "approval" | "state" | "fanout" | "await_command" | string;
+  type?: "loop" | "condition" | "join" | "while" | "command" | "broker" | "approval" | "state" | "fanout" | "await_command" | string;
+  kind?: "loop" | "condition" | "join" | "while" | "command" | "broker" | "approval" | "state" | "fanout" | "await_command" | string;
   mode?: "all" | "any" | "n_of_m" | string;
   field?: string;
   routes?: Record<string, string>;
@@ -67,6 +69,7 @@ export interface DAGGatewayConfig {
   success_values?: unknown[];
   operator?: "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "truthy" | "falsy" | string;
   value?: unknown;
+  unwrap_single_join_value?: boolean;
   max_iterations?: number;
   max_items?: number;
   command?: string[];
@@ -80,6 +83,14 @@ export interface DAGGatewayConfig {
   capture_limit?: number;
   parse_stdout?: "text" | "json" | "number";
   result_payload?: "envelope" | "value";
+  credential_ref?: string;
+  purpose?: string;
+  broker?: string;
+  action?: string;
+  input_field?: string;
+  input_map?: Record<string, string>;
+  static_input?: Record<string, unknown>;
+  error_port?: string;
   approval_id?: string;
   proposal_field?: string;
   proposer_actor?: string;
@@ -115,10 +126,26 @@ export interface DAGGatewayConfig {
     commit_field: string;
     workspace_field: string;
     require_clean?: boolean;
+    commit_mode?: "worker" | "manager";
   };
   max_parallelism?: number;
   completion?: "all" | "any" | "n_of_m" | string;
   result_contract?: string;
+  result_required_broker_actions?: Array<{
+    credential_ref: string;
+    broker: string;
+    action: string;
+    when?: { field: string; equals: unknown };
+    result_binding?: { result_field: string; content_field: string };
+    result_digest_binding?: { result_field: string; content_field: string };
+  }>;
+  result_required_workspace_files?: Array<{
+    path_field: string;
+    sha256_field: string;
+    contract: string;
+    max_bytes?: number;
+    bindings?: Array<{ file_field: string; content_field: string }>;
+  }>;
   success_field?: string;
   cancel_remaining?: boolean;
 }

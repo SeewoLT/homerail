@@ -98,6 +98,8 @@ export interface AgentRunContext {
   baseUrl: string;
   /** Codex Responses reasoning effort selected by the runtime profile. */
   reasoningEffort?: string;
+  /** Explicit command sandbox selected by the trusted DAG runtime policy. */
+  codexSandbox?: "read-only" | "workspace-write" | "danger-full-access";
   /** Optional provider service tier; null means provider default. */
   serviceTier?: string | null;
   /** Claude-compatible gateway credential header contract. */

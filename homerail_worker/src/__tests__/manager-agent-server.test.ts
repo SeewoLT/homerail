@@ -190,14 +190,17 @@ function passingPrReviewPublication(): Record<string, unknown> {
       summary: "No actionable findings",
       actionable_count: 0,
       findings: [],
-      reviewer_results: ["runtime", "security", "tests", "frontend"].map((reviewer) => ({
+      reviewer_results: ["qwen", "kimi", "glm"].map((reviewer) => ({
         reviewer,
         status: "complete",
+        vote: "approve",
         summary: `${reviewer} review complete`,
+        reviewed_files: ["src/index.ts"],
+        unreviewed_files: [],
+        evidence_truncated: false,
         findings: [],
       })),
     },
-    markdown: "# HomeRail PR Review\n\nNo actionable findings.",
     quorum: { passed: true, successes: 3, total: 3, threshold: 2 },
   };
 }
@@ -250,8 +253,8 @@ function makePrCloseoutApiServer(createAndRunBodies: Record<string, unknown>[], 
     }
     if (req.method === "GET" && pathname === "/api/runs/validation-run-26/handoffs") {
       send({ success: true, data: { handoffs: [{
-        fromNode: "publish",
-        port: "published",
+        fromNode: "decide",
+        port: "decided",
         content: passingPrReviewPublication(),
       }] } });
       return;

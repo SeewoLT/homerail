@@ -21,7 +21,7 @@ spec:
   pattern:
     id: pr-review-scenario
     version: 2.0.0
-    source: HomeRail three-model review and deterministic quorum
+    source: HomeRail three-model review with approval threshold and finding veto
     parameters:
       reviewer_count: 3
       review_models: 3
@@ -284,6 +284,25 @@ spec:
                   passed: { const: false }
         - if:
             properties:
+              report:
+                type: object
+                required: [actionable_count]
+                properties:
+                  actionable_count: { type: integer, minimum: 1 }
+          then:
+            properties:
+              quorum:
+                type: object
+                required: [passed]
+                properties:
+                  passed: { const: false }
+        - if:
+            properties:
+              report:
+                type: object
+                required: [actionable_count]
+                properties:
+                  actionable_count: { const: 0 }
               quorum:
                 type: object
                 required: [successes]
@@ -296,8 +315,6 @@ spec:
                 required: [passed]
                 properties:
                   passed: { const: true }
-
-
   artifacts:
     - name: pr-review.json
       source: { type: handoff, node: decide, port: decided }
@@ -333,6 +350,9 @@ spec:
         findings is empty or request_changes when findings is non-empty.
         Do not end with prose. Your final action MUST call handoff on voted with:
         {"reviewer":"qwen","status":"complete|failed","vote":"approve|request_changes|abstain","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"runtime|security|tests|frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        The handoff call is terminal: never call it as a probe or test, and
+        never use the failed port. An incomplete review must still submit a
+        structured status=failed, vote=abstain result on voted.
         If input:correction exists, do not re-analyze or call any tool except
         handoff; immediately resubmit the existing review in the exact shape.
 
@@ -360,6 +380,9 @@ spec:
         when no actionable finding remains after your challenge.
         Do not end with prose. Your final action MUST call handoff on voted with:
         {"reviewer":"kimi","status":"complete|failed","vote":"approve|request_changes|abstain","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"runtime|security|tests|frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        The handoff call is terminal: never call it as a probe or test, and
+        never use the failed port. An incomplete review must still submit a
+        structured status=failed, vote=abstain result on voted.
         If input:correction exists, do not re-analyze or call any tool except
         handoff; immediately resubmit the existing review in the exact shape.
 
@@ -386,6 +409,9 @@ spec:
         empty, and approve only when there are no actionable findings.
         Do not end with prose. Your final action MUST call handoff on voted with:
         {"reviewer":"glm","status":"complete|failed","vote":"approve|request_changes|abstain","summary":"text","reviewed_files":["path"],"unreviewed_files":[],"evidence_truncated":false,"findings":[{"category":"runtime|security|tests|frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        The handoff call is terminal: never call it as a probe or test, and
+        never use the failed port. An incomplete review must still submit a
+        structured status=failed, vote=abstain result on voted.
         If input:correction exists, do not re-analyze or call any tool except
         handoff; immediately resubmit the existing review in the exact shape.
 
@@ -753,7 +779,7 @@ spec:
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
-      outputs: { voted: { contract: VerificationVote }, failed: {} }
+      outputs: { voted: { contract: VerificationVote }, failed: { contract: VerificationVote } }
 
     kimi_review:
       kind: agent
@@ -762,7 +788,7 @@ spec:
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
-      outputs: { voted: { contract: VerificationVote }, failed: {} }
+      outputs: { voted: { contract: VerificationVote }, failed: { contract: VerificationVote } }
 
     glm_review:
       kind: agent
@@ -771,7 +797,7 @@ spec:
       allowed_dag_tools: [handoff]
       workspace_access: { writable_paths: [], readonly_paths: [repository, review-evidence] }
       inputs: { context: { contract: ReviewContext } }
-      outputs: { voted: { contract: VerificationVote }, failed: {} }
+      outputs: { voted: { contract: VerificationVote }, failed: { contract: VerificationVote } }
 
     decide:
       kind: command
@@ -785,7 +811,7 @@ spec:
           - node
           - -e
           - >-
-            let s='';const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined;process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),context=last(input,'context'),joined=last(input,'reviews'),reviews=Array.isArray(joined?.values)?joined.values:[];if(!context||reviews.length!==3)throw new Error('three normalized model reviews are required');const identities=new Set(reviews.map(review=>review?.reviewer));if(identities.size!==3||!['qwen','kimi','glm'].every(id=>identities.has(id)))throw new Error('model review identities are invalid');const approvals=reviews.filter(review=>review.status==='complete'&&review.vote==='approve').length,changes=reviews.filter(review=>review.status==='complete'&&review.vote==='request_changes').length,abstentions=3-approvals-changes,passed=approvals>=2,status=passed?'pass':changes>=2?'findings':'inconclusive',selected=status==='findings'?reviews.filter(review=>review.vote==='request_changes').flatMap(review=>review.findings):[],seen=new Set(),findings=selected.filter(finding=>{const key=[finding.file,finding.line,finding.title].join(':');if(seen.has(key))return false;seen.add(key);return true}),agreement=passed?approvals:status==='findings'?changes:Math.max(approvals,changes),confidence=agreement===3?'high':agreement===2?'medium':'low',summary=`Three-model review: ${approvals} approve, ${changes} request changes, ${abstentions} abstain.`,report={repo:context.repo,pr:context.pr,base:context.base,head:context.head,status,confidence,summary,actionable_count:findings.length,findings,reviewer_results:reviews},quorum={passed,successes:approvals,total:3,threshold:2};process.stdout.write(JSON.stringify({report,quorum}))});
+            let s='';const last=(input,key)=>Array.isArray(input[key])?input[key].at(-1):undefined,findingKey=finding=>['category','severity','title','file','line','evidence','recommendation','confidence'].map(field=>JSON.stringify(finding?.[field]??null)).join('\u0000');process.stdin.on('data',chunk=>s+=chunk).on('end',()=>{const input=JSON.parse(s),context=last(input,'context'),joined=last(input,'reviews'),reviews=Array.isArray(joined?.values)?joined.values:[];if(!context||reviews.length!==3)throw new Error('three normalized model reviews are required');const identities=new Set(reviews.map(review=>review?.reviewer));if(identities.size!==3||!['qwen','kimi','glm'].every(id=>identities.has(id)))throw new Error('model review identities are invalid');const complete=reviews.filter(review=>review.status==='complete'&&(review.vote==='approve'||review.vote==='request_changes')),approvals=complete.filter(review=>review.vote==='approve').length,changes=complete.filter(review=>review.vote==='request_changes').length,abstentions=3-complete.length,selected=complete.filter(review=>review.vote==='request_changes').flatMap(review=>review.findings),seen=new Set(),findings=selected.filter(finding=>{const key=findingKey(finding);if(seen.has(key))return false;seen.add(key);return true}),enoughEvidence=complete.length>=2,passed=enoughEvidence&&approvals>=2&&findings.length===0,status=findings.length>0?'findings':passed?'pass':'inconclusive',confidence=complete.length===3?'high':complete.length===2?'medium':'low',summary=`Three-model review: ${approvals} approve, ${changes} request changes, ${abstentions} abstain; ${findings.length} retained actionable finding${findings.length===1?'':'s'}.`,report={repo:context.repo,pr:context.pr,base:context.base,head:context.head,status,confidence,summary,actionable_count:findings.length,findings,reviewer_results:reviews},quorum={passed,successes:approvals,total:3,threshold:2};process.stdout.write(JSON.stringify({report,quorum}))});
         stdin_field: "$inputs"
         timeout_ms: 10000
         capture_limit: 700000
@@ -872,4 +898,3 @@ spec:
     max_dispatches: 12
     max_handoffs: 24
     max_corrections_per_node: 2
-    max_tool_calls_per_node: 50

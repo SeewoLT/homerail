@@ -618,7 +618,7 @@ export const DEFAULT_PROVIDER_CATALOG: CatalogProviderInfo[] = [
         docs_url: "https://platform.qianwenai.com/docs/token-plan/personal/token-plan-personal-quickstart",
         models: [
           model("qwen3.7-max", {}, { recommended: true }),
-          model("qwen3.8-max-preview", { supports_image_input: true }),
+          model("qwen3.8-max"),
           model("qwen3.7-plus", { supports_image_input: true }),
           model("qwen3.6-flash", { supports_image_input: true }),
           model("glm-5.2"),

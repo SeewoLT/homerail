@@ -10,7 +10,11 @@ delivery plan for [`Auto Fix v2`](architecture/autofix-v2.md); it does not
 authorize replacing the existing `auto-fix` workflow or enabling automatic PR
 publication.
 
-## Implementation checkpoint (2026-08-02)
+## Implementation checkpoint (2026-08-03)
+
+The local-test convergence revision supersedes earlier checklist text that put
+`validate_head` or `required_checks` inside Auto Fix v2. Those broker actions
+remain generic infrastructure but are not part of this DAG.
 
 Implemented in the MVP:
 
@@ -19,47 +23,53 @@ Implemented in the MVP:
 - fail-closed dynamic worker policy inheritance, unique repeated-fanout node
   ids, and isolated Git worktrees;
 - `session_scope: dispatch` for transcript-free review re-entry;
-- a Manager-only `github_pr` broker for bounded PR/files/check snapshots,
-  exact-head required-check enforcement, and expected-head, non-force file
-  commits;
-- generic conditional output handoff requirements backed by same-dispatch
-  Manager-broker action receipts, used to prevent `approve` when an immutable
-  required check is missing or unsuccessful;
-- an opt-in eight-static-node `auto-fix-v2` WorkflowSpec, mixed-model profile
+- a Manager-only `github_pr` broker for bounded exact-head PR reads,
+  Manager-computed review assessment, and expected-head, non-force
+  complete-workspace commits;
+- generic required-workspace-file evidence that validates a producer-local JSON
+  report before accepting its handoff and persists accepted bytes as a durable
+  content-addressed run artifact;
+- an opt-in `auto-fix-v2` WorkflowSpec, mixed-model profile
   configurator, CLI input staging, operator runbook, and deterministic fake
   remote/recovery proof.
 
-Required before the first real Issue #172 pilot:
+Required before the first real low-risk Issue pilot:
 
 - create the same-repository Draft PR and immutable `pr-context.json`;
 - install `github-autofix` as an encrypted fine-grained PAT or GitHub App
   credential;
-- verify the stable Manager still has active, runnable K3, DeepSeek V4 Flash,
-  and GLM-5.2 settings after deploying the v2-capable release;
+- verify the stable Manager still has active, runnable Qwen3.8-Max and
+  GLM-5.2 settings after deploying the v2-capable release;
 - sync the opt-in workflow and mixed-model profile, then run a
   broker-write-disabled real PR snapshot dry run;
-- configure immutable exact required-check names in `pr-context.json` and
-  arrange trusted CI to publish those checks on the exact Draft head. This
-  repository skips Draft PR CI by default, so the pilot operator must manually
-  dispatch CI with the Draft head branch selected before approval can complete.
+- encode a non-empty bounded `local_tests` list in `task-plan.json`; repository
+  CI remains deferred until the DAG converges.
 
 ## Outcome
 
 Deliver a manual `auto-fix-v2` workflow in which:
 
-- a caller stages an immutable local task document and binds it to a Draft PR;
-- K3 creates a bounded plan of one to three parallel-safe work items;
-- dynamically created DeepSeek V4 Flash implementers work without remote
+- a caller stages an immutable local task document, a bound task plan, and a
+  Draft PR context;
+- the DAG validates and executes the caller-authored one to three parallel-safe
+  work items without repeating analysis inside the execution graph;
+- dynamically created Qwen3.8-Max implementers work without remote
   credentials in isolated worktrees;
-- a DeepSeek V4 Flash aggregator integrates their patches;
-- exact-head required checks form a Manager-enforced approval fence;
+- a Qwen3.8-Max aggregator integrates their patches;
+- aggregation and every fix submit a Manager-verified exact-head TestReport;
 - GLM-5.2 reviews each candidate with a fresh provider context;
-- a new DeepSeek V4 Flash fixer handles each rejected round;
-- no more than five candidate/review rounds run;
+- Manager quantifies convergence from full diff coverage, weighted actionable
+  findings, passing local evidence, and two clean reviews of one unchanged head;
+- a new Qwen3.8-Max fixer handles each rejected round;
+- no more than four fix rounds run;
 - only the aggregator and fixers can request fast-forward PR writes through a
   least-privilege Manager broker;
-- the successful outcome remains a Draft PR marked `ready_for_human` in
-  HomeRail, not approved or merged on GitHub.
+- the successful outcome remains a Draft PR marked `ready_for_ci` in HomeRail,
+  not approved, marked ready, or merged on GitHub.
+- a trusted finalizer publishes `autofix-result.json` with the exact head,
+  immutable task/plan digests, final review/test digests, and quality score;
+- explicit model inability and exhausted fix rounds end as `needs_human`
+  instead of being mislabeled as infrastructure success or merge approval.
 
 ## Delivery Rules
 
@@ -131,7 +141,7 @@ Tests:
 ### AFV2-201: Add a canonical fan-out worker runtime policy
 
 - [ ] Add a strict WorkflowSpec worker template or node reference containing
-      Agent, tool, workspace, credential, call-budget, and session policy.
+      Agent, tool, workspace, credential, and session policy.
 - [ ] Compile the worker policy into canonical IR and include it in workflow
       hashing.
 - [ ] Copy the canonical policy to every dynamically appended child.
@@ -148,8 +158,10 @@ Likely code areas:
 
 Tests:
 
-- [ ] child inherits exact built-in and DAG tool allowlists;
-- [ ] child inherits workspace restrictions and tool-call budget;
+- [ ] child inherits either an exact built-in allowlist or an explicit
+      backend-native policy, plus the exact DAG tool allowlist;
+- [ ] child inherits workspace restrictions without introducing a tool-call
+      budget;
 - [ ] child cannot acquire undeclared credentials or broker actions;
 - [ ] correction and recovery do not widen policy;
 - [ ] old `worker_agent` workflows remain compatible without permissive
@@ -189,27 +201,35 @@ Tests:
 - [ ] repeated execution of one logical review node uses distinct provider
       session ids;
 - [ ] a dynamic fixer gets a new provider session;
-- [ ] review prompts contain only declared task, PR, validation, and finding
+- [ ] review prompts contain only declared task, PR, TestReport, and finding
       inputs;
 - [ ] restart/replay cannot accidentally resume an old provider transcript.
 
 ## Phase 4: GitHub PR Capability Broker
 
-### AFV2-401: Implement read-only PR and check gates
+### AFV2-401: Implement read-only PR and review-evidence gates
 
 - [ ] Add a `github_pr` Manager broker with `pull_request_snapshot`,
-      `checks_snapshot`, and `required_checks`.
+      `read_diff`, `read_file`, and `assess_review`. Retain check actions only
+      as generic compatibility capabilities outside Auto Fix v2.
+- [ ] Add a generic Manager-owned `broker` DAG node with one projected
+      credential/action, structured input mapping, and explicit result/error
+      ports.
 - [ ] Bind repo, PR, Draft state, base branch/SHA, head branch/SHA, and policy id
       to the run.
 - [ ] Reject fork PRs, non-Draft PRs, disallowed branches, closed PRs, and
       mismatched repositories in the pilot.
 - [ ] Return bounded, redacted, immutable receipts.
-- [ ] Reject an approval handoff unless the same reviewer dispatch has a
-      successful `required_checks` receipt for the exact current head.
+- [ ] Require complete contiguous `read_diff` coverage for every changed path
+      before `assess_review` can compute a quality result.
+- [ ] Bind the Manager-computed findings digest, coverage, TestReport digest,
+      weighted defect load, score, and clean status to the reviewer handoff.
 
-### AFV2-402: Implement fast-forward `commit_files`
+### AFV2-402: Implement fast-forward `commit_workspace`
 
-- [ ] Accept only bounded file bytes and an exact `expected_head_sha`.
+- [ ] Accept only the node's exact declared writable worktree, a bounded
+      message, and an exact `expected_head_sha`; derive all file bytes in
+      trusted code.
 - [ ] Revalidate path, file count, size, binary, symlink, submodule, and secret
       restrictions in trusted code.
 - [ ] Create bounded Git blobs, a tree, and a commit without giving the Worker
@@ -238,55 +258,58 @@ Tests:
       [`task document template`](scenarios/auto-fix-v2-task-template.md) and
       validate that its staged digest is the run's task identity.
 - [ ] Add `TaskManifest`, `PRContext`, `BoundTask`, `WorkPlan`, `WorkItem`,
-      `ImplementationResult`, `AggregateCandidate`, `ValidationResult`,
+      `ImplementationResult`, `AggregateCandidate`, `TestReport`,
       `ReviewVerdict`, `FixResult`, `LoopState`, and `AutoFixV2Result`.
 - [ ] Bound every string, array, patch, log, finding set, file set, and round.
 - [ ] Require stable finding ids and exact source/head SHAs.
 - [ ] Reject incomplete success handoffs rather than synthesizing success.
 
-### AFV2-502: Build the planner and implementation fan-out
+### AFV2-502: Validate the caller plan and build implementation fan-out
 
-- [ ] K3 emits one to three independent WorkItems or `needs_human`.
+- [ ] Require a versioned immutable `task_plan` with one to three independent
+      WorkItems bound to `task_document_sha256`.
 - [ ] Reject arbitrary graph mutation and dependent parallel tasks.
-- [ ] Dynamically create one DeepSeek V4 Flash implementer per item.
+- [ ] Dynamically create one Qwen3.8-Max implementer per item.
 - [ ] Run each child in its isolated worktree without a PR broker.
 - [ ] Capture and validate one patch artifact per successful child.
 
-### AFV2-503: Build aggregation and validation
+### AFV2-503: Build aggregation and local evidence
 
 - [ ] Apply worker patches in the WorkPlan's declared order.
-- [ ] Give DeepSeek V4 Flash an integration worktree and bounded conflict
+- [ ] Give Qwen3.8-Max an integration worktree and bounded conflict
       metadata.
 - [ ] Deterministically collect the aggregate patch.
 - [ ] Let the aggregator push the patch-safe first candidate through the
       fenced broker.
-- [ ] Run trusted repository validation against the exact pushed head before
-      any GLM review.
-- [ ] Convert validation failures into structured fixer findings.
+- [ ] Run every immutable `local_tests` command in the container after
+      aggregation and every fix.
+- [ ] Require a producer-local report file whose path, SHA-256, JSON contract,
+      head/manifest fields, and status are verified by Manager at handoff.
 
-### AFV2-504: Build the five-round review/fix loop
+### AFV2-504: Build the quantitative review/fix loop
 
-- [ ] Push each collected candidate through `commit_files` using exact head
-      fencing; a Draft PR may temporarily hold a candidate that later fails
-      validation.
+- [ ] Push each collected candidate through `commit_workspace` using exact head
+      fencing; write its local TestReport only after source publication so the
+      report does not enter the PR.
 - [ ] Dispatch GLM-5.2 with fresh context against the exact pushed head.
-- [ ] On rejection, dynamically create one fresh DeepSeek V4 Flash fixer.
-- [ ] Make every fix produce a new validated patch and broker receipt.
-- [ ] Allow fixers after rounds 1 through 4 only.
-- [ ] End a round-5 failure as `needs_human` with complete evidence.
-- [ ] End approval as `ready_for_human`; never change Draft state.
+- [ ] On rejection, dynamically create one fresh Qwen3.8-Max fixer.
+- [ ] Make every fix produce a new fenced patch, broker receipt, and TestReport.
+- [ ] Require defect load zero, coverage 1.0, passing exact-head evidence, and
+      two consecutive clean fresh-context reviews on the unchanged head.
+- [ ] Allow at most four fix rounds, then end as `needs_human`.
+- [ ] End convergence as `ready_for_ci`; never change Draft state.
 
 ### AFV2-505: Add the mixed-model runtime profile
 
-- [ ] Resolve one active K3 setting for `planner`.
-- [ ] Resolve one active DeepSeek V4 Flash setting for `implementer`,
+- [ ] Resolve one active Qwen3.8-Max setting for `implementer`,
       `aggregator`, and `fixer`.
 - [ ] Resolve one active GLM-5.2 setting for `reviewer`.
-- [ ] Require the compatible harness and endpoint for every setting.
+- [ ] Require Codex app-server Responses with `reasoning_effort: max` for every
+      Qwen3.8-Max role and Claude Agent SDK for GLM review.
 - [ ] Add preflight smokes for built-in tools, structured handoff, and fresh
       context.
-- [ ] Fail explicitly when DeepSeek V4 Flash is unavailable; do not substitute
-      `deepseek-chat`, `deepseek-reasoner`, or another model.
+- [ ] Fail explicitly when Qwen3.8-Max is unavailable; do not substitute
+      `qwen3.8-max-preview`, `qwen3.7-max`, or another model.
 
 Likely new assets:
 
@@ -326,7 +349,7 @@ Likely new assets:
       round.
 - [ ] Demonstrate denial of an implementer PR write and denial of a Reviewer
       push.
-- [ ] Demonstrate round-5 `needs_human` without a sixth candidate.
+- [ ] Demonstrate four exhausted fix rounds ending in `needs_human`.
 
 ### AFV2-702: Dry-run shadow mode
 
@@ -343,7 +366,7 @@ Select an owner-authored task with:
 - [ ] no workflow, credential, dependency, migration, release, or
       security-sensitive infrastructure changes;
 - [ ] a pre-created same-repository Draft PR and automation-owned head branch;
-- [ ] explicit deterministic validation commands in the task document.
+- [ ] explicit bounded `local_tests` commands in the immutable task plan.
 
 As of 2026-08-01, the recommended multi-worker pilot candidate is
 [`xiaotianfotos/homerail#172`](https://github.com/xiaotianfotos/homerail/issues/172).
@@ -360,9 +383,11 @@ The pilot passes when:
 - [ ] every implementation child is isolated and credential-free;
 - [ ] every GLM review has a distinct provider session;
 - [ ] at least one candidate is pushed fast-forward through the broker;
-- [ ] the exact final head passes deterministic validation;
+- [ ] every aggregate/fix handoff has a verified TestReport;
+- [ ] the exact final head has two clean fresh reviews, 100% diff coverage, and
+      zero actionable defect load;
 - [ ] the PR remains Draft and unapproved;
-- [ ] the result is `ready_for_human` with complete evidence;
+- [ ] the result is `ready_for_ci` with complete evidence;
 - [ ] no capability policy violation occurs.
 
 ## Adoption Gate
@@ -370,7 +395,7 @@ The pilot passes when:
 Do not replace the current workflow until at least four of five eligible pilot
 tasks:
 
-- produce a deterministically validated Draft PR;
+- produce a locally tested, quantitatively converged Draft PR;
 - complete within the agreed wall-time budget;
 - survive retry/recovery without task loss;
 - require no hidden credentials or host mounts;

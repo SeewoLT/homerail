@@ -101,6 +101,63 @@ function awaitCommandWorkflow(): any {
 }
 
 describe("WorkflowSpec v1", () => {
+  it("compiles a Manager-only broker gateway with one exact declared action", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.validate = {
+      kind: "broker",
+      inputs: { candidate: {} },
+      outputs: { result: {}, error: {} },
+      config: {
+        input: "candidate",
+        input_map: { expected_head_sha: "head_sha" },
+        static_input: { mode: "trusted" },
+        credential_ref: "github-autofix",
+        purpose: "validate one immutable PR head",
+        broker: "github_pr",
+        action: "validate_head",
+        result_port: "result",
+        error_port: "error",
+      },
+    };
+    workflow.spec.nodes.failed = {
+      kind: "terminal",
+      outcome: "failure",
+      inputs: { result: {} },
+    };
+    workflow.spec.edges = [
+      { from: "$run.input", to: "execute.task" },
+      { from: "execute.result", to: "validate.candidate" },
+      { from: "validate.result", to: "done.result" },
+      { from: "validate.error", to: "failed.result", condition: "on_failure" },
+    ];
+
+    const result = compileWorkflowSource(YAML.stringify(workflow));
+
+    expect(result.valid, result.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+    const runtime = projectCanonicalWorkflowToParsedDAG(result.canonical!);
+    expect(runtime.graph.nodes.find((node) => node.node_id === "validate")).toMatchObject({
+      node_type: "broker_gateway",
+      gateway_config: {
+        input: "candidate",
+        input_map: { expected_head_sha: "head_sha" },
+        static_input: { mode: "trusted" },
+        credential_ref: "github-autofix",
+        broker: "github_pr",
+        action: "validate_head",
+        result_port: "result",
+        error_port: "error",
+      },
+      extra: {
+        agent_runtime: {
+          credentials: [{
+            credential_ref: "github-autofix",
+            inject: { mode: "manager_broker", broker: "github_pr", allowed_actions: ["validate_head"] },
+          }],
+        },
+      },
+    });
+  });
+
   it("canonicalizes exact per-agent pinned Surface view allowlists", () => {
     const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
     workflow.spec.agents.worker.allowed_surface_views = ["review:summary", "summary"];
@@ -161,6 +218,117 @@ describe("WorkflowSpec v1", () => {
     }
   });
 
+  it("canonicalizes explicit backend-native tools and rejects ambiguous or unbounded declarations", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.execute.builtin_tool_policy = "backend_native";
+    workflow.spec.nodes.execute.workspace_access = { writable_paths: ["repo"], readonly_paths: ["input"] };
+
+    const valid = compileWorkflowSource(YAML.stringify(workflow));
+    expect(valid.valid, valid.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+    expect(valid.canonical?.nodes.find((node) => node.id === "execute")?.config).toMatchObject({
+      builtin_tool_policy: "backend_native",
+      workspace_access: { writable_paths: ["repo"], readonly_paths: ["input"] },
+    });
+
+    const authorExcluded = structuredClone(workflow);
+    authorExcluded.spec.nodes.execute.workspace_access.snapshot_exclude_paths = ["repo/private"];
+    const authorExcludedResult = compileWorkflowSource(YAML.stringify(authorExcluded));
+    expect(authorExcludedResult.valid).toBe(false);
+    expect(authorExcludedResult.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SCHEMA_INVALID_FIELD",
+      path: "/spec/nodes/execute",
+    }));
+
+    workflow.spec.nodes.execute.allowed_builtin_tools = ["Write"];
+    const ambiguous = compileWorkflowSource(YAML.stringify(workflow));
+    expect(ambiguous.valid).toBe(false);
+    expect(ambiguous.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_BUILTIN_TOOL_POLICY_CONFLICT",
+    }));
+
+    delete workflow.spec.nodes.execute.allowed_builtin_tools;
+    delete workflow.spec.nodes.execute.workspace_access;
+    const unbounded = compileWorkflowSource(YAML.stringify(workflow));
+    expect(unbounded.valid).toBe(false);
+    expect(unbounded.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_BACKEND_NATIVE_WORKSPACE_REQUIRED",
+    }));
+  });
+
+  it("requires one explicit writable root for a read-only Git metadata overlay", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.execute.workspace_access = {
+      writable_paths: ["repo"],
+      readonly_paths: ["input"],
+      git_metadata_read_only: true,
+    };
+
+    const valid = compileWorkflowSource(YAML.stringify(workflow));
+    expect(valid.valid, valid.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+    expect(valid.canonical?.nodes.find((node) => node.id === "execute")?.config.workspace_access)
+      .toMatchObject({ git_metadata_read_only: true });
+
+    workflow.spec.nodes.execute.workspace_access.writable_paths = [];
+    const missingRoot = compileWorkflowSource(YAML.stringify(workflow));
+    expect(missingRoot.valid).toBe(false);
+    expect(missingRoot.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_GIT_METADATA_WRITE_BOUNDARY_REQUIRED",
+    }));
+
+    workflow.spec.nodes.execute.workspace_access.writable_paths = ["."];
+    const wholeWorkspace = compileWorkflowSource(YAML.stringify(workflow));
+    expect(wholeWorkspace.valid).toBe(false);
+    expect(wholeWorkspace.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_GIT_METADATA_WRITE_BOUNDARY_REQUIRED",
+    }));
+  });
+
+  it("rejects runtime-owned workspace policy paths during compilation", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.execute.workspace_access = {
+      writable_paths: [".homerail-runtime"],
+      readonly_paths: ["repo/.git"],
+    };
+
+    const result = compileWorkflowSource(YAML.stringify(workflow));
+
+    expect(result.valid).toBe(false);
+    expect(result.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DAG_SEMANTIC_RESERVED_WORKSPACE_PATH",
+        path: "/spec/nodes/execute/workspace_access/writable_paths/0",
+        hint: expect.stringContaining("Remove this path"),
+      }),
+      expect.objectContaining({
+        code: "DAG_SEMANTIC_RESERVED_WORKSPACE_PATH",
+        path: "/spec/nodes/execute/workspace_access/readonly_paths/0",
+      }),
+    ]));
+  });
+
+  it("canonicalizes explicit Codex sandbox policy and rejects maximum access for read-only nodes", () => {
+    const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
+    workflow.spec.nodes.execute.builtin_tool_policy = "backend_native";
+    workflow.spec.nodes.execute.workspace_access = { writable_paths: ["repo"], readonly_paths: ["input"] };
+    workflow.spec.nodes.execute.codex_sandbox = "danger-full-access";
+
+    const valid = compileWorkflowSource(YAML.stringify(workflow));
+    expect(valid.valid, valid.diagnostics.map((item) => item.message).join("\n")).toBe(true);
+    expect(valid.canonical?.nodes.find((node) => node.id === "execute")?.config).toMatchObject({
+      codex_sandbox: "danger-full-access",
+    });
+    expect(canonicalWorkflowToV1Document(valid.canonical!).spec.nodes.execute).toMatchObject({
+      codex_sandbox: "danger-full-access",
+    });
+
+    workflow.spec.nodes.execute.workspace_access = { writable_paths: [], readonly_paths: ["input"] };
+    const readOnly = compileWorkflowSource(YAML.stringify(workflow));
+    expect(readOnly.valid).toBe(false);
+    expect(readOnly.diagnostics).toContainEqual(expect.objectContaining({
+      code: "DAG_SEMANTIC_CODEX_SANDBOX_WRITABLE_WORKSPACE_REQUIRED",
+    }));
+  });
+
   it("requires output-producing agents to retain the handoff DAG tool", () => {
     const workflow = structuredClone(MINIMAL_WORKFLOW) as any;
     workflow.spec.nodes.execute.allowed_dag_tools = ["get_graph_context"];
@@ -191,6 +359,7 @@ describe("WorkflowSpec v1", () => {
       broker: "github_pr",
       action: "required_checks",
       when: { field: "status", equals: "success" },
+      result_binding: { result_field: "head_sha", content_field: "head_sha" },
     }];
 
     const result = compileWorkflowSource(YAML.stringify(workflow));
@@ -200,6 +369,7 @@ describe("WorkflowSpec v1", () => {
       broker: "github_pr",
       action: "required_checks",
       when: { field: "status", equals: "success" },
+      result_binding: { result_field: "head_sha", content_field: "head_sha" },
     }];
     expect(result.canonical?.nodes.find((node) => node.id === "execute")?.outputs)
       .toContainEqual(expect.objectContaining({ name: "result", required_broker_actions: requirement }));
@@ -351,7 +521,7 @@ describe("WorkflowSpec v1", () => {
     const result = compileWorkflowSource(YAML.stringify(workflow));
 
     expect(result.valid, result.diagnostics.map((item) => item.message).join("\n")).toBe(true);
-    expect(result.canonical?.compiler_version).toBe("5");
+    expect(result.canonical?.compiler_version).toBe("6");
     expect(result.canonical?.artifacts).toEqual([
       {
         name: "evidence.tar.gz",
@@ -513,6 +683,51 @@ spec:
     ]));
   });
 
+  it("requires a dynamic fan-out result contract when evidence is required", () => {
+    const result = compileWorkflowSource(`
+api_version: homerail.ai/v1
+kind: Workflow
+metadata: { id: fanout-evidence-contract, name: Fanout Evidence Contract }
+spec:
+  contracts:
+    Items: { type: array }
+    Report: { type: object }
+  agents: { worker: { system: Work. } }
+  nodes:
+    fan:
+      kind: fanout
+      inputs: { items: { contract: Items } }
+      outputs: { passed: {}, failed: {} }
+      config:
+        input: items
+        worker_agent: worker
+        worker_policy:
+          workspace_access: { writable_paths: [work], readonly_paths: [input] }
+          allowed_dag_tools: [handoff]
+        max_items: 2
+        max_parallelism: 1
+        completion: all
+        result_required_workspace_files:
+          - { path_field: report.path, sha256_field: report.sha256, contract: Report }
+        result_port: passed
+        failed_port: failed
+    done: { kind: terminal, outcome: success, inputs: { result: {} } }
+    failed: { kind: terminal, outcome: failure, inputs: { result: {} } }
+  edges:
+    - { from: $run.input, to: fan.items }
+    - { from: fan.passed, to: done.result }
+    - { from: fan.failed, to: failed.result, condition: on_failure }
+`);
+
+    expect(result.valid).toBe(false);
+    expect(result.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DAG_SEMANTIC_FANOUT_RESULT_CONTRACT_REQUIRED",
+        path: "/spec/nodes/fan/config/result_contract",
+      }),
+    ]));
+  });
+
   it("requires isolated fanout workers to declare their injected writable worktree", () => {
     const source = `
 api_version: homerail.ai/v1
@@ -611,7 +826,7 @@ spec:
 
     expect(result.valid, result.diagnostics.map((item) => item.message).join("\n")).toBe(true);
     expect(result.diagnostics.map((item) => item.code)).not.toContain("DAG_SEMANTIC_NO_TERMINAL_PATH");
-    expect(result.canonical?.compiler_version).toBe("5");
+    expect(result.canonical?.compiler_version).toBe("6");
     expect(result.canonical?.feedback_edges).toEqual([]);
     expect(result.canonical?.nodes.find((node) => node.id === "suspend")).toMatchObject({
       kind: "await_command",

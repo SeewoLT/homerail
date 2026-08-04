@@ -306,7 +306,7 @@ describe("agent runtime resolver", () => {
     const setting = createSetting({
       provider_id: "aliyun",
       endpoint_id: "aliyun_dashscope_cn_token_plan",
-      model_name: "qwen3.8-max-preview",
+      model_name: "qwen3.8-max",
       api_key: "sk-sp-test-qwen",
       is_active: true,
       is_default: true,
@@ -320,7 +320,7 @@ describe("agent runtime resolver", () => {
 
     expect(resolved).toMatchObject({
       provider_name: "aliyun",
-      model: "qwen3.8-max-preview",
+      model: "qwen3.8-max",
       base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
       protocol: "anthropic_compatible",
       anthropic_auth_mode: "auth_token",

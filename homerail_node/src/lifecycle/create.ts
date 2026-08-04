@@ -1,4 +1,5 @@
 import type { ExecutionProvider, ContainerConfig, ContainerInfo } from "../providers/types.js";
+import { lstatSync } from "node:fs";
 import { validateMounts, allowedMounts, workerAllowedMounts } from "../storage/mount-policy.js";
 import type { MountPolicyOptions } from "../storage/mount-policy.js";
 
@@ -43,6 +44,8 @@ export interface CreateWorkerOptions {
   provider: ExecutionProvider;
   workspaceId: string;
   workspaceReadOnly?: boolean;
+  workspaceWritableSubpath?: string;
+  workspaceGitMetadataReadOnly?: boolean;
   workspaceInputsReadOnly?: boolean;
   mountPolicy?: MountPolicyOptions;
 }
@@ -55,6 +58,8 @@ export async function createWorkerContainer(opts: CreateWorkerOptions): Promise<
     provider,
     workspaceId,
     workspaceReadOnly = false,
+    workspaceWritableSubpath,
+    workspaceGitMetadataReadOnly = false,
     workspaceInputsReadOnly = false,
     mountPolicy,
   } = opts;
@@ -67,7 +72,21 @@ export async function createWorkerContainer(opts: CreateWorkerOptions): Promise<
 
   const mounts: NonNullable<ContainerConfig["mounts"]> = [];
 
-  const defaultMounts = workerAllowedMounts(workspaceId, workspaceReadOnly, workspaceInputsReadOnly);
+  const defaultMounts = workerAllowedMounts(
+    workspaceId,
+    workspaceReadOnly,
+    workspaceInputsReadOnly,
+    workspaceWritableSubpath,
+    workspaceGitMetadataReadOnly,
+  );
+  if (workspaceGitMetadataReadOnly) {
+    const metadataMount = defaultMounts.find((mount) => mount.container.endsWith("/.git"));
+    if (!metadataMount) throw new Error("read-only Git metadata requires a writable workspace subtree");
+    const metadata = lstatSync(metadataMount.host);
+    if (metadata.isSymbolicLink() || (!metadata.isFile() && !metadata.isDirectory())) {
+      throw new Error("workspace Git metadata must be a regular file or directory");
+    }
+  }
   for (const dm of defaultMounts) {
     if (!mounts.some((m) => m.container === dm.container)) {
       mounts.push({ host: dm.host, container: dm.container, mode: dm.mode });
