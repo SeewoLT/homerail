@@ -398,6 +398,16 @@ describe("PR Review scenario assets", () => {
       expect(validateJsonContract(contracts.VerificationVote, modelReview(reviewer, "request_changes")))
         .toMatchObject({ valid: true });
     }
+    const incompleteAbstention = modelReview("qwen", "abstain");
+    delete incompleteAbstention.coverage;
+    expect(validateJsonContract(contracts.VerificationVote, incompleteAbstention)).toMatchObject({ valid: true });
+    const completeWithoutCoverage = modelReview("qwen");
+    delete completeWithoutCoverage.coverage;
+    expect(validateJsonContract(contracts.VerificationVote, completeWithoutCoverage)).toMatchObject({ valid: false });
+    expect(validateJsonContract(contracts.VerificationVote, {
+      ...modelReview("qwen", "abstain"),
+      vote: "request_changes",
+    })).toMatchObject({ valid: false });
     expect(validateJsonContract(contracts.VerificationVote, {
       ...modelReview("qwen"),
       reviewer: "runtime",
@@ -447,6 +457,7 @@ describe("PR Review scenario assets", () => {
       expect(agents[agentId]?.system).toContain("input:correction exists");
       expect(agents[agentId]?.system).toMatch(/do not re-analyze/);
       expect(agents[agentId]?.system).toMatch(/accepted evidence/);
+      expect(agents[agentId]?.system).toContain("If evidence is incomplete, call handoff on voted without coverage");
       expect(agents[agentId]?.system).toContain("never call it as a probe or test");
       expect(agents[agentId]?.system).toContain("never use the failed port");
     }
@@ -661,6 +672,39 @@ describe("PR Review scenario assets", () => {
     });
   });
 
+  it.each([
+    ["normalize_qwen_review", "qwen"],
+    ["normalize_kimi_review", "kimi"],
+    ["normalize_glm_review", "glm"],
+  ] as const)("rejects an empty-findings request_changes vote in %s", (nodeId, reviewer) => {
+    const { code, args } = commandCode(nodeId);
+    const result = spawnSync(process.execPath, ["-e", code, ...args], {
+      encoding: "utf8",
+      input: JSON.stringify({
+        trusted: [trustedContext()],
+        evidence: [],
+        success: [{
+          ...modelReview(reviewer, "request_changes"),
+          findings: [],
+        }],
+        failure: [],
+      }),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      reviewer,
+      status: "failed",
+      vote: "abstain",
+      evidence_truncated: true,
+      findings: [],
+      diagnostics: [{
+        attempt: 1,
+        category: "contract_validation_failed",
+        message: "request_changes vote requires at least one retained finding",
+      }],
+    });
+  });
+
   it("deduplicates repeated accepted finding chunks and bounds malformed arguments", () => {
     const { code, args } = commandCode("normalize_glm_review");
     const files = Array.from({ length: 50 }, (_, index) => `src/file-${String(index + 1).padStart(2, "0")}.ts`);
@@ -812,6 +856,27 @@ describe("PR Review scenario assets", () => {
     expect(() => handoffActiveRun(runId, "kimi_review", "failed", "probe"))
       .toThrow(/DAG_HANDOFF_CONTRACT_VIOLATION/);
     expect(getActiveRun(runId)?.dagRun.handoffedNodes.has("kimi_review")).toBe(false);
+  });
+
+  it("accepts a structured incomplete-evidence abstention without coverage", () => {
+    const parsed = parseWorkflowSource(fs.readFileSync(workflowPath, "utf8"));
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-incomplete-abstention";
+    executor.createRun(runId, parsed, JSON.stringify(reviewInput()));
+    executor.tick(runId);
+
+    expect(() => handoffActiveRun(runId, "qwen_review", "voted", {
+      reviewer: "qwen",
+      status: "failed",
+      vote: "abstain",
+      summary: "The immutable diff evidence is incomplete.",
+      findings: [],
+    })).not.toThrow();
+    expect(getActiveRun(runId)?.dagRun.handoffedNodes.has("qwen_review")).toBe(true);
+    expect(getActiveRun(runId)?.dagRun.nodeStates.get("normalize_qwen_review")).toBe("READY");
   });
 
   it("executes the compact graph with exactly three model calls", async () => {
@@ -1759,6 +1824,28 @@ describe("PR Review scenario assets", () => {
     expect(runValidator(
       "cancelled",
       findingsReport,
+      { passed: false, successes: 2, total: 3, threshold: 2 },
+    ).status).toBe(0);
+
+    const findingsFromFailedReviewer = {
+      ...passingReviewReport(),
+      status: "findings",
+      confidence: "medium",
+      actionable_count: 1,
+      findings: [finding],
+      reviewer_results: [
+        normalizedReview("qwen", "abstain", {
+          coverage: { digest: "0".repeat(64), count: 1 },
+          findings: [finding],
+          diagnostics: [{ attempt: 1, category: "provider_output_truncated" }],
+        }),
+        normalizedReview("kimi"),
+        normalizedReview("glm"),
+      ],
+    };
+    expect(runValidator(
+      "cancelled",
+      findingsFromFailedReviewer,
       { passed: false, successes: 2, total: 3, threshold: 2 },
     ).status).toBe(0);
 

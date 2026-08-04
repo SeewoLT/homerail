@@ -469,7 +469,7 @@ spec:
     VerificationVote:
       type: object
       additionalProperties: false
-      required: [reviewer, status, vote, summary, coverage, findings]
+      required: [reviewer, status, vote, summary, findings]
       properties:
         reviewer: { type: string, enum: [qwen, kimi, glm] }
         status: { type: string, enum: [complete, failed] }
@@ -498,6 +498,23 @@ spec:
               evidence: { type: string, minLength: 1, maxLength: 12000 }
               recommendation: { type: string, minLength: 1, maxLength: 8000 }
               confidence: { type: string, enum: [high, medium, low] }
+      allOf:
+        - if:
+            required: [status]
+            properties:
+              status: { const: complete }
+          then:
+            required: [coverage]
+            properties:
+              coverage: {}
+              vote: { enum: [approve, request_changes] }
+        - if:
+            required: [status]
+            properties:
+              status: { const: failed }
+          then:
+            properties:
+              vote: { const: abstain }
 
 
     FinalReview:
@@ -622,22 +639,26 @@ spec:
         input.context.coverage exactly (both digest and count) into the
         coverage field of your handoff. Never guess, invent, or reconstruct the
         digest and never echo the changed-file list. If diff_truncated is true
-        or any changed file cannot be reviewed, do not attest coverage; set
+        or any changed file cannot be reviewed, omit coverage; set
         status=failed, vote=abstain, and explain in summary. A deliberate
         abstention after completing review is allowed: set status=failed,
         vote=abstain and include the exact coverage attestation. Otherwise set
         status=complete and vote=approve when findings is empty or
         request_changes when findings is non-empty.
-        Do not end with prose. Your final action MUST call handoff on voted with:
+        Do not end with prose. After a complete review or deliberate abstention,
+        your final action MUST call handoff on voted with:
         {"reviewer":"qwen","status":"complete|failed","vote":"approve|request_changes|abstain","summary":"text","coverage":{"digest":"<exact 64-character digest from input.context.coverage>","count":<exact count>},"findings":[{"category":"runtime|security|tests|frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        If evidence is incomplete, call handoff on voted without coverage:
+        {"reviewer":"qwen","status":"failed","vote":"abstain","summary":"explain the missing evidence","findings":[]}
         The handoff call is terminal: never call it as a probe or test, and
         never use the failed port. An incomplete review must still submit a
         structured status=failed, vote=abstain result on voted.
         If input:correction exists, do not re-analyze the repository, re-read
         diff evidence, or reserialize any changed-file list. Use the
         correction's accepted evidence and exact diagnostics; resubmit only the
-        missing or invalid fields. Include the exact coverage attestation, but
-        do not repeat accepted findings: findings contains only missing or new
+        missing or invalid fields. Preserve the exact coverage attestation only
+        when input:correction contains one; otherwise omit coverage. Do not
+        repeat accepted findings: findings contains only missing or new
         findings, and the Manager merges the accepted set monotonically. Call
         no tool except handoff.
 
@@ -663,22 +684,26 @@ spec:
         changed file: copy input.context.coverage exactly (both digest and
         count) into the coverage field of your handoff. Never guess, invent, or
         reconstruct the digest and never echo the changed-file list. If
-        evidence is incomplete, do not attest coverage; set status=failed,
+        evidence is incomplete, omit coverage; set status=failed,
         vote=abstain, and explain in summary. A deliberate abstention after
         completing review is allowed: set status=failed, vote=abstain and
         include the exact coverage attestation. Otherwise set status=complete
         and approve only when no actionable finding remains after your
         challenge.
-        Do not end with prose. Your final action MUST call handoff on voted with:
+        Do not end with prose. After a complete review or deliberate abstention,
+        your final action MUST call handoff on voted with:
         {"reviewer":"kimi","status":"complete|failed","vote":"approve|request_changes|abstain","summary":"text","coverage":{"digest":"<exact 64-character digest from input.context.coverage>","count":<exact count>},"findings":[{"category":"runtime|security|tests|frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        If evidence is incomplete, call handoff on voted without coverage:
+        {"reviewer":"kimi","status":"failed","vote":"abstain","summary":"explain the missing evidence","findings":[]}
         The handoff call is terminal: never call it as a probe or test, and
         never use the failed port. An incomplete review must still submit a
         structured status=failed, vote=abstain result on voted.
         If input:correction exists, do not re-analyze the repository, re-read
         diff evidence, or reserialize any changed-file list. Use the
         correction's accepted evidence and exact diagnostics; resubmit only the
-        missing or invalid fields. Include the exact coverage attestation, but
-        do not repeat accepted findings: findings contains only missing or new
+        missing or invalid fields. Preserve the exact coverage attestation only
+        when input:correction contains one; otherwise omit coverage. Do not
+        repeat accepted findings: findings contains only missing or new
         findings, and the Manager merges the accepted set monotonically. Call
         no tool except handoff.
 
@@ -703,21 +728,25 @@ spec:
         have reviewed every changed file: copy input.context.coverage exactly
         (both digest and count) into the coverage field of your handoff. Never
         guess, invent, or reconstruct the digest and never echo the
-        changed-file list. If evidence is incomplete, do not attest coverage;
+        changed-file list. If evidence is incomplete, omit coverage;
         set status=failed, vote=abstain, and explain in summary. A deliberate
         abstention after completing review is allowed: set status=failed,
         vote=abstain and include the exact coverage attestation. Otherwise set
         status=complete and approve only when there are no actionable findings.
-        Do not end with prose. Your final action MUST call handoff on voted with:
+        Do not end with prose. After a complete review or deliberate abstention,
+        your final action MUST call handoff on voted with:
         {"reviewer":"glm","status":"complete|failed","vote":"approve|request_changes|abstain","summary":"text","coverage":{"digest":"<exact 64-character digest from input.context.coverage>","count":<exact count>},"findings":[{"category":"runtime|security|tests|frontend","severity":"critical|high|medium|low","title":"text","file":"path","line":1,"evidence":"text","recommendation":"text","confidence":"high|medium|low"}]}
+        If evidence is incomplete, call handoff on voted without coverage:
+        {"reviewer":"glm","status":"failed","vote":"abstain","summary":"explain the missing evidence","findings":[]}
         The handoff call is terminal: never call it as a probe or test, and
         never use the failed port. An incomplete review must still submit a
         structured status=failed, vote=abstain result on voted.
         If input:correction exists, do not re-analyze the repository, re-read
         diff evidence, or reserialize any changed-file list. Use the
         correction's accepted evidence and exact diagnostics; resubmit only the
-        missing or invalid fields. Include the exact coverage attestation, but
-        do not repeat accepted findings: findings contains only missing or new
+        missing or invalid fields. Preserve the exact coverage attestation only
+        when input:correction contains one; otherwise omit coverage. Do not
+        repeat accepted findings: findings contains only missing or new
         findings, and the Manager merges the accepted set monotonically. Call
         no tool except handoff.
 
@@ -1090,14 +1119,15 @@ spec:
               const candidateFindings=candidate&&Array.isArray(candidate.findings)?candidate.findings.filter(validFinding):[];
               for(const finding of candidateFindings){const key=findingKey(finding);if(!seen.has(key)){seen.add(key);findings.push(finding)}}
               const lastAttempt=attempts[attempts.length-1];
-              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||candidate.vote==='request_changes')&&coverageValid);
+              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||(candidate.vote==='request_changes'&&findings.length>0))&&coverageValid);
               const resolvedVote=complete&&findings.length>0?'request_changes':candidate&&candidate.vote;
               const explicitAbstain=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='failed'&&candidate.vote==='abstain');
-              const category=complete?'accepted':(lastAttempt&&typeof lastAttempt.failure_category==='string')?lastAttempt.failure_category:explicitAbstain?'reviewer_abstained':'unknown';
+              const inconsistentVote=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&candidate.vote==='request_changes'&&findings.length===0);
+              const category=complete?'accepted':(lastAttempt&&typeof lastAttempt.failure_category==='string')?lastAttempt.failure_category:inconsistentVote?'contract_validation_failed':explicitAbstain?'reviewer_abstained':'unknown';
               const failureCategories=new Set(['provider_output_truncated','handoff_arguments_invalid','contract_validation_failed','transport_failed','unknown']);
               const evidenceTruncated=failureCategories.has(category);
-              const message=(failure&&typeof failure==='object'&&typeof failure.error==='string'?failure.error:lastAttempt&&typeof lastAttempt.message==='string'?lastAttempt.message:'reviewer ended without a complete vote');
-              const diagnostics=(attempts.length>0?attempts.slice(0,8):[{attempt:1,failure_category:category}]).map(d=>({attempt:d.attempt,category:d.failure_category??d.category??category,finish_reason:d.finish_reason??null,output_tokens:d.output_tokens??null,output_token_limit:d.output_token_limit??null,tool_arguments_parse_state:parseState(d.tool_argument_parse_state),contract_validation_stage:contractStage(d.contract_stage),message:d.message??null}));
+              const message=(failure&&typeof failure==='object'&&typeof failure.error==='string'?failure.error:lastAttempt&&typeof lastAttempt.message==='string'?lastAttempt.message:inconsistentVote?'request_changes vote requires at least one retained finding':'reviewer ended without a complete vote');
+              const diagnostics=(attempts.length>0?attempts.slice(0,8):[{attempt:1,failure_category:category,message:inconsistentVote?'request_changes vote requires at least one retained finding':undefined}]).map(d=>({attempt:d.attempt,category:d.failure_category??d.category??category,finish_reason:d.finish_reason??null,output_tokens:d.output_tokens??null,output_token_limit:d.output_token_limit??null,tool_arguments_parse_state:parseState(d.tool_argument_parse_state),contract_validation_stage:contractStage(d.contract_stage),message:d.message??null}));
               if(complete&&(diagnostics.at(-1)?.category||'')!=='accepted'&&diagnostics.length<8)diagnostics.push({attempt:(Number(diagnostics.at(-1)?.attempt)||0)+1,category:'accepted',finish_reason:null,output_tokens:null,output_token_limit:null,tool_arguments_parse_state:null,contract_validation_stage:null,message:null});
               const summary=(complete||explicitAbstain)?bounded(candidate&&candidate.summary?candidate.summary:'',12000):`${reviewer} reviewer did not complete a valid vote (${category})`+(message?': '+bounded(message,300):'');
               process.stdout.write(JSON.stringify({reviewer,status:complete?'complete':'failed',vote:complete?resolvedVote:'abstain',summary,coverage:attestation||trusted.coverage,reviewed_files:coverageValid?changed:[],unreviewed_files:coverageValid?[]:changed,evidence_truncated:evidenceTruncated,findings:complete&&resolvedVote==='approve'?[]:findings.slice(0,50).map(publicFinding),diagnostics}));
@@ -1155,14 +1185,15 @@ spec:
               const candidateFindings=candidate&&Array.isArray(candidate.findings)?candidate.findings.filter(validFinding):[];
               for(const finding of candidateFindings){const key=findingKey(finding);if(!seen.has(key)){seen.add(key);findings.push(finding)}}
               const lastAttempt=attempts[attempts.length-1];
-              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||candidate.vote==='request_changes')&&coverageValid);
+              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||(candidate.vote==='request_changes'&&findings.length>0))&&coverageValid);
               const resolvedVote=complete&&findings.length>0?'request_changes':candidate&&candidate.vote;
               const explicitAbstain=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='failed'&&candidate.vote==='abstain');
-              const category=complete?'accepted':(lastAttempt&&typeof lastAttempt.failure_category==='string')?lastAttempt.failure_category:explicitAbstain?'reviewer_abstained':'unknown';
+              const inconsistentVote=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&candidate.vote==='request_changes'&&findings.length===0);
+              const category=complete?'accepted':(lastAttempt&&typeof lastAttempt.failure_category==='string')?lastAttempt.failure_category:inconsistentVote?'contract_validation_failed':explicitAbstain?'reviewer_abstained':'unknown';
               const failureCategories=new Set(['provider_output_truncated','handoff_arguments_invalid','contract_validation_failed','transport_failed','unknown']);
               const evidenceTruncated=failureCategories.has(category);
-              const message=(failure&&typeof failure==='object'&&typeof failure.error==='string'?failure.error:lastAttempt&&typeof lastAttempt.message==='string'?lastAttempt.message:'reviewer ended without a complete vote');
-              const diagnostics=(attempts.length>0?attempts.slice(0,8):[{attempt:1,failure_category:category}]).map(d=>({attempt:d.attempt,category:d.failure_category??d.category??category,finish_reason:d.finish_reason??null,output_tokens:d.output_tokens??null,output_token_limit:d.output_token_limit??null,tool_arguments_parse_state:parseState(d.tool_argument_parse_state),contract_validation_stage:contractStage(d.contract_stage),message:d.message??null}));
+              const message=(failure&&typeof failure==='object'&&typeof failure.error==='string'?failure.error:lastAttempt&&typeof lastAttempt.message==='string'?lastAttempt.message:inconsistentVote?'request_changes vote requires at least one retained finding':'reviewer ended without a complete vote');
+              const diagnostics=(attempts.length>0?attempts.slice(0,8):[{attempt:1,failure_category:category,message:inconsistentVote?'request_changes vote requires at least one retained finding':undefined}]).map(d=>({attempt:d.attempt,category:d.failure_category??d.category??category,finish_reason:d.finish_reason??null,output_tokens:d.output_tokens??null,output_token_limit:d.output_token_limit??null,tool_arguments_parse_state:parseState(d.tool_argument_parse_state),contract_validation_stage:contractStage(d.contract_stage),message:d.message??null}));
               if(complete&&(diagnostics.at(-1)?.category||'')!=='accepted'&&diagnostics.length<8)diagnostics.push({attempt:(Number(diagnostics.at(-1)?.attempt)||0)+1,category:'accepted',finish_reason:null,output_tokens:null,output_token_limit:null,tool_arguments_parse_state:null,contract_validation_stage:null,message:null});
               const summary=(complete||explicitAbstain)?bounded(candidate&&candidate.summary?candidate.summary:'',12000):`${reviewer} reviewer did not complete a valid vote (${category})`+(message?': '+bounded(message,300):'');
               process.stdout.write(JSON.stringify({reviewer,status:complete?'complete':'failed',vote:complete?resolvedVote:'abstain',summary,coverage:attestation||trusted.coverage,reviewed_files:coverageValid?changed:[],unreviewed_files:coverageValid?[]:changed,evidence_truncated:evidenceTruncated,findings:complete&&resolvedVote==='approve'?[]:findings.slice(0,50).map(publicFinding),diagnostics}));
@@ -1220,14 +1251,15 @@ spec:
               const candidateFindings=candidate&&Array.isArray(candidate.findings)?candidate.findings.filter(validFinding):[];
               for(const finding of candidateFindings){const key=findingKey(finding);if(!seen.has(key)){seen.add(key);findings.push(finding)}}
               const lastAttempt=attempts[attempts.length-1];
-              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||candidate.vote==='request_changes')&&coverageValid);
+              const complete=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&(candidate.vote==='approve'||(candidate.vote==='request_changes'&&findings.length>0))&&coverageValid);
               const resolvedVote=complete&&findings.length>0?'request_changes':candidate&&candidate.vote;
               const explicitAbstain=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='failed'&&candidate.vote==='abstain');
-              const category=complete?'accepted':(lastAttempt&&typeof lastAttempt.failure_category==='string')?lastAttempt.failure_category:explicitAbstain?'reviewer_abstained':'unknown';
+              const inconsistentVote=Boolean(candidate&&candidate.reviewer===reviewer&&candidate.status==='complete'&&candidate.vote==='request_changes'&&findings.length===0);
+              const category=complete?'accepted':(lastAttempt&&typeof lastAttempt.failure_category==='string')?lastAttempt.failure_category:inconsistentVote?'contract_validation_failed':explicitAbstain?'reviewer_abstained':'unknown';
               const failureCategories=new Set(['provider_output_truncated','handoff_arguments_invalid','contract_validation_failed','transport_failed','unknown']);
               const evidenceTruncated=failureCategories.has(category);
-              const message=(failure&&typeof failure==='object'&&typeof failure.error==='string'?failure.error:lastAttempt&&typeof lastAttempt.message==='string'?lastAttempt.message:'reviewer ended without a complete vote');
-              const diagnostics=(attempts.length>0?attempts.slice(0,8):[{attempt:1,failure_category:category}]).map(d=>({attempt:d.attempt,category:d.failure_category??d.category??category,finish_reason:d.finish_reason??null,output_tokens:d.output_tokens??null,output_token_limit:d.output_token_limit??null,tool_arguments_parse_state:parseState(d.tool_argument_parse_state),contract_validation_stage:contractStage(d.contract_stage),message:d.message??null}));
+              const message=(failure&&typeof failure==='object'&&typeof failure.error==='string'?failure.error:lastAttempt&&typeof lastAttempt.message==='string'?lastAttempt.message:inconsistentVote?'request_changes vote requires at least one retained finding':'reviewer ended without a complete vote');
+              const diagnostics=(attempts.length>0?attempts.slice(0,8):[{attempt:1,failure_category:category,message:inconsistentVote?'request_changes vote requires at least one retained finding':undefined}]).map(d=>({attempt:d.attempt,category:d.failure_category??d.category??category,finish_reason:d.finish_reason??null,output_tokens:d.output_tokens??null,output_token_limit:d.output_token_limit??null,tool_arguments_parse_state:parseState(d.tool_argument_parse_state),contract_validation_stage:contractStage(d.contract_stage),message:d.message??null}));
               if(complete&&(diagnostics.at(-1)?.category||'')!=='accepted'&&diagnostics.length<8)diagnostics.push({attempt:(Number(diagnostics.at(-1)?.attempt)||0)+1,category:'accepted',finish_reason:null,output_tokens:null,output_token_limit:null,tool_arguments_parse_state:null,contract_validation_stage:null,message:null});
               const summary=(complete||explicitAbstain)?bounded(candidate&&candidate.summary?candidate.summary:'',12000):`${reviewer} reviewer did not complete a valid vote (${category})`+(message?': '+bounded(message,300):'');
               process.stdout.write(JSON.stringify({reviewer,status:complete?'complete':'failed',vote:complete?resolvedVote:'abstain',summary,coverage:attestation||trusted.coverage,reviewed_files:coverageValid?changed:[],unreviewed_files:coverageValid?[]:changed,evidence_truncated:evidenceTruncated,findings:complete&&resolvedVote==='approve'?[]:findings.slice(0,50).map(publicFinding),diagnostics}));

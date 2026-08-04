@@ -176,7 +176,6 @@ export function validatePrReviewArtifacts(command, publication, markdown) {
   );
   invariant(quorum.passed === (approvals >= 2 && report.actionable_count === 0), "quorum pass must require two approvals and zero retained findings");
   if (report.status === "pass") invariant(approvals >= 2, "passing report lacks two model approvals");
-  if (report.status === "findings") invariant(changesRequested >= 1, "findings report lacks a request-changes vote");
   if (report.status === "inconclusive") {
     invariant(approvals < 2 && report.actionable_count === 0, "inconclusive report has enough approvals or retained findings");
   }
