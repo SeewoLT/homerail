@@ -8,6 +8,7 @@ import {
 } from "./secret-store.js";
 import { normalizeStatus, type ProviderStatus } from "./status.js";
 import { nowIso } from "./time.js";
+import { codexResponsesModelSupport } from "homerail-protocol";
 import {
   baseUrlForProtocol,
   canonicalModelNameForEndpoint,
@@ -203,6 +204,13 @@ function _normalizeClaudeSdkBaseUrl(value: unknown): string | undefined {
   const trimmed = raw.replace(/\/+$/, "");
   const withoutMessagesVersion = trimmed.replace(/\/v1$/i, "");
   return withoutMessagesVersion || trimmed;
+}
+
+function _normalizeResponsesBaseUrl(value: unknown): string | undefined {
+  const raw = _nonEmptyString(value);
+  if (!raw) return undefined;
+  const trimmed = raw.replace(/\/+$/, "");
+  return trimmed.replace(/\/responses$/i, "") || trimmed;
 }
 
 function _normalizePlanType(value: unknown, fallback: LLMPlanType = "custom"): LLMPlanType {
@@ -884,7 +892,9 @@ function _resolveEffectiveSetting(raw: unknown): { setting?: LLMSetting; needsSe
 
   // models 向后兼容：旧 setting 无 models 字段时，从 model_name 派生 [model_name]
   const models = Array.isArray(rec.models) && rec.models.every((m) => typeof m === "string")
-    ? (rec.models as string[]).map((item) => canonicalModelNameForEndpoint(providerId, resolvedEndpointId, item))
+    ? Array.from(new Set(
+      (rec.models as string[]).map((item) => canonicalModelNameForEndpoint(providerId, resolvedEndpointId, item)),
+    ))
     : [modelName];
 
   const setting: LLMSetting = {
@@ -1486,6 +1496,21 @@ export function findActiveClaudeSdkCompatibleSetting(): LLMSetting | undefined {
   return settings.find((s) => s.is_default) ?? settings[0];
 }
 
+export function findActiveCodexCompatibleSetting(): LLMSetting | undefined {
+  return _readSettings()
+    .filter((s) => (
+      s.is_active &&
+      s.preset_status !== "missing" &&
+      s.supports_llm &&
+      !isVoiceServiceSetting(s) &&
+      Boolean(resolveCodexResponsesBaseUrlForSetting(s))
+    ))
+    .sort((a, b) => {
+      if (a.is_default !== b.is_default) return a.is_default ? -1 : 1;
+      return b.updated_at.localeCompare(a.updated_at);
+    })[0];
+}
+
 export function findActiveLlmRuntimeSetting(): LLMSetting | undefined {
   return _readSettings()
     .filter((s) => s.is_active && s.preset_status !== "missing" && s.supports_llm && !isVoiceServiceSetting(s))
@@ -1526,6 +1551,20 @@ export function resolveClaudeSdkBaseUrlForSetting(setting: LLMSetting): string |
       _normalizeClaudeSdkBaseUrl(provider?.base_url);
   }
   return undefined;
+}
+
+export function resolveCodexResponsesBaseUrlForSetting(setting: LLMSetting): string | undefined {
+  if (codexResponsesModelSupport(setting.provider_id, setting.model_name) === "unsupported") {
+    return undefined;
+  }
+  const provider = getProvider(setting.provider_id);
+  const endpoint = _endpointForSetting(setting, provider);
+  const lockedEndpoint = _isLockedCatalogEndpoint(setting.provider_id, endpoint);
+  return lockedEndpoint
+    ? _normalizeResponsesBaseUrl(endpoint?.responses_base_url)
+    : _normalizeResponsesBaseUrl(setting.responses_base_url) ??
+      _normalizeResponsesBaseUrl(endpoint?.responses_base_url) ??
+      _normalizeResponsesBaseUrl(provider?.responses_base_url);
 }
 
 export function resolveClaudeSdkAuthModeForSetting(setting: LLMSetting): AnthropicAuthMode {

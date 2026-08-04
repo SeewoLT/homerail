@@ -601,6 +601,8 @@ export interface DagNodeConfig {
   node_id: string;
   agent_type: string;
   model: string;
+  reasoning_effort?: string;
+  service_tier?: string | null;
   outgoing_edges: Edge[];
   incoming_edges: Edge[];
   graph_nodes: string[];

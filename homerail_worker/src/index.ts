@@ -178,6 +178,12 @@ client.on("task", async (msg) => {
   const apiKey = typeof llmConfig.api_key === "string" ? llmConfig.api_key : undefined;
   const baseUrl = typeof llmConfig.base_url === "string" ? llmConfig.base_url : undefined;
   const protocol = typeof llmConfig.protocol === "string" ? llmConfig.protocol : undefined;
+  const reasoningEffort = typeof llmConfig.reasoning_effort === "string"
+    ? llmConfig.reasoning_effort
+    : undefined;
+  const serviceTier = typeof llmConfig.service_tier === "string"
+    ? llmConfig.service_tier
+    : llmConfig.service_tier === null ? null : undefined;
   const anthropicAuthMode = llmConfig.anthropic_auth_mode === "auth_token"
     ? "auth_token"
     : llmConfig.anthropic_auth_mode === "api_key" ? "api_key" : undefined;
@@ -209,6 +215,8 @@ client.on("task", async (msg) => {
         node_id: nodeId,
         agent_type: agentType,
         model,
+        reasoning_effort: reasoningEffort,
+        service_tier: serviceTier,
         outgoing_edges: ((envelope.outgoingEdges ?? []) as Array<Record<string, unknown>>).map((e) => ({
           from_port: String(e.from_port ?? ""),
           to_node: String(e.to_node ?? ""),

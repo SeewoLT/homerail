@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getNode, type NodeState } from "./registry.js";
 import type { LifecycleRequestMessage } from "./types.js";
+import type { DagWorkspaceInputProjection } from "homerail-protocol";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -90,6 +91,7 @@ export interface WorkerCreateOptions {
   extraHosts?: string[];
   workspace?: Record<string, unknown>;
   workspaceReadOnly?: boolean;
+  workspaceInputs?: DagWorkspaceInputProjection[];
   timeoutMs?: number;
 }
 
@@ -110,6 +112,7 @@ export function sendWorkerCreateRequest(
       extra_hosts: options.extraHosts,
       workspace: options.workspace,
       workspace_read_only: options.workspaceReadOnly === true,
+      workspace_inputs: options.workspaceInputs,
     },
     { timeoutMs: options.timeoutMs },
   );

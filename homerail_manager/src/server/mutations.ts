@@ -35,14 +35,26 @@ import { DagActorLiveCommandRuntimeError } from "../runtime/dag-actor-live-comma
 import { DagActorLiveCommandConflictError } from "../persistence/dag-actor-live-commands.js";
 import {
   canonicalManagerAgentToolCallName,
+  DAG_RUN_INPUT_MEDIA_TYPES,
   normalizeManagerAgentOutcomeCapabilities,
+  type DagRunInputMediaType,
+  type DagRunInputBindingRequest,
 } from "homerail-protocol";
+import {
+  listDagRunInputs,
+  stageDagRunInputArtifact,
+} from "../persistence/run-input-artifacts.js";
 
 interface BaseResponse {
   success: boolean;
   message: string;
   data?: unknown;
   error?: string;
+}
+
+function _isDagRunInputMediaType(value: unknown): value is DagRunInputMediaType {
+  return typeof value === "string"
+    && (DAG_RUN_INPUT_MEDIA_TYPES as readonly string[]).includes(value);
 }
 
 function json(res: http.ServerResponse, status: number, body: BaseResponse) {
@@ -143,6 +155,7 @@ export function requiresDagMutationAuthorization(pathname: string, method?: stri
   if (/^\/api\/runs\/[^/]+\/node\/[^/]+\/approval$/.test(pathname)) return false;
   return pathname === "/api/runs"
     || pathname.startsWith("/api/runs/")
+    || pathname === "/api/run-inputs"
     || pathname === "/api/dag/workflows/sync"
     || pathname === "/api/dag/profiles/sync"
     || pathname.startsWith("/api/dag/environment/")
@@ -150,11 +163,23 @@ export function requiresDagMutationAuthorization(pathname: string, method?: stri
     || pathname === "/api/settings/workspace-retention";
 }
 
-async function _readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+async function _readJsonBody(req: http.IncomingMessage, maxBytes = Number.POSITIVE_INFINITY): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", (chunk) => { data += chunk; });
+    let size = 0;
+    let exceeded = false;
+    req.on("data", (chunk) => {
+      if (exceeded) return;
+      size += Buffer.byteLength(chunk);
+      if (size > maxBytes) {
+        exceeded = true;
+        reject(new Error(`JSON request body exceeds ${maxBytes} bytes`));
+        return;
+      }
+      data += chunk;
+    });
     req.on("end", () => {
+      if (exceeded) return;
       try {
         resolve(data ? JSON.parse(data) : {});
       } catch (err) {
@@ -163,6 +188,33 @@ async function _readJsonBody(req: http.IncomingMessage): Promise<unknown> {
     });
     req.on("error", reject);
   });
+}
+
+function _runInputFields(body: Record<string, unknown>): {
+  inputScope?: string;
+  inputArtifacts?: DagRunInputBindingRequest[];
+} {
+  if (body.input_artifacts === undefined) return {};
+  if (!Array.isArray(body.input_artifacts)) throw new Error("input_artifacts must be an array");
+  const inputScope = typeof body.input_scope === "string" ? body.input_scope.trim() : "";
+  if (!inputScope) throw new Error("input_scope is required when input_artifacts are bound");
+  const inputArtifacts = body.input_artifacts.map((value, index) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`input_artifacts[${index}] must be an object`);
+    }
+    const entry = value as Record<string, unknown>;
+    for (const field of ["artifact_id", "logical_name", "mount_path"] as const) {
+      if (typeof entry[field] !== "string" || !entry[field].trim()) {
+        throw new Error(`input_artifacts[${index}].${field} is required`);
+      }
+    }
+    return {
+      artifact_id: String(entry.artifact_id).trim(),
+      logical_name: String(entry.logical_name).trim(),
+      mount_path: String(entry.mount_path).trim(),
+    };
+  });
+  return { inputScope, inputArtifacts };
 }
 
 function _appendNodeRequestFromBody(body: Record<string, unknown>): AppendNodeRequest | undefined {
@@ -193,6 +245,43 @@ export function mutationRoutesHandler(
   managerAgentConfigOptions: ManagerAgentConfigRoutesOptions = {},
 ): boolean {
   const pathname = new URL(req.url || "/", "http://localhost").pathname;
+
+  if (pathname === "/api/run-inputs" && req.method === "POST") {
+    _readJsonBody(req, 1_200_000)
+      .then((body) => {
+        const value = body as Record<string, unknown>;
+        try {
+          if (!_isDagRunInputMediaType(value.media_type)) {
+            throw new Error("unsupported run input media_type");
+          }
+          if (typeof value.content !== "string") {
+            throw new Error("run input content must be a string");
+          }
+          const artifact = stageDagRunInputArtifact({
+            scope_id: typeof value.scope_id === "string" ? value.scope_id : "",
+            name: typeof value.name === "string" ? value.name : "",
+            media_type: value.media_type,
+            content: value.content,
+          });
+          _created(res, "Run input staged", { artifact });
+        } catch (error) {
+          _badRequest(res, error instanceof Error ? error.message : String(error));
+        }
+      })
+      .catch((error) => _badRequest(res, error instanceof Error ? error.message : "Invalid JSON body"));
+    return true;
+  }
+
+  const runInputsMatch = pathname.match(/^\/api\/runs\/([^/]+)\/inputs$/);
+  if (runInputsMatch && req.method === "GET") {
+    try {
+      const runId = decodeURIComponent(runInputsMatch[1]);
+      _ok(res, "Run inputs", { inputs: listDagRunInputs(runId) });
+    } catch (error) {
+      _badRequest(res, error instanceof Error ? error.message : String(error));
+    }
+    return true;
+  }
 
   // POST /api/manager/chat
   if (pathname === "/api/manager/chat" && req.method === "POST") {
@@ -374,7 +463,8 @@ export function mutationRoutesHandler(
         const prompt = typeof b.prompt === "string" ? b.prompt : undefined;
         const llmSettingId = typeof b.llm_setting_id === "string" && b.llm_setting_id.trim() ? b.llm_setting_id.trim() : undefined;
         try {
-          const result = changeOrchestrator.createRun({ yamlPath, workflowId, profile, runId, prompt, llmSettingId });
+          const runInputs = _runInputFields(b);
+          const result = changeOrchestrator.createRun({ yamlPath, workflowId, profile, runId, prompt, llmSettingId, ...runInputs });
           _created(res, "Run created", result);
         } catch (err) {
           _runCreationError(res, err);
@@ -425,6 +515,7 @@ export function mutationRoutesHandler(
           return;
         }
         try {
+          const runInputs = _runInputFields(b);
           const result = changeOrchestrator.createAndRun({
             yamlPath,
             workflowId,
@@ -435,6 +526,7 @@ export function mutationRoutesHandler(
             expectedWorkflowRevision,
             expectedCanonicalHash,
             expectedProfileUpdatedAt,
+            ...runInputs,
           });
           _created(res, "Run created and invoked", result);
         } catch (err) {

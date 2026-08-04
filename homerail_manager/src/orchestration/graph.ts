@@ -20,6 +20,8 @@ export interface DAGAgentConfig {
     base_url?: string;
     protocol?: string;
     anthropic_auth_mode?: "api_key" | "auth_token";
+    reasoning_effort?: string;
+    service_tier?: string | null;
   };
   model?: string;
   system?: string;
@@ -104,6 +106,16 @@ export interface DAGGatewayConfig {
   item_field?: string;
   context_field?: string;
   worker_agent?: string;
+  worker_policy?: Record<string, unknown>;
+  workspace_strategy?: "shared" | "isolated_git_worktree";
+  workspace_root?: string;
+  repository_path?: string;
+  revision_field?: string;
+  result_git_commit?: {
+    commit_field: string;
+    workspace_field: string;
+    require_clean?: boolean;
+  };
   max_parallelism?: number;
   completion?: "all" | "any" | "n_of_m" | string;
   result_contract?: string;

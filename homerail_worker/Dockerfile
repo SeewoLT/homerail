@@ -30,6 +30,7 @@ COPY homerail_worker/package.json homerail_worker/package-lock.json* ./
 # --ignore-scripts skips postinstall since homerail_protocol is already built above
 RUN npm ci --ignore-scripts
 RUN command -v kimi
+RUN command -v codex && codex --version
 
 COPY homerail_worker/tsconfig.json ./
 COPY homerail_worker/src ./src

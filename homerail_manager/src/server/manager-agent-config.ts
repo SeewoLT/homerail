@@ -5,11 +5,16 @@ import {
   saveManagerAgentConfig,
 } from "../persistence/manager-agent-config.js";
 import {
+  findActiveCodexCompatibleSetting,
   findActiveClaudeSdkCompatibleSetting,
   findActiveLlmRuntimeSetting,
+  getSetting,
 } from "../persistence/llm-settings.js";
 import { resolveManagerAgentConfig } from "./manager-agent-runtime-config.js";
-import { normalizeManagerAgentHarness } from "homerail-protocol";
+import {
+  normalizeManagerAgentHarness,
+  resolveCodexProviderModelProfile,
+} from "homerail-protocol";
 import { listCodexModels, type CodexModel, type CodexModelCatalog } from "./codex-models.js";
 import type { ManagerAgentConfig } from "../persistence/manager-agent-config.js";
 import {
@@ -107,6 +112,10 @@ function normalizedServiceTier(value: string | null): string | null {
   return value === "fast" ? "priority" : value;
 }
 
+function providerDefaultReasoningEffort(providerId?: string, model?: string): string | undefined {
+  return resolveCodexProviderModelProfile(providerId, model)?.default_reasoning_effort;
+}
+
 function patchedConfig(patch: Record<string, unknown>): ManagerAgentConfig {
   const current = readManagerAgentConfig();
   const settingId = _string(patch.llm_setting_id);
@@ -143,24 +152,33 @@ function patchedConfig(patch: Record<string, unknown>): ManagerAgentConfig {
     ? current.service_tier
     : normalizedServiceTier(serviceTier);
   if (harness === "codex_appserver") {
-    const staleRuntimeSelection = Boolean(settingId || providerName);
-    const currentCodexModel = current.harness === "codex_appserver" ? current.model_name : null;
+    const switchingToCodex = current.harness !== "codex_appserver";
+    const useExplicitSubscriptionModel = switchingToCodex && modelName !== undefined &&
+      settingId === undefined && providerName === undefined;
+    const useAutomaticProvider = switchingToCodex && settingId === undefined &&
+      providerName === undefined && modelName === undefined;
+    const preferredSetting = useAutomaticProvider
+      ? findActiveCodexCompatibleSetting()
+      : undefined;
+    const explicitSetting = typeof settingId === "string" ? getSetting(settingId) : undefined;
+    const providerSelectionChanged = switchingToCodex || settingId !== undefined ||
+      providerName !== undefined || modelName !== undefined;
+    const selectedProviderId = preferredSetting?.provider_id ?? explicitSetting?.provider_id ??
+      (typeof providerName === "string" ? providerName : undefined);
+    const selectedModel = preferredSetting?.model_name ?? explicitSetting?.model_name ??
+      (typeof modelName === "string" ? modelName : undefined);
+    const selectedProviderDefault = providerSelectionChanged && !useExplicitSubscriptionModel
+      ? providerDefaultReasoningEffort(selectedProviderId, selectedModel)
+      : undefined;
     return {
       ...current,
       harness,
       live_voice_enabled: liveVoiceEnabled,
       live_voice_voice: liveVoiceVoice,
-      llm_setting_id: null,
-      provider_name: null,
-      // Ignore stale HomeRail provider/model patches while Codex is active.
-      // When switching to Codex without an explicit model, leave this null so
-      // validateAndSaveManagerAgentConfig can use the live app-server catalog.
-      model_name: staleRuntimeSelection
-        ? currentCodexModel
-        : modelName === undefined
-          ? currentCodexModel
-          : modelName,
-      reasoning_effort: mergedReasoningEffort,
+      llm_setting_id: preferredSetting?.id ?? (useAutomaticProvider || useExplicitSubscriptionModel ? null : mergedSettingId),
+      provider_name: preferredSetting?.provider_id ?? (useAutomaticProvider || useExplicitSubscriptionModel ? null : mergedProviderName),
+      model_name: preferredSetting?.model_name ?? (useAutomaticProvider && modelName === undefined ? null : mergedModelName),
+      reasoning_effort: reasoningEffort ?? selectedProviderDefault ?? mergedReasoningEffort,
       service_tier: mergedServiceTier,
       generative_ui_mode: generativeUiMode,
     };
@@ -275,7 +293,10 @@ export async function validateAndSaveManagerAgentConfig(
       "service_tier",
     ].some((key) => Object.prototype.hasOwnProperty.call(patch, key));
     try {
-      if (!next.model_name || modelSelectionChanged) {
+      const providerBacked = Boolean(next.llm_setting_id || next.provider_name);
+      if (providerBacked) {
+        validateManagerConfig(next);
+      } else if (!next.model_name || modelSelectionChanged) {
         const catalog = await (options.loadCodexModels ?? listCodexModels)();
         if (!next.model_name) {
           const selected = preferredCodexConfig(catalog);
@@ -290,7 +311,7 @@ export async function validateAndSaveManagerAgentConfig(
         validateCodexReasoningEffort(next, catalog);
         validateCodexServiceTier(next, catalog);
       }
-      validateManagerConfig(next);
+      if (!providerBacked) validateManagerConfig(next);
     } catch (error) {
       throw validationError(error);
     }
@@ -300,6 +321,13 @@ export async function validateAndSaveManagerAgentConfig(
     } catch (error) {
       throw validationError(error);
     }
+  }
+  const providerBackedCodex = next.harness === "codex_appserver"
+    && Boolean(next.llm_setting_id || next.provider_name);
+  if (next.live_voice_enabled && providerBackedCodex) {
+    throw validationError(new Error(
+      "Live Voice is not supported for provider-backed Codex Responses runtimes. Disable Live Voice or use subscription Codex.",
+    ));
   }
   if (patch.live_voice_enabled === true) {
     if (next.harness !== "codex_appserver") {
@@ -326,7 +354,14 @@ export async function ensurePreferredManagerAgentConfig(
 ): Promise<ManagerAgentConfig> {
   const current = readManagerAgentConfig();
   if (hasManagerAgentConfig()) {
-    if (current.harness === "codex_appserver" && autoDetectCodex(options)) {
+    if (current.harness === "codex_appserver" && (current.llm_setting_id || current.provider_name)) {
+      try {
+        validateManagerConfig(current);
+        return current;
+      } catch {
+        // Fall through to another available runtime when the provider-backed config is stale.
+      }
+    } else if (current.harness === "codex_appserver" && autoDetectCodex(options)) {
       try {
         const catalog = await (options.loadCodexModels ?? listCodexModels)();
         try {
@@ -357,6 +392,20 @@ export async function ensurePreferredManagerAgentConfig(
         // Fall through to an available runtime when a stored config is stale.
       }
     }
+  }
+
+  const codexSetting = findActiveCodexCompatibleSetting();
+  if (codexSetting) {
+    const next = saveManagerAgentConfig({
+      harness: "codex_appserver",
+      llm_setting_id: codexSetting.id,
+      provider_name: codexSetting.provider_id,
+      model_name: codexSetting.model_name,
+      reasoning_effort: providerDefaultReasoningEffort(codexSetting.provider_id, codexSetting.model_name),
+      service_tier: null,
+    });
+    validateManagerConfig(next);
+    return next;
   }
 
   const claudeSetting = findActiveClaudeSdkCompatibleSetting();

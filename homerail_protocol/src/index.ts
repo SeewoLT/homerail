@@ -3,7 +3,7 @@
  *
  * Single source of truth for all runtime communication between
  * homerail_worker, homerail_node, and homerail_manager.
- * @version 0.1.0-alpha.3
+ * @version 0.1.0-beta.1
  */
 
 /**
@@ -19,12 +19,15 @@ export * from "./dag-activity.js";
 export * from "./dag-observability.js";
 export * from "./dag-worker-skill-context.js";
 export * from "./dag-credentials.js";
+export * from "./dag-run-inputs.js";
 export * from "./dag-actor-surface-patch.js";
 export * from "./dag-actor-surface-media.js";
 export * from "./codec.js";
 export * from "./schemas.js";
 export * from "./validation.js";
 export * from "./manager-agent.js";
+export * from "./codex-responses.js";
+export * from "./codex-provider-profiles.js";
 export * from "./manager-agent-tools.js";
 export * from "./manager-agent-widget-tools.js";
 export * from "./manager-agent-prompt.js";

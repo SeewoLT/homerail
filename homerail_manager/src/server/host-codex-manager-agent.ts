@@ -12,6 +12,7 @@ import {
   codexCommandForSpawn,
   codexCommandEnvironment,
   resolveUsableCodexBinary,
+  runCodexCommandSync,
   terminateCodexProcess,
 } from "./codex-binary.js";
 import {
@@ -25,7 +26,13 @@ import {
 } from "../widgets/widget-file-protocol.js";
 import type { ManagerAgentRuntimeConfig } from "./manager-agent-runtime-config.js";
 import {
+  CODEX_RESPONSES_PROTOCOL,
+  HOMERAIL_CODEX_MODEL_PROVIDER_ID,
+  buildCodexProviderModelCatalogFromBundled,
+  resolveCodexResponsesProviderProfile,
   buildManagerAgentSystemPrompt,
+  codexResponsesAppServerArgs,
+  codexResponsesProviderEnvironment,
   canonicalManagerAgentToolCallName,
   compactManagerAgentSkillSupervisedDagResult,
   compactManagerAgentSkillViewPresentResult,
@@ -73,6 +80,92 @@ type ToolHandlerResult = {
   content: Array<{ type: "text"; text: string }>;
   is_error?: boolean;
 };
+
+/**
+ * Statuses that mark a plugin/Manager tool mutation as unsuccessful from the
+ * model's point of view. Only `committed` represents a successful UI mutation;
+ * `failed`, `denied`, and `cancelled` must be surfaced to the model as tool
+ * errors so it does not claim a panel was updated when no document revision
+ * actually changed.
+ *
+ * See issue #168 (false canvas-update success).
+ */
+const PLUGIN_TOOL_FAILURE_STATUSES = new Set(["failed", "denied", "cancelled"]);
+
+/**
+ * Statuses that represent an in-flight or successful outcome, where an
+ * `error_code` (if any) should NOT be treated as a failure. Per the plugin-tool
+ * protocol, `error_code` only accompanies terminal failure records, but we scope
+ * defensively so an informational `error_code` on a `committed`/`running`
+ * outcome is never misclassified as a tool error. `projected` is included so the
+ * local-projection envelope invariant (projected is non-terminal and non-error,
+ * for host/worker parity) is enforced structurally even if a future change
+ * attaches an `error_code` to it.
+ */
+const PLUGIN_TOOL_NON_FAILURE_STATUSES = new Set(["committed", "running", "projected"]);
+
+/**
+ * Inspect a raw plugin-tool response body (the value returned by
+ * `/plugins/tools/invoke` or a local projection envelope) and decide whether it
+ * must be reported to the model as a tool error.
+ *
+ * The Manager wraps runtime tool outcomes as `{ success, data: { status,
+ * error_code } }`. The host adapter only looks at `result.is_error`, so this
+ * helper translates a nested `data.status` failure (or an explicit top-level
+ * `success: false`, or a present `error_code` on a non-success status) into
+ * `is_error: true`.
+ *
+ * Note: a local projection envelope `{ status: "projected", committed: false }`
+ * is intentionally NOT treated as an error. It is a legitimate non-terminal
+ * "projected but not yet committed" state that both the voice host and the
+ * non-voice worker produce identically (see manager-agent-tool-parity); flagging
+ * it would break result-envelope parity. The false-success bug in #168 is about
+ * the runtime invoke path returning `data.status = "failed"`, which IS caught
+ * below.
+ */
+export function isPluginToolEnvelopeFailure(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const record = body as Record<string, unknown>;
+
+  if (record.success === false) return true;
+
+  const data = record.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const inner = data as Record<string, unknown>;
+    const status = typeof inner.status === "string" ? inner.status : "";
+    if (PLUGIN_TOOL_FAILURE_STATUSES.has(status)) return true;
+    if (inner.success === false) return true;
+    // Only treat error_code as a failure when the status is not an explicit
+    // success/in-flight state, so an informational error_code on a committed
+    // outcome is never misclassified.
+    if (
+      !PLUGIN_TOOL_NON_FAILURE_STATUSES.has(status)
+      && typeof inner.error_code === "string"
+      && inner.error_code
+    ) return true;
+  }
+
+  const status = typeof record.status === "string" ? record.status : "";
+  if (PLUGIN_TOOL_FAILURE_STATUSES.has(status)) return true;
+  if (
+    !PLUGIN_TOOL_NON_FAILURE_STATUSES.has(status)
+    && typeof record.error_code === "string"
+    && record.error_code
+  ) return true;
+
+  return false;
+}
+
+/**
+ * Wrap a plugin-tool response body into a {@link ToolHandlerResult}, honoring
+ * nested failure statuses so the adapter reports `is_error: true`.
+ */
+function pluginToolResult(body: unknown): ToolHandlerResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(body) }],
+    is_error: isPluginToolEnvelopeFailure(body),
+  };
+}
 
 export interface ToolDefinition {
   name: string;
@@ -168,6 +261,7 @@ interface AgentRunContext {
   model: string;
   apiKey: string;
   baseUrl: string;
+  protocol?: string;
   workspace?: string;
   sessionId?: string;
   persistSession?: boolean;
@@ -176,6 +270,7 @@ interface AgentRunContext {
   abortSignal?: AbortSignal;
   reasoning_effort?: ManagerAgentReasoningEffort;
   service_tier?: string | null;
+  model_catalog_path?: string;
   /** Prompt without replayed chat history, used after resuming a persisted native thread. */
   resumedPrompt?: string;
 }
@@ -292,8 +387,15 @@ export function _setHostCodexAgentEventRunnerForTest(runner?: HostCodexAgentEven
   hostAgentEventRunnerOverride = runner;
 }
 
-export function _buildCodexAppServerArgsForTest(): string[] {
-  return ["app-server"];
+export function _buildCodexAppServerArgsForTest(context?: Pick<AgentRunContext, "provider" | "baseUrl" | "apiKey" | "protocol" | "model_catalog_path">): string[] {
+  return context?.protocol === CODEX_RESPONSES_PROTOCOL
+    ? codexResponsesAppServerArgs({
+        providerName: context.provider,
+        baseUrl: context.baseUrl,
+        apiKey: context.apiKey,
+        modelCatalogPath: context.model_catalog_path,
+      })
+    : ["app-server"];
 }
 
 export function buildCodexLiveAppServerArgs(): string[] {
@@ -375,6 +477,26 @@ const CLIENT_TITLE = "HomeRail Host Codex Manager Agent";
 const DEFAULT_CODEX_BIN = "codex";
 const RESPONSE_TIMEOUT_MS = 60_000;
 const NATIVE_THREAD_CONTRACT_VERSION = "developer-instructions-v1";
+const BUNDLED_CODEX_CATALOG_CACHE = new Map<string, string>();
+
+function writePrivateFileAtomically(filePath: string, content: string): void {
+  try {
+    if (fs.readFileSync(filePath, "utf8") === content) return;
+  } catch {
+    // Missing or stale files are replaced below.
+  }
+  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporaryPath, content, { encoding: "utf8", mode: 0o600 });
+  try {
+    fs.renameSync(temporaryPath, filePath);
+  } finally {
+    try {
+      fs.unlinkSync(temporaryPath);
+    } catch {
+      // renameSync already consumed the temporary file on success.
+    }
+  }
+}
 
 interface HostCodexNativeSession {
   threadId: string;
@@ -1299,25 +1421,26 @@ export function createManagerTools(
       },
     },
     {
-      name: "create_and_run",
-      description: "Create and immediately invoke a DAG run from a DB workflow_id or repo-local YAML path.",
-      input_schema: {
-        type: "object",
-        properties: {
-          yamlPath: { type: "string" },
-          workflow_id: { type: "string" },
-          workflowId: { type: "string" },
-          profile: { type: "string" },
-          prompt: { type: "string" },
-          runId: { type: "string" },
-        },
-        anyOf: [
-          { required: ["workflow_id"] },
-          { required: ["workflowId"] },
-          { required: ["yamlPath"] },
-        ],
-        additionalProperties: false,
+      ...managerAgentToolSpec("stage_run_input"),
+      async handler(args) {
+        const scopeId = typeof args.scope_id === "string" && args.scope_id.trim()
+          ? args.scope_id.trim()
+          : state.projectId ?? "manager-agent";
+        const body = await requestManager(state.restUrl, "/run-inputs", {
+          method: "POST",
+          body: JSON.stringify({
+            scope_id: scopeId,
+            name: args.name,
+            media_type: args.media_type,
+            content: args.content,
+          }),
+        });
+        state.objectiveToolCalls.push({ name: "stage_run_input", success: true });
+        return { content: [{ type: "text", text: short(body, 12000) }] };
       },
+    },
+    {
+      ...managerAgentToolSpec("create_and_run"),
       async handler(args) {
         try {
           const yamlPath = typeof args.yamlPath === "string" ? args.yamlPath.trim() : "";
@@ -1337,6 +1460,8 @@ export function createManagerTools(
               profile: typeof args.profile === "string" ? args.profile : undefined,
               prompt: typeof args.prompt === "string" ? args.prompt : undefined,
               runId: typeof args.runId === "string" ? args.runId : undefined,
+              input_scope: typeof args.input_scope === "string" ? args.input_scope : undefined,
+              input_artifacts: Array.isArray(args.input_artifacts) ? args.input_artifacts : undefined,
             }),
           }) as Record<string, unknown>;
           const data = body.data as Record<string, unknown> | undefined;
@@ -1373,6 +1498,8 @@ export function createManagerTools(
               profile: typeof args.profile === "string" ? args.profile : undefined,
               prompt: typeof args.prompt === "string" ? args.prompt : undefined,
               runId: typeof args.runId === "string" ? args.runId : undefined,
+              input_scope: typeof args.input_scope === "string" ? args.input_scope : undefined,
+              input_artifacts: Array.isArray(args.input_artifacts) ? args.input_artifacts : undefined,
             }),
           }) as Record<string, unknown>;
           const data = body.data as Record<string, unknown> | undefined;
@@ -1775,7 +1902,7 @@ export function createManagerTools(
         arguments: args,
       }),
     });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return pluginToolResult(result);
   };
   const generatedViewDescriptor = responseMode === "voice"
     ? pluginContext?.tools.find((tool) => tool.qualified_id === "com.homerail.core:upsert_generated_view")
@@ -1845,11 +1972,24 @@ export function createManagerTools(
         } catch {
           throw new Error("Generated view Tool returned an invalid result");
         }
-        state.objectiveToolCalls.push({ name: "skill_view_present", success: true });
-        return { content: [{
-          type: "text",
-          text: JSON.stringify(compactManagerAgentSkillViewPresentResult(resultBody, responseText)),
-        }] };
+        // Derive objective success from the plugin-tool result so a failed/
+        // denied/cancelled presentation (data.status failure surfaced as
+        // is_error by pluginToolResult) is not counted as a satisfied
+        // required tool call. Mirrors how the adapter and successfulToolCallNames
+        // classify results. See issue #168.
+        const presentIsError = result.is_error === true;
+        state.objectiveToolCalls.push({ name: "skill_view_present", success: !presentIsError });
+        // Propagate is_error onto the model-visible tool result too — otherwise a
+        // non-throwing failure envelope (data.status=failed) would still reach the
+        // model as success even though the objective is marked failed, recreating
+        // the #168 false-success on this path.
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(compactManagerAgentSkillViewPresentResult(resultBody, responseText)),
+          }],
+          is_error: presentIsError || undefined,
+        };
       },
     });
     tools.push({
@@ -2424,6 +2564,7 @@ async function* runHostCodexManagerAgentTurnEvents(
     model: config.model || "codex",
     apiKey: config.api_key || "",
     baseUrl: config.base_url || "",
+    protocol: config.protocol,
     workspace,
     sessionId: state.sessionId,
     persistSession: true,
@@ -2567,9 +2708,12 @@ class HostCodexAppServerAdapter {
       return;
     }
     try {
+      if (context.protocol === CODEX_RESPONSES_PROTOCOL) {
+        context.model_catalog_path = this.materializeProviderModelCatalog(context);
+      }
       this.process = spawn(codexCommandForSpawn(
         this.codexBin,
-      ), _buildCodexAppServerArgsForTest(), {
+      ), _buildCodexAppServerArgsForTest(context), {
         stdio: ["pipe", "pipe", "pipe"],
         env: this.buildEnv(context),
         cwd: context.workspace ?? process.cwd(),
@@ -2617,6 +2761,8 @@ class HostCodexAppServerAdapter {
         tool_count: tools.length,
         home: os.homedir(),
         service_tier: context.service_tier ?? null,
+        reasoning_effort: context.reasoning_effort ?? null,
+        provider_model_catalog: Boolean(context.model_catalog_path),
       });
       const initResult = await this.sendRequest("initialize", {
         clientInfo: {
@@ -2632,6 +2778,9 @@ class HostCodexAppServerAdapter {
       yield this.debugEvent("appserver_initialized", this.redactSecrets(initResult));
       const dynamicTools = this.buildDynamicToolSpecs(tools);
       const cwd = context.workspace ?? process.cwd();
+      const modelProvider = context.protocol === CODEX_RESPONSES_PROTOCOL
+        ? HOMERAIL_CODEX_MODEL_PROVIDER_ID
+        : context.provider;
       const skillRoots = Array.from(new Set((context.skillRoots ?? [])
         .map((root) => path.resolve(root))
         .filter((root) => {
@@ -2689,7 +2838,7 @@ class HostCodexAppServerAdapter {
             systemPrompt: context.systemPrompt,
             cwd,
             model: context.model,
-            provider: context.provider,
+            provider: modelProvider,
             serviceTier: context.service_tier,
             sandbox,
             reasoningEffort: context.reasoning_effort,
@@ -2707,7 +2856,7 @@ class HostCodexAppServerAdapter {
           systemPrompt: context.systemPrompt,
           cwd,
           model: context.model,
-          provider: context.provider,
+          provider: modelProvider,
           serviceTier: context.service_tier,
           sandbox,
           dynamicTools,
@@ -2809,9 +2958,51 @@ class HostCodexAppServerAdapter {
   private buildEnv(context: AgentRunContext): Record<string, string | undefined> {
     const env = managerAgentChildEnv();
     Object.assign(env, context.environmentVariables ?? {});
-    if (context.apiKey) env.OPENAI_API_KEY = context.apiKey;
-    if (context.baseUrl) env.OPENAI_BASE_URL = context.baseUrl;
+    if (context.protocol === CODEX_RESPONSES_PROTOCOL) {
+      Object.assign(env, codexResponsesProviderEnvironment({
+        providerName: context.provider,
+        baseUrl: context.baseUrl,
+        apiKey: context.apiKey,
+      }));
+      const isolatedHome = path.join(getHomerailHome(), "runtime", "codex-provider-home");
+      const codexHome = path.join(isolatedHome, ".codex");
+      fs.mkdirSync(codexHome, { recursive: true });
+      env.HOME = isolatedHome;
+      env.CODEX_HOME = codexHome;
+    }
     return codexCommandEnvironment(this.codexBin, env);
+  }
+
+  private materializeProviderModelCatalog(context: AgentRunContext): string | undefined {
+    if (!resolveCodexResponsesProviderProfile(context.provider)) return undefined;
+    let bundledCatalog = BUNDLED_CODEX_CATALOG_CACHE.get(this.codexBin);
+    if (!bundledCatalog) {
+      const result = runCodexCommandSync(this.codexBin, ["debug", "models", "--bundled"], {
+        timeoutMs: 15_000,
+        env: managerAgentChildEnv(),
+      });
+      if (result.status !== 0 || !result.stdout.trim()) {
+        throw new Error(`Unable to load bundled Codex model metadata: ${result.stderr.trim() || `exit ${result.status}`}`);
+      }
+      bundledCatalog = result.stdout;
+      BUNDLED_CODEX_CATALOG_CACHE.set(this.codexBin, bundledCatalog);
+    }
+    const catalog = buildCodexProviderModelCatalogFromBundled(
+      context.provider,
+      context.model,
+      bundledCatalog,
+    );
+    if (!catalog) return undefined;
+    const isolatedHome = path.join(getHomerailHome(), "runtime", "codex-provider-home");
+    const codexHome = path.join(isolatedHome, ".codex");
+    fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+    const digest = createHash("sha256")
+      .update(`${context.provider ?? "provider"}\0${context.model}`)
+      .digest("hex")
+      .slice(0, 16);
+    const catalogPath = path.join(codexHome, `models-${digest}.json`);
+    writePrivateFileAtomically(catalogPath, JSON.stringify(catalog));
+    return catalogPath;
   }
 
   private async sendRequest(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {

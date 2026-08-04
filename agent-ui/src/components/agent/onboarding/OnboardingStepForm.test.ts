@@ -820,6 +820,66 @@ describe('OnboardingStepForm local Manager Agent setup', () => {
     }))
   })
 
+  it('activates Codex and uses the Responses root when Responses is preferred', async () => {
+    vi.mocked(detectMainModelRuntime).mockResolvedValueOnce({
+      available: true,
+      preferred_harness: 'codex_appserver',
+      endpoints: {
+        anthropic: {
+          available: false,
+          url: 'http://127.0.0.1:8000/v1/messages',
+          status: 404,
+          error: 'HTTP 404'
+        },
+        openai: {
+          available: false,
+          url: 'http://127.0.0.1:8000/v1/chat/completions',
+          status: 404,
+          error: 'HTTP 404'
+        },
+        responses: {
+          available: true,
+          url: 'http://127.0.0.1:8000/v1/responses',
+          base_url: 'http://127.0.0.1:8000/v1',
+          status: 200
+        }
+      }
+    })
+    const responsesSetting = {
+      ...localMainSetting,
+      protocol: 'openai_compatible' as const,
+      chat_completions_base_url: undefined,
+      anthropic_base_url: undefined
+    }
+    apiMocks.createLLMSetting.mockResolvedValueOnce({ success: true, data: responsesSetting } as any)
+    const activateSetting = vi.fn(async () => undefined)
+    const root = await mountForm({
+      capability: 'supports_llm',
+      providers: [],
+      existingSettings: [],
+      activateSetting
+    })
+    await fillLocalMainModel(root)
+
+    root.querySelector<HTMLButtonElement>('.onboarding-step-form__submit')!.click()
+
+    await vi.waitFor(() => expect(activateSetting).toHaveBeenCalledWith(responsesSetting, 'codex_appserver'))
+    expect(apiMocks.createProvider).toHaveBeenCalledWith(expect.objectContaining({
+      base_url: 'http://127.0.0.1:8000/v1',
+      chat_completions_base_url: '',
+      responses_base_url: 'http://127.0.0.1:8000/v1',
+      anthropic_base_url: ''
+    }))
+    expect(apiMocks.createLLMSetting).toHaveBeenCalledWith(expect.objectContaining({
+      base_url: 'http://127.0.0.1:8000/v1',
+      responses_base_url: 'http://127.0.0.1:8000/v1'
+    }))
+    expect(toastMocks.showToast).toHaveBeenCalledWith(
+      '主模型检测通过，已使用 Codex (Responses API) 配置',
+      'success'
+    )
+  })
+
   it('does not persist or report success when neither endpoint can run the model', async () => {
     vi.mocked(detectMainModelRuntime).mockResolvedValueOnce({
       available: false,

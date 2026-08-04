@@ -533,12 +533,13 @@ describe("/api/manager/chat", () => {
     expect(fs.existsSync(workspace)).toBe(true);
   });
 
-  it("does not pass HomeRail LLM setting providers into host Codex app-server", async () => {
+  it("passes Responses-capable HomeRail settings into host Codex app-server", async () => {
     upsertProvider({
       id: "qwen36",
       name: "Qwen3.6 Local",
       default_model: "qwen3.6",
       base_url: "http://127.0.0.1:5000",
+      responses_base_url: "http://127.0.0.1:5000/v1",
       anthropic_base_url: "http://127.0.0.1:5000",
     });
     const setting = createSetting({
@@ -548,17 +549,23 @@ describe("/api/manager/chat", () => {
       api_key: "pk-test-manager-chat",
       protocol: "anthropic_compatible",
       base_url: "http://127.0.0.1:5000",
+      responses_base_url: "http://127.0.0.1:5000/v1",
       anthropic_base_url: "http://127.0.0.1:5000",
       is_active: true,
       is_default: true,
     });
-    expect(() => resolveManagerAgentConfig(
+    expect(resolveManagerAgentConfig(
       undefined,
       "qwen36",
       "qwen3.6",
       setting.id,
       "codex_appserver",
-    )).toThrow("Codex app-server cannot use a HomeRail LLM provider or setting");
+    )).toMatchObject({
+      provider_name: "qwen36",
+      model: "qwen3.6",
+      protocol: "responses_compatible",
+      agent_type: "codex_appserver",
+    });
 
     const port = await listen(server);
     const baseUrl = `http://127.0.0.1:${port}`;
@@ -573,9 +580,9 @@ describe("/api/manager/chat", () => {
     expect(saved.status).toBe(200);
     expect(body.data).toMatchObject({
       harness: "codex_appserver",
-      llm_setting_id: null,
-      provider_name: null,
-      model_name: "gpt-5.5",
+      llm_setting_id: setting.id,
+      provider_name: "qwen36",
+      model_name: "qwen3.6",
     });
   });
 

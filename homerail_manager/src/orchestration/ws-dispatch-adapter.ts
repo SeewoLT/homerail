@@ -52,6 +52,7 @@ import {
   summarizeDagWorkerSkillContextV1,
 } from "homerail-protocol";
 import WebSocket from "ws";
+import { dagWorkspaceInputProjections } from "../persistence/run-input-artifacts.js";
 
 const OFFLINE_RETRY_MIN_MS = 1_000;
 const OFFLINE_RETRY_MAX_MS = 30_000;
@@ -601,12 +602,14 @@ export class WsDispatchAdapter implements DAGDispatcher {
       `provisioned-${envelope.runId}-${envelope.nodeId}-${randomUUID()}`,
     );
     const agentBackend = normalizeAgentBackend(envelope.agentConfig.agent_type);
+    const workspaceInputs = dagWorkspaceInputProjections(envelope.runId);
     const provisionerOpts: ProvisionerOptions = {
       ...this.provisionerOpts,
       image: envelope.image ?? this.provisionerOpts?.image,
       workspace: this.provisionerOpts?.workspace ?? envelope.workspace,
       workspaceReadOnly: Array.isArray(envelope.workspaceAccess?.writable_paths) &&
         envelope.workspaceAccess.writable_paths.length === 0,
+      ...(workspaceInputs.length > 0 ? { workspaceInputs } : {}),
       env: {
         ...(this.provisionerOpts?.env ?? {}),
         ...(agentBackend ? { AGENT_BACKEND: agentBackend } : {}),

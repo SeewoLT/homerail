@@ -234,6 +234,7 @@ describe("Manager Agent harness contract", () => {
     const chatNames = managerAgentCommonToolCatalog("chat").map((tool) => tool.name);
     const voiceNames = managerAgentCommonToolCatalog("voice").map((tool) => tool.name);
     expect(chatNames).toContain("create_and_run");
+    expect(chatNames).toContain("stage_run_input");
     expect(chatNames).not.toContain("run_shell_command");
     expect(chatNames).toEqual(expect.arrayContaining([
       "list_skills",
@@ -308,6 +309,22 @@ describe("Manager Agent harness contract", () => {
           profile: { type: "string" },
           prompt: { type: "string" },
           runId: { type: "string" },
+          input_scope: { type: "string", minLength: 1, maxLength: 128 },
+          input_artifacts: {
+            type: "array",
+            minItems: 1,
+            maxItems: 16,
+            items: {
+              type: "object",
+              properties: {
+                artifact_id: { type: "string" },
+                logical_name: { type: "string" },
+                mount_path: { type: "string" },
+              },
+              required: ["artifact_id", "logical_name", "mount_path"],
+              additionalProperties: false,
+            },
+          },
         },
         anyOf: [
           { required: ["workflow_id"] },

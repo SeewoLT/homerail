@@ -1019,25 +1019,26 @@ export function createManagerTools(state: {
       },
     },
     {
-      name: "create_and_run",
-      description: "Create and immediately invoke a DAG run from a DB workflow_id or repo-local YAML path.",
-      input_schema: {
-        type: "object",
-        properties: {
-          yamlPath: { type: "string" },
-          workflow_id: { type: "string" },
-          workflowId: { type: "string" },
-          profile: { type: "string" },
-          prompt: { type: "string" },
-          runId: { type: "string" },
-        },
-        anyOf: [
-          { required: ["workflow_id"] },
-          { required: ["workflowId"] },
-          { required: ["yamlPath"] },
-        ],
-        additionalProperties: false,
+      ...managerAgentToolSpec("stage_run_input"),
+      async handler(args) {
+        const scopeId = typeof args.scope_id === "string" && args.scope_id.trim()
+          ? args.scope_id.trim()
+          : state.projectId ?? "manager-agent";
+        const body = await requestManager("/run-inputs", {
+          method: "POST",
+          body: JSON.stringify({
+            scope_id: scopeId,
+            name: args.name,
+            media_type: args.media_type,
+            content: args.content,
+          }),
+        });
+        state.objectiveToolCalls.push({ name: "stage_run_input", success: true });
+        return { content: [{ type: "text", text: short(body, 12000) }] };
       },
+    },
+    {
+      ...managerAgentToolSpec("create_and_run"),
       async handler(args) {
         try {
           const yamlPath = typeof args.yamlPath === "string" ? args.yamlPath.trim() : "";
@@ -1057,6 +1058,8 @@ export function createManagerTools(state: {
               profile: typeof args.profile === "string" ? args.profile : undefined,
               prompt: typeof args.prompt === "string" ? args.prompt : undefined,
               runId: typeof args.runId === "string" ? args.runId : undefined,
+              input_scope: typeof args.input_scope === "string" ? args.input_scope : undefined,
+              input_artifacts: Array.isArray(args.input_artifacts) ? args.input_artifacts : undefined,
             }),
           }) as Record<string, unknown>;
           const data = body.data as Record<string, unknown> | undefined;
@@ -1095,6 +1098,8 @@ export function createManagerTools(state: {
               profile: typeof args.profile === "string" ? args.profile : undefined,
               prompt: typeof args.prompt === "string" ? args.prompt : undefined,
               runId: typeof args.runId === "string" ? args.runId : undefined,
+              input_scope: typeof args.input_scope === "string" ? args.input_scope : undefined,
+              input_artifacts: Array.isArray(args.input_artifacts) ? args.input_artifacts : undefined,
             }),
           }) as Record<string, unknown>;
           const data = body.data as Record<string, unknown> | undefined;
