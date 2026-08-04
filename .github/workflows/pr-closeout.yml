@@ -34,7 +34,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GITHUB_TOKEN: ${{ github.token }}
-      HOMERAIL_PR_CLOSEOUT_ARTIFACT_DIR: ${{ runner.temp }}/homerail-pr-closeout-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Verify stable runner environment
         id: stable
@@ -52,8 +51,10 @@ jobs:
           test -f "$stable_release/assets/orchestrations/pr-closeout.yaml.template"
           test -f "$stable_release/homerail_cli/dist/cli.js"
           test -f "$stable_release/scripts/lib/stable-automation-runtime.sh"
-          mkdir -p "$HOMERAIL_PR_CLOSEOUT_ARTIFACT_DIR"
-          chmod 700 "$HOMERAIL_PR_CLOSEOUT_ARTIFACT_DIR"
+          artifact_dir="$RUNNER_TEMP/homerail-pr-closeout-${{ github.run_id }}-${{ github.run_attempt }}"
+          mkdir -p "$artifact_dir"
+          chmod 700 "$artifact_dir"
+          echo "HOMERAIL_PR_CLOSEOUT_ARTIFACT_DIR=$artifact_dir" >> "$GITHUB_ENV"
           echo "release=$stable_release" >> "$GITHUB_OUTPUT"
           echo "node=$node_bin" >> "$GITHUB_OUTPUT"
 

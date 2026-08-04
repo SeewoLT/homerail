@@ -31,6 +31,7 @@ test("stable runner uses the deployed release and never starts a transient Manag
 
 test("PR closeout reuses the stable release and keeps GitHub review evidence readable", () => {
   const workflow = fs.readFileSync(path.join(root, ".github/workflows/pr-closeout.yml"), "utf8");
+  const jobHeader = workflow.slice(workflow.indexOf("  closeout:"), workflow.indexOf("    steps:"));
 
   assert.match(workflow, /pull-requests: read/);
   assert.match(workflow, /runs-on: \[self-hosted, Linux, X64, homerail-pr-review\]/);
@@ -41,6 +42,9 @@ test("PR closeout reuses the stable release and keeps GitHub review evidence rea
   assert.match(workflow, /initialize_stable_automation_runtime/);
   assert.match(workflow, /stable_hr dag sync pr-closeout/);
   assert.match(workflow, /stable_hr "\$\{args\[@\]\}"/);
+  assert.match(workflow, /artifact_dir="\$RUNNER_TEMP\/homerail-pr-closeout-/);
+  assert.match(workflow, /HOMERAIL_PR_CLOSEOUT_ARTIFACT_DIR=\$artifact_dir.*\$GITHUB_ENV/);
+  assert.doesNotMatch(jobHeader, /\$\{\{ runner\.temp \}\}/);
   assert.doesNotMatch(workflow, /actions\/checkout|actions\/setup-node|npm (?:ci|run)|secrets\.HOMERAIL/);
 });
 
