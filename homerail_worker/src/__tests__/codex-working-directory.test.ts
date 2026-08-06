@@ -64,4 +64,22 @@ describe("Codex DAG working directory", () => {
       workspaceAccess: { writable_paths: ["output"] },
     })).toBe("workspace-write");
   });
+
+  it("honors explicit maximum Codex permissions only for a writable DAG workspace", () => {
+    expect(_resolveCodexSandboxModeForTest({
+      model: "deepseek-v4-flash",
+      apiKey: "test",
+      baseUrl: "https://api.deepseek.com",
+      codexSandbox: "danger-full-access",
+      workspaceAccess: { writable_paths: ["repo"], readonly_paths: ["input"] },
+    })).toBe("danger-full-access");
+
+    expect(() => _resolveCodexSandboxModeForTest({
+      model: "deepseek-v4-flash",
+      apiKey: "test",
+      baseUrl: "https://api.deepseek.com",
+      codexSandbox: "danger-full-access",
+      workspaceAccess: { writable_paths: [], readonly_paths: ["input"] },
+    })).toThrow("requires a writable DAG workspace");
+  });
 });

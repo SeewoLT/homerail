@@ -54,11 +54,27 @@ it does not vendor a stale copy of the native prompt. The metadata shape is
 anchored to DeepSeek's official
 [Codex setup catalog](https://cdn.deepseek.com/api-docs/codex-deepseek-setup.sh).
 
-Provider-backed credentials are supplied only through
-`HOMERAIL_CODEX_API_KEY`. The variable is excluded from Codex-spawned shell
-environments, is not written to configuration, and is not included in command
-arguments. Provider-backed Codex also disables ambient apps, plugins, remote
-plugin sharing, Skill search/install, and native multi-agent features.
+The real provider credential remains in the Worker. For each provider-backed
+dispatch the Worker starts a loopback-only relay restricted to `POST` on that
+provider's `/responses` path, then gives Codex a random dispatch-scoped relay
+key and relay URL through `HOMERAIL_CODEX_API_KEY`. The relay replaces that
+authorization value with the real provider credential while streaming the
+request and response. It closes with the adapter, so reading a Codex parent
+process's environment cannot reveal a reusable external credential.
+
+The scoped variable is excluded from Codex-spawned shell environments, is not
+written to configuration, and is not included in command arguments. As defense
+in depth, the production Worker image preloads
+`homerail-codex-secret-guard.so` into the Worker and dynamically linked Codex
+launcher processes. Its constructor marks those processes non-dumpable after
+`exec` (ordinary `exec` resets this Linux flag), protecting the Worker's relay
+closure as well as launcher environments. Linux provider dispatch fails closed
+when the configured guard is absent. Because the dynamic loader does not report
+an ignored preload for a static or secure-exec launcher, the relay credential
+boundary remains the primary control when guard loading cannot be observed.
+Provider-backed Codex
+also disables ambient apps, plugins, remote plugin sharing, Skill search/install,
+and native multi-agent features.
 
 Direct, secret-safe probes returned HTTP 200 for all four reasoning efforts.
 DeepSeek Responses is stateless and does not support OpenAI conversation/store
@@ -127,6 +143,7 @@ as an execution limiter.
 | Live mid-turn steering | yes | partial | no |
 | Live Voice | n/a | subscription Codex only | n/a |
 | Exact Claude-style built-in tool allowlist | yes | no | no; asserted DAG allowlists fail closed |
+| Explicit backend-native coding surface | n/a | implicit | yes; `backend_native` + required workspace policy |
 | Workspace read-only mode | hooks plus SDK permissions | Codex sandbox | HomeRail outer policy + Codex `read-only` |
 | Per-root mixed read/write policy | yes | configurable Codex sandbox | audit-only; not yet mapped into Codex roots |
 | Token usage and backend-native raw trace | yes | partial | no |
@@ -143,7 +160,9 @@ that is enforceable.
    disables every project Skill outside the pinned DAG projection.
 2. Map HomeRail's per-root mixed workspace policy and, where a workflow asserts
    a Claude-style built-in tool allowlist, an equivalent enforceable Codex
-   permission policy. Keep fail-closed behavior until then.
+   permission policy. Exact allowlists remain fail-closed; workflows that need
+   the complete Codex coding surface must opt in explicitly with
+   `builtin_tool_policy: backend_native` and a declared workspace policy.
 3. Add DAG native thread resume, turn-controller steering, cumulative usage,
    and raw app-server trace capture.
 4. Distinguish subscription Codex and provider-backed Codex more explicitly in

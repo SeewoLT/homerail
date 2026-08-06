@@ -10,14 +10,19 @@ import {
   DEFAULT_MANAGER_AGENT_RUNTIME_AGENT_TYPE,
   normalizeManagerAgentRuntimeAgentType,
   validateDagActorSurfaceMediaV1,
+  classifyReviewFailure,
+  sanitizeAttemptDiagnostic,
   type DagActorCheckpointV1,
   type DagAdvisorConfig,
   type DagCredentialBrokerCallRequest,
   type DagCredentialBrokerCallResult,
   type DagCredentialProjection,
   type DagNodeConfig,
+  type DagWorkspaceAccess,
   type DagWorkerSkillContextSummaryV1,
   type DagWorkerSkillVisualDataContractV1,
+  type AttemptDiagnosticV1,
+  type ReviewFailureCategory,
 } from "homerail-protocol";
 import { createAgentClient } from "./agent/factory.js";
 import type {
@@ -38,6 +43,7 @@ import {
 import { appendTranscriptEntry, redactAgentContext, saveSession } from "./session/session-store.js";
 import { redactTelemetry } from "./telemetry-redaction.js";
 import { snapshotWorkspace, verifyWorkspacePolicy, type WorkspaceSnapshot } from "./workspace-policy.js";
+import { materializeTrustedWorkspaceDependencies } from "./workspace-dependencies.js";
 import { completedActivityPayloadForHandoff, createDagActivityEmitter } from "./dag-activity.js";
 import {
   REPORT_SURFACE_STATE_PROMPT,
@@ -132,11 +138,31 @@ function assertAgentRuntimeProtocol(agentBackend: string | undefined, protocol: 
   }
 }
 
-function assertBuiltinToolPolicySupported(agentBackend: string | undefined, allowedTools: unknown): void {
-  if (allowedTools === undefined) return;
+function assertBuiltinToolPolicySupported(
+  agentBackend: string | undefined,
+  allowedTools: unknown,
+  builtinToolPolicy: unknown,
+  workspaceAccess: unknown,
+): void {
   const backend = normalizeManagerAgentRuntimeAgentType(
     agentBackend ?? process.env.AGENT_BACKEND ?? "claude-sdk",
   );
+  if (builtinToolPolicy !== undefined) {
+    if (builtinToolPolicy !== "backend_native") {
+      throw new Error(`unsupported builtin_tool_policy '${String(builtinToolPolicy)}'`);
+    }
+    if (allowedTools !== undefined) {
+      throw new Error("builtin_tool_policy is mutually exclusive with allowed_builtin_tools");
+    }
+    if (backend !== "codex_appserver") {
+      throw new Error(`builtin_tool_policy 'backend_native' is not supported by agent backend '${backend ?? "unknown"}'`);
+    }
+    if (!workspaceAccess || typeof workspaceAccess !== "object" || Array.isArray(workspaceAccess)) {
+      throw new Error("builtin_tool_policy 'backend_native' requires workspace_access");
+    }
+    return;
+  }
+  if (allowedTools === undefined) return;
   if (backend === "claude-sdk" || backend === "deterministic") return;
   throw new Error(
     `allowed_builtin_tools is not enforced by agent backend '${backend ?? "unknown"}'`,
@@ -279,6 +305,17 @@ export async function runPrompt(
   const dagState = createDagToolsState(job.dagConfig, job.runId, wsSend);
   const workspace = process.env.WORKSPACE ?? process.cwd();
   const correctionOnly = /(?:^|\n)## input:correction(?:\r?\n|$)/.test(job.task);
+  const correctionRepairsWorkspaceEvidence = correctionOnly
+    && job.task.includes("DAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT");
+  const workspacePolicy: DagWorkspaceAccess | undefined = correctionRepairsWorkspaceEvidence
+    && dagState.workspaceAccess
+    ? {
+        ...dagState.workspaceAccess,
+        writable_paths: dagState.workspaceAccess.writable_paths.map((root) => (
+          root === "." ? ".homerail" : `${root.replace(/\/$/, "")}/.homerail`
+        )),
+      }
+    : dagState.workspaceAccess;
   const activityEmitter = createDagActivityEmitter(job.dagConfig, job.runId, (activity) => {
     sendStream({ event: "dag_activity", activity });
   });
@@ -330,9 +367,11 @@ export async function runPrompt(
         "DAG CONTRACT CORRECTION MODE.",
         "The previous turn did not produce a contract-valid handoff.",
         `The active DAG run_id is ${job.runId}. Copy it exactly when the output contract requires it.`,
-        correctionAllowsBrokerVerification
-          ? "Your only permitted actions are declared credential broker verification calls followed by exactly one handoff tool call."
-          : "Your only permitted action is one call to the handoff tool.",
+        correctionRepairsWorkspaceEvidence
+          ? "You may inspect and rewrite only the declared .homerail workspace evidence JSON, compute its SHA-256, reuse durable broker receipts, and then call handoff exactly once. Do not modify source files, rerun tests, or repeat external side effects."
+          : correctionAllowsBrokerVerification
+            ? "Your only permitted actions are declared credential broker verification calls followed by exactly one handoff tool call."
+            : "Your only permitted action is one call to the handoff tool.",
         "Do not emit prose or tool-like markup. Do not call, describe, or simulate any non-permitted tool.",
         "Use the correction message and original inputs to preserve completed work and satisfy the exact output schema.",
         "The original node instructions follow only for output schema and evidence context:",
@@ -438,6 +477,8 @@ export async function runPrompt(
   const usageExecutionId = randomUUID();
   let nodeDurationMs: number | undefined;
   let nodeNumTurns: number | undefined;
+  let nodeFinishReason: string | null = null;
+  let nodeOutputTokenLimit: number | null = null;
   let lastUsageEmission: string | undefined;
   let workspaceBefore: WorkspaceSnapshot | undefined;
   let terminalActivityEmitted = false;
@@ -446,6 +487,21 @@ export async function runPrompt(
     reason: "agent turn ended without a successful DAG handoff",
   };
   const toolNamesById = new Map<string, string>();
+  let lastReasoningActivityAt = 0;
+
+  function buildAttemptDiagnostics(
+    failureCategory: ReviewFailureCategory,
+  ): AttemptDiagnosticV1 | undefined {
+    return sanitizeAttemptDiagnostic({
+      schema: "attempt-diagnostic-v1",
+      finish_reason: nodeFinishReason,
+      output_tokens: nodeUsage.output_tokens,
+      output_token_limit: nodeOutputTokenLimit,
+      tool_argument_parse_state: dagState.toolArgumentParseState,
+      contract_stage: dagState.contractStage,
+      failure_category: failureCategory,
+    }) ?? undefined;
+  }
 
   activityEmitter.emit("started", {
     session_id: job.dagConfig.session_id ?? job.runId,
@@ -453,20 +509,51 @@ export async function runPrompt(
   });
 
   try {
-    if (dagState.workspaceAccess) {
-      workspaceBefore = snapshotWorkspace(workspace, dagState.workspaceAccess);
+    if (workspacePolicy) {
+      workspaceBefore = snapshotWorkspace(workspace, workspacePolicy);
       sendStream({
         event: "workspace_policy_snapshot",
         before_file_count: Object.keys(workspaceBefore.files).length,
-        readonly_paths: dagState.workspaceAccess.readonly_paths ?? [],
-        writable_paths: dagState.workspaceAccess.writable_paths,
+        readonly_paths: workspacePolicy.readonly_paths ?? [],
+        writable_paths: workspacePolicy.writable_paths,
       });
     }
     assertAgentRuntimeProtocol(agentBackend, job.llmProtocol);
-    assertBuiltinToolPolicySupported(agentBackend, job.dagConfig.allowed_builtin_tools);
+    assertBuiltinToolPolicySupported(
+      agentBackend,
+      job.dagConfig.allowed_builtin_tools,
+      job.dagConfig.builtin_tool_policy,
+      job.dagConfig.workspace_access,
+    );
+    const dependencyProjection = effectiveAgentBackend === "codex_appserver" && !correctionOnly
+      ? materializeTrustedWorkspaceDependencies(workspace, dagState.workspaceAccess)
+      : { projected: [], already_present: [], skipped: [] };
+    const readyDependencyPackages = [
+      ...dependencyProjection.projected,
+      ...dependencyProjection.already_present,
+    ];
+    if (readyDependencyPackages.length > 0 || dependencyProjection.skipped.length > 0) {
+      sendStream({
+        event: "workspace_dependency_projection",
+        projected: dependencyProjection.projected,
+        already_present: dependencyProjection.already_present,
+        skipped: dependencyProjection.skipped,
+      });
+    }
+    const dependencyPrompt = readyDependencyPackages.length > 0 || dependencyProjection.skipped.length > 0
+      ? [
+          readyDependencyPackages.length > 0
+            ? `Trusted lockfile-matched node_modules are already projected for: ${readyDependencyPackages.join(", ")}. Run repository build, typecheck, and test commands directly. Do not run npm install or npm ci unless you intentionally changed package.json or package-lock.json.`
+            : "No trusted node_modules projection is available for this worktree.",
+          dependencyProjection.skipped.length > 0
+            ? `No dependency projection was made for: ${dependencyProjection.skipped.map((entry) => `${entry.package} (${entry.reason})`).join(", ")}.`
+            : "",
+        ].filter(Boolean).join(" ")
+      : undefined;
+    const projectedSystemPrompt = [effectiveSystemPrompt, dependencyPrompt].filter(Boolean).join("\n\n") || undefined;
     const agent = createAgentClient(agentBackend);
     const context: AgentRunContext = {
-      systemPrompt: effectiveSystemPrompt,
+      systemPrompt: projectedSystemPrompt,
       systemPromptMode: correctionOnly ? "replace" : "append",
       provider: job.llmProvider,
       protocol: job.llmProtocol,
@@ -474,13 +561,14 @@ export async function runPrompt(
       apiKey: job.llmApiKey ?? process.env.LLM_API_KEY ?? "",
       baseUrl: resolveAgentBaseUrl(job, agentBackend),
       reasoningEffort: job.dagConfig.reasoning_effort,
+      codexSandbox: job.dagConfig.codex_sandbox,
       serviceTier: job.dagConfig.service_tier,
       anthropicAuthMode: job.llmAnthropicAuthMode,
       workspace,
       sessionId: job.dagConfig.session_id ?? job.runId,
       abortSignal: deps.abortSignal,
       turnController: deps.turnController,
-      handoffOnly: correctionOnly,
+      handoffOnly: correctionOnly && !correctionRepairsWorkspaceEvidence,
       allowedBuiltinTools: job.dagConfig.allowed_builtin_tools,
       maxBuiltinToolCalls: job.dagConfig.max_builtin_tool_calls,
       workspaceAccess: job.dagConfig.workspace_access,
@@ -509,6 +597,17 @@ export async function runPrompt(
           audit?.transcript.write({ event: "text", text: redactForTurn(event.text) });
           appendSessionTranscript("text", redactForTurn(event.text));
           break;
+        case "thinking": {
+          // Thinking content is deliberately neither streamed nor persisted.
+          // A generic, throttled activity renews the actor lease while models
+          // such as DeepSeek V4 Flash spend a long time reasoning.
+          const now = Date.now();
+          if (now - lastReasoningActivityAt >= 30_000) {
+            activityEmitter.emit("progress", { message: "model reasoning" });
+            lastReasoningActivityAt = now;
+          }
+          break;
+        }
         case "debug": {
           const debugMessage = String(redactForTurn(event.message));
           const debugData = redactForTurn(event.data ?? {}) as Record<string, unknown>;
@@ -612,12 +711,20 @@ export async function runPrompt(
           // we replace rather than accumulate. Other adapters that emit a
           // single final aggregate behave the same way.
           Object.assign(nodeUsage, event.usage);
+          if (event.finish_reason !== undefined) nodeFinishReason = event.finish_reason ?? null;
+          if (event.output_token_limit !== undefined) {
+            nodeOutputTokenLimit = event.output_token_limit ?? null;
+          }
           emitUsage();
           break;
         case "done":
           if (event.usage) Object.assign(nodeUsage, event.usage);
           if (event.duration_ms !== undefined) nodeDurationMs = event.duration_ms;
           if (event.num_turns !== undefined) nodeNumTurns = event.num_turns;
+          if (event.finish_reason !== undefined) nodeFinishReason = event.finish_reason ?? null;
+          if (event.output_token_limit !== undefined) {
+            nodeOutputTokenLimit = event.output_token_limit ?? null;
+          }
           break;
       }
 
@@ -636,9 +743,9 @@ export async function runPrompt(
       sendNodeError(errorMessage ?? "agent ended without DAG handoff");
     } else {
       let workspaceValid = true;
-      if (dagState.workspaceAccess && workspaceBefore) {
-        const workspaceAfter = snapshotWorkspace(workspace, dagState.workspaceAccess);
-        const policyResult = verifyWorkspacePolicy(workspaceBefore, workspaceAfter, dagState.workspaceAccess);
+      if (workspacePolicy && workspaceBefore) {
+        const workspaceAfter = snapshotWorkspace(workspace, workspacePolicy);
+        const policyResult = verifyWorkspacePolicy(workspaceBefore, workspaceAfter, workspacePolicy);
         sendStream({ event: "workspace_policy_verified", ...policyResult });
         workspaceValid = policyResult.valid;
         if (!workspaceValid) {
@@ -654,6 +761,7 @@ export async function runPrompt(
       }
       if (workspaceValid && dagState.handoffData) {
         const handoff = dagState.handoffData as Record<string, unknown>;
+        const attemptDiagnostics = buildAttemptDiagnostics("accepted");
         activityEmitter.emit("completed", completedActivityPayloadForHandoff(handoff));
         terminalActivityEmitted = true;
         // This is the authoritative runtime payload, not telemetry. The
@@ -661,7 +769,10 @@ export async function runPrompt(
         sendTerminalMessage(JSON.stringify({
           type: "response",
           session_id: dagState.sessionId,
-          data: dagState.handoffData,
+          data: {
+            ...handoff,
+            ...(attemptDiagnostics ? { attempt_diagnostics: attemptDiagnostics } : {}),
+          },
         }));
         promptResult = { status: "completed" };
       }
@@ -728,6 +839,7 @@ export async function runPrompt(
       nodeId: job.dagConfig.node_id,
       message: redactedMessage,
       session_id: job.dagConfig.session_id ?? job.runId,
+      attempt_diagnostics: buildAttemptDiagnostics(classifyReviewFailure(redactedMessage)),
       ...(job.dagConfig.round_id !== undefined ? { round_id: job.dagConfig.round_id } : {}),
       ...(job.dagConfig.actor_id !== undefined ? { actor_id: job.dagConfig.actor_id } : {}),
       ...(job.dagConfig.generation !== undefined ? { generation: job.dagConfig.generation } : {}),
@@ -758,6 +870,8 @@ export async function runPrompt(
       usage,
       duration_ms: nodeDurationMs,
       num_turns: nodeNumTurns,
+      finish_reason: nodeFinishReason,
+      output_token_limit: nodeOutputTokenLimit,
     });
     if (signature === lastUsageEmission) return;
     lastUsageEmission = signature;
@@ -767,6 +881,8 @@ export async function runPrompt(
       usage,
       duration_ms: nodeDurationMs,
       num_turns: nodeNumTurns,
+      finish_reason: nodeFinishReason,
+      output_token_limit: nodeOutputTokenLimit,
     });
     audit?.transcript.write({
       event: "usage",

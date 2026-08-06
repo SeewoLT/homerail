@@ -3,7 +3,7 @@ import { AGENT_BUILTIN_TOOL_NAMES, DAG_AGENT_TOOL_NAMES } from "homerail-protoco
 
 export const WORKFLOW_API_VERSION = "homerail.ai/v1" as const;
 export const WORKFLOW_KIND = "Workflow" as const;
-export const WORKFLOW_COMPILER_VERSION = "5" as const;
+export const WORKFLOW_COMPILER_VERSION = "6" as const;
 
 const IDENTIFIER_PATTERN = "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$";
 const PORT_REFERENCE_PATTERN = "^(?:\\$run\\.input|[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*)$";
@@ -99,12 +99,72 @@ const BrokerActionRequirement = Type.Object({
     }),
     equals: JsonValue,
   }, { additionalProperties: false })),
+  result_binding: Type.Optional(Type.Object({
+    result_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+    content_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+  }, { additionalProperties: false })),
+  result_digest_binding: Type.Optional(Type.Object({
+    result_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+    content_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+  }, { additionalProperties: false })),
+}, { additionalProperties: false });
+
+const WorkspaceFileRequirement = Type.Object({
+  path_field: Type.String({
+    minLength: 1,
+    maxLength: 256,
+    pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+  }),
+  sha256_field: Type.String({
+    minLength: 1,
+    maxLength: 256,
+    pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+  }),
+  contract: ContractIdentifier,
+  max_bytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_048_576 })),
+  bindings: Type.Optional(Type.Array(Type.Object({
+    file_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+    content_field: Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z_][A-Za-z0-9_-]*)*$",
+    }),
+  }, { additionalProperties: false }), {
+    minItems: 1,
+    maxItems: 16,
+    uniqueItems: true,
+  })),
 }, { additionalProperties: false });
 
 const OutputPort = Type.Object({
   contract: Type.Optional(ContractIdentifier),
   description: Type.Optional(ShortText),
   required_broker_actions: Type.Optional(Type.Array(BrokerActionRequirement, {
+    minItems: 1,
+    maxItems: 8,
+    uniqueItems: true,
+  })),
+  required_workspace_files: Type.Optional(Type.Array(WorkspaceFileRequirement, {
     minItems: 1,
     maxItems: 8,
     uniqueItems: true,
@@ -141,6 +201,7 @@ const WorkspaceAccess = Type.Object({
     uniqueItems: true,
     maxItems: 128,
   })),
+  git_metadata_read_only: Type.Optional(Type.Boolean()),
   max_snapshot_files: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })),
 }, { additionalProperties: false });
 
@@ -185,6 +246,9 @@ const CredentialBinding = Type.Object({
 const AgentRuntimeFields = {
   advisors: Type.Optional(Type.Array(AdvisorBinding, { uniqueItems: true, maxItems: 16 })),
   workspace_access: Type.Optional(WorkspaceAccess),
+  builtin_tool_policy: Type.Optional(Type.Literal("backend_native", {
+    description: "Explicitly use the selected harness's native shell/file surface. Mutually exclusive with allowed_builtin_tools.",
+  })),
   allowed_builtin_tools: Type.Optional(Type.Array(AgentBuiltinToolName, {
     uniqueItems: true,
     maxItems: AGENT_BUILTIN_TOOL_NAMES.length,
@@ -194,6 +258,13 @@ const AgentRuntimeFields = {
     minimum: 1,
     maximum: 100_000,
     description: "Per-node hard budget for backend-provided tools. HomeRail DAG tools remain available for final handoff.",
+  })),
+  codex_sandbox: Type.Optional(Type.Union([
+    Type.Literal("read-only"),
+    Type.Literal("workspace-write"),
+    Type.Literal("danger-full-access"),
+  ], {
+    description: "Codex command sandbox. danger-full-access remains inside the disposable Worker container.",
   })),
   allowed_dag_tools: Type.Optional(Type.Array(DagAgentToolName, {
     uniqueItems: true,
@@ -247,6 +318,35 @@ const CommandNode = Type.Object({
     capture_limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000 })),
     parse_stdout: Type.Optional(Type.Union([Type.Literal("text"), Type.Literal("json"), Type.Literal("number")])),
     result_payload: Type.Optional(Type.Union([Type.Literal("envelope"), Type.Literal("value")])),
+  }, { additionalProperties: false }),
+}, { additionalProperties: false });
+
+const BrokerNode = Type.Object({
+  kind: Type.Literal("broker"),
+  ...NodeBase,
+  config: Type.Object({
+    input: Type.Optional(Identifier),
+    input_field: Type.Optional(Type.String({
+      minLength: 1,
+      maxLength: 256,
+      description: "Selected-input field or $ for its root.",
+    })),
+    input_map: Type.Optional(Type.Record(
+      Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z_][A-Za-z0-9_-]*$" }),
+      Type.String({ minLength: 1, maxLength: 256 }),
+      { minProperties: 1, maxProperties: 64 },
+    )),
+    static_input: Type.Optional(Type.Record(
+      Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z_][A-Za-z0-9_-]*$" }),
+      JsonValue,
+      { maxProperties: 64 },
+    )),
+    credential_ref: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
+    purpose: Type.String({ minLength: 1, maxLength: 256 }),
+    broker: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
+    action: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
+    result_port: Identifier,
+    error_port: Identifier,
   }, { additionalProperties: false }),
 }, { additionalProperties: false });
 
@@ -317,12 +417,26 @@ const FanoutNode = Type.Object({
       commit_field: Identifier,
       workspace_field: Identifier,
       require_clean: Type.Optional(Type.Boolean()),
+      commit_mode: Type.Optional(Type.Union([
+        Type.Literal("worker"),
+        Type.Literal("manager"),
+      ])),
     }, { additionalProperties: false })),
     max_items: Type.Integer({ minimum: 1, maximum: 256 }),
     max_parallelism: Type.Integer({ minimum: 1, maximum: 256 }),
     completion: Type.Union([Type.Literal("all"), Type.Literal("any"), Type.Literal("n_of_m")]),
     threshold: Type.Optional(Type.Integer({ minimum: 1, maximum: 256 })),
     result_contract: Type.Optional(ContractIdentifier),
+    result_required_broker_actions: Type.Optional(Type.Array(BrokerActionRequirement, {
+      minItems: 1,
+      maxItems: 8,
+      uniqueItems: true,
+    })),
+    result_required_workspace_files: Type.Optional(Type.Array(WorkspaceFileRequirement, {
+      minItems: 1,
+      maxItems: 8,
+      uniqueItems: true,
+    })),
     success_field: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
     success_values: Type.Optional(Type.Array(JsonValue, { minItems: 1, maxItems: 128 })),
     result_port: Identifier,
@@ -405,6 +519,7 @@ const WhileNode = Type.Object({
       Type.Literal("falsy"),
     ]),
     value: Type.Optional(JsonValue),
+    unwrap_single_join_value: Type.Optional(Type.Boolean()),
     continue_port: Identifier,
     done_port: Identifier,
     exhausted_port: Type.Optional(Identifier),
@@ -431,6 +546,7 @@ const TerminalNode = Type.Object({
 const WorkflowNode = Type.Union([
   AgentNode,
   CommandNode,
+  BrokerNode,
   ApprovalNode,
   StateNode,
   FanoutNode,
@@ -528,6 +644,16 @@ export const WorkflowSpecV1Schema = Type.Object({
     workspace: Type.Optional(Type.Object({
       mode: Type.Union([Type.Literal("isolated"), Type.Literal("shared")]),
     }, { additionalProperties: false })),
+    capabilities: Type.Optional(Type.Array(
+      Type.Union([
+        Type.Literal("runtime_evidence"),
+      ]),
+      {
+        uniqueItems: true,
+        maxItems: 16,
+        description: "Explicit WorkflowSpec capabilities. runtime_evidence gates Manager-owned bounded reviewer evidence persistence and injection; unrelated workflows must not declare or use it.",
+      },
+    )),
     contracts: Type.Optional(Type.Record(ContractIdentifier, ContractSchema, { maxProperties: 128 })),
     artifacts: Type.Optional(Type.Array(WorkflowArtifact, { maxItems: 128 })),
     triggers: Type.Optional(Type.Record(Identifier, Type.Union([

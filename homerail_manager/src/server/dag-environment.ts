@@ -28,6 +28,25 @@ const SOURCE_INPUTS = [
   "homerail_protocol/package-lock.json",
   "homerail_protocol/tsconfig.json",
   "homerail_protocol/src",
+  "homerail_plugin_sdk/package.json",
+  "homerail_plugin_sdk/package-lock.json",
+  "homerail_manager/package.json",
+  "homerail_manager/package-lock.json",
+  "homerail_node/package.json",
+  "homerail_node/package-lock.json",
+  "homerail_cli/package.json",
+  "homerail_cli/package-lock.json",
+  "agent-ui/package.json",
+  "agent-ui/package-lock.json",
+] as const;
+const DEPENDENCY_METADATA_PACKAGES = [
+  "homerail_worker",
+  "homerail_protocol",
+  "homerail_plugin_sdk",
+  "homerail_manager",
+  "homerail_node",
+  "homerail_cli",
+  "agent-ui",
 ] as const;
 const MAX_BUILD_LOG_LINES = 240;
 const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
@@ -232,10 +251,10 @@ function stableJson(value: unknown): string {
 
 function fingerprintContent(relativePath: string, content: Buffer): Buffer | string {
   const normalizedPath = relativePath.split(path.sep).join("/");
-  const isPackageJson = normalizedPath === "homerail_worker/package.json"
-    || normalizedPath === "homerail_protocol/package.json";
-  const isPackageLock = normalizedPath === "homerail_worker/package-lock.json"
-    || normalizedPath === "homerail_protocol/package-lock.json";
+  const isPackageJson = DEPENDENCY_METADATA_PACKAGES
+    .some((packageName) => normalizedPath === `${packageName}/package.json`);
+  const isPackageLock = DEPENDENCY_METADATA_PACKAGES
+    .some((packageName) => normalizedPath === `${packageName}/package-lock.json`);
   if (!isPackageJson && !isPackageLock) return content;
 
   try {
@@ -243,7 +262,7 @@ function fingerprintContent(relativePath: string, content: Buffer): Buffer | str
     delete parsed.version;
     if (isPackageLock && typeof parsed.packages === "object" && parsed.packages !== null) {
       const packages = parsed.packages as Record<string, unknown>;
-      for (const workspacePath of ["", "../homerail_protocol"]) {
+      for (const workspacePath of ["", "../homerail_protocol", "../homerail_plugin_sdk"]) {
         const metadata = packages[workspacePath];
         if (typeof metadata === "object" && metadata !== null) {
           delete (metadata as Record<string, unknown>).version;

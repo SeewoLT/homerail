@@ -91,6 +91,19 @@ describe("custom LLM providers", () => {
     });
   });
 
+  it("catalogs the released Qwen3.8-Max Token Plan model instead of its preview", () => {
+    const aliyun = listProviders().find((provider) => provider.id === "aliyun");
+    const tokenPlan = aliyun?.endpoints?.find((endpoint) => endpoint.id === "aliyun_dashscope_cn_token_plan");
+    const models = tokenPlan?.models.map((model) => model.id);
+
+    expect(tokenPlan).toMatchObject({
+      responses_base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      anthropic_base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+    });
+    expect(models).toContain("qwen3.8-max");
+    expect(models).not.toContain("qwen3.8-max-preview");
+  });
+
   it("catalogs only DeepSeek V4 Flash as a Responses-capable Codex runtime", async () => {
     const deepseek = listProviders().find((provider) => provider.id === "deepseek");
     expect(deepseek).toMatchObject({
@@ -1085,7 +1098,7 @@ describe("custom LLM providers", () => {
     const setting = createSetting({
       provider_id: "aliyun",
       endpoint_id: "aliyun_dashscope_cn_token_plan",
-      model_name: "qwen3.8-max-preview",
+      model_name: "qwen3.8-max",
       api_key: "sk-sp-code-authoritative",
       is_active: true,
       is_default: true,
@@ -1125,7 +1138,7 @@ describe("custom LLM providers", () => {
       protocol: "openai_compatible",
       auth_type: "bearer",
       supports_llm: true,
-      supports_image_input: true,
+      supports_image_input: false,
     });
   });
 
@@ -1258,7 +1271,7 @@ describe("custom LLM providers", () => {
     expect(() => createSetting({
       provider_id: "aliyun",
       endpoint_id: "aliyun_retired_plan",
-      model_name: "qwen3.8-max-preview",
+      model_name: "qwen3.8-max",
       api_key: "sk-sp-invalid-endpoint",
     })).toThrow("unknown or retired");
   });
@@ -1267,7 +1280,7 @@ describe("custom LLM providers", () => {
     const setting = createSetting({
       provider_id: "aliyun",
       endpoint_id: "aliyun_dashscope_cn_token_plan",
-      model_name: "qwen3.8-max-preview",
+      model_name: "qwen3.8-max",
       api_key: "sk-sp-legacy-token-plan",
       is_active: true,
       is_default: true,
@@ -1330,7 +1343,7 @@ describe("custom LLM providers", () => {
     const setting = createSetting({
       provider_id: "aliyun",
       endpoint_id: "aliyun_dashscope_cn_token_plan",
-      model_name: "qwen3.8-max-preview",
+      model_name: "qwen3.8-max",
       api_key: "legacy-token-plan-key-without-prefix",
       is_active: true,
     });
@@ -1366,7 +1379,7 @@ describe("custom LLM providers", () => {
         stored_endpoint_id: "aliyun_retired_token_plan",
       },
     });
-    expect(findActiveSetting("aliyun", "qwen3.8-max-preview")).toBeUndefined();
+    expect(findActiveSetting("aliyun", "qwen3.8-max")).toBeUndefined();
 
     const port = await listen(server);
     const response = await fetch(`http://127.0.0.1:${port}/api/llm-settings/${setting.id}`);

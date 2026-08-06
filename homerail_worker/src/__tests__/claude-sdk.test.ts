@@ -196,7 +196,52 @@ describe("ClaudeSdkAdapter", () => {
       },
       duration_ms: undefined,
       num_turns: undefined,
+      finish_reason: "end_turn",
+      output_token_limit: null,
     });
+  });
+
+  it("propagates provider finish reason and output token limit when available", async () => {
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () =>
+      makeFakeSdk([
+        {
+          type: "assistant",
+          message: {
+            content: [{ type: "tool_use", id: "call-1", name: "handoff", input: { port: "voted" } }],
+            stop_reason: "max_tokens",
+          },
+        },
+        {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          message: {
+            stop_reason: "max_tokens",
+            usage: { output_tokens: 512, output_token_limit: 2048 },
+          },
+        },
+      ]),
+    );
+
+    const { ClaudeSdkAdapter } = await import("../agent/claude-sdk.js");
+    const adapter = new ClaudeSdkAdapter();
+    const events: AgentEvent[] = [];
+    for await (const event of adapter.run("test", [], ctx)) events.push(event);
+
+    expect(events.at(-1)).toMatchObject({
+      type: "done",
+      finish_reason: "max_tokens",
+      output_token_limit: 2048,
+      usage: { output_tokens: 512 },
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "debug",
+      message: "query_done",
+      data: expect.objectContaining({
+        finish_reason: "max_tokens",
+        output_token_limit: 2048,
+      }),
+    }));
   });
 
   it("suppresses per-token thinking diagnostics and reports one aggregate count", async () => {

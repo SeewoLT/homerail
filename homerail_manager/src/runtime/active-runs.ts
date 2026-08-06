@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, realpathSync } from "node:fs";
+import { chmodSync, closeSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getHomerailHome } from "../config/env.js";
@@ -42,14 +42,19 @@ import {
   isDisabledDirectLlmAgentType,
   normalizeManagerAgentRuntimeAgentType,
   redactTelemetry,
+  sanitizeAttemptDiagnostic,
+  extractReviewEvidence,
+  type AgentBuiltinToolPolicy,
   type AgentBuiltinToolName,
   type DagAdvisorConfig,
   type DagAgentToolName,
   type DagWorkspaceAccess,
   type DagCredentialProjection,
+  type DagCredentialBrokerCallRequest,
   type DagRunInputBinding,
 } from "homerail-protocol";
 import { resolveAgentRuntimeConfig } from "./agent-runtime-resolver.js";
+import { spawnManagerGitSync } from "./manager-git.js";
 import {
   writeRunMetadata,
   appendHandoff,
@@ -96,6 +101,12 @@ import {
   verifyDagRunInputs,
 } from "../persistence/run-input-artifacts.js";
 import {
+  getRunArtifactBlobPath,
+  listRunArtifacts,
+  publishWorkspaceEvidenceArtifact,
+  type RunArtifactRecord,
+} from "../persistence/run-artifacts.js";
+import {
   createInitialDagRunRound,
   getCurrentDagRunRound,
   listDagRunRounds,
@@ -138,6 +149,14 @@ import {
   retireDagActorLease,
   writeDagActorCheckpoint,
 } from "../persistence/dag-actor-leases.js";
+import {
+  buildReviewEvidenceProjectionFor,
+  recordAttemptDiagnostic,
+  recordReviewHandoffEvidence,
+  writeReviewEvidenceProjectionFile,
+  type ReviewEvidenceIdentity,
+  type ReviewHandoffEvidenceInput,
+} from "../persistence/dag-review-evidence.js";
 import {
   createDagActorIntervention,
   DagActorInterventionConflictError,
@@ -277,6 +296,8 @@ export interface HandoffTransportFence {
   leaseGeneration?: number;
   commandId?: string;
 }
+
+export interface ReviewEvidenceWriteInput extends ReviewHandoffEvidenceInput {}
 
 export interface NodeSessionState {
   sessionId: string;
@@ -1051,7 +1072,11 @@ function _applyOrphanedNodeDemotion(run: ActiveRun): string[] {
     emit("dag:node_ready", { runId: run.runId, nodeId });
   }
   const demotedFromRunning = Array.from(run.dagRun.nodeStates.entries())
-    .filter(([nodeId, state]) => state === "RUNNING" && !interventionProtectedNodeIds.has(nodeId))
+    .filter(([nodeId, state]) => (
+      state === "RUNNING"
+      && !run.dagRun.loopSources.has(nodeId)
+      && !interventionProtectedNodeIds.has(nodeId)
+    ))
     .map(([nodeId]) => nodeId);
 
   // Apply RUNNING→FAILED demotion: mark sessions and emit the standard
@@ -1069,7 +1094,33 @@ function _applyOrphanedNodeDemotion(run: ActiveRun): string[] {
     });
   }
 
-  const skippedBlockedNodes = reconcileFailedDependencies(run.dagRun);
+  const skippedBlockedNodes = new Set(reconcileFailedDependencies(run.dagRun));
+
+  // A loop gateway is deliberately left RUNNING while it waits for feedback,
+  // so it is not an orphan merely because the Manager restarted. It does become
+  // stranded when every path that could still produce feedback was settled by
+  // the orphan demotion above. Fail that dormant gateway as well; otherwise its
+  // untaken terminal branches stay PENDING and the recovered run can never
+  // become terminal.
+  const strandedLoopSources = Array.from(run.dagRun.loopSources)
+    .filter((nodeId) => (
+      run.dagRun.nodeStates.get(nodeId) === "RUNNING"
+      && !_loopSourceHasLiveFeedbackPath(run, nodeId, new Set([nodeId]))
+    ));
+  for (const nodeId of strandedLoopSources) {
+    const reason = "loop feedback path lost: manager process restarted";
+    const current = run.nodeSessions.get(nodeId);
+    if (current) {
+      _persistNodeSession(run, nodeId, { ...current, status: "failed" });
+    }
+    failNode(run.dagRun, nodeId, { error: reason });
+    demotedFromRunning.push(nodeId);
+    emit("dag:node_failed", { runId: run.runId, nodeId, reason });
+  }
+
+  for (const nodeId of reconcileFailedDependencies(run.dagRun)) {
+    skippedBlockedNodes.add(nodeId);
+  }
   for (const nodeId of skippedBlockedNodes) {
     _markNodeSessionStatus(run, nodeId, "cancelled");
   }
@@ -1094,6 +1145,36 @@ function _applyOrphanedNodeDemotion(run: ActiveRun): string[] {
   }
 
   return demotedFromRunning;
+}
+
+function _loopSourceHasLiveFeedbackPath(
+  run: ActiveRun,
+  nodeId: string,
+  visiting: Set<string>,
+): boolean {
+  const mailbox = run.dagRun.mailboxes.get(nodeId);
+  if (mailbox && Array.from(mailbox.values()).some((values) => values.length > 0)) return true;
+
+  const feedbackSources = run.dagRun.graph.edges
+    .filter((edge) => edge.to_node === nodeId && edge.label !== "after_dep" && edge.from_node)
+    .map((edge) => edge.from_node);
+  return feedbackSources.some((sourceId) => _nodeHasLivePath(run, sourceId, visiting));
+}
+
+function _nodeHasLivePath(run: ActiveRun, nodeId: string, visiting: Set<string>): boolean {
+  if (visiting.has(nodeId)) return false;
+  const state = run.dagRun.nodeStates.get(nodeId);
+  if (state === "READY" || state === "WAITING_FOR_APPROVAL" || state === "WAITING_FOR_COMMAND") return true;
+  if (state === "RUNNING" && !run.dagRun.loopSources.has(nodeId)) return true;
+  if (state !== "PENDING" && state !== "RUNNING") return false;
+
+  const nextVisiting = new Set(visiting).add(nodeId);
+  if (state === "RUNNING") {
+    return _loopSourceHasLiveFeedbackPath(run, nodeId, nextVisiting);
+  }
+  return run.dagRun.graph.edges
+    .filter((edge) => edge.to_node === nodeId && edge.from_node)
+    .some((edge) => _nodeHasLivePath(run, edge.from_node, nextVisiting));
 }
 
 function _skipPendingNodesWhenFailureStalls(run: ActiveRun): string[] {
@@ -1302,7 +1383,7 @@ export function dispatchRecoveredRuns(dispatcher: DAGDispatcher): number {
   let dispatched = 0;
   for (const run of store.values()) {
     if (run.status !== "active") continue;
-    dispatched += dispatchReadyNodes(run.runId, dispatcher);
+    dispatched += dispatchReadyNodesUntilStable(run.runId, dispatcher);
   }
   return dispatched;
 }
@@ -1319,16 +1400,76 @@ interface BrokerActionRequirement {
     field: string;
     equals: unknown;
   };
+  result_binding?: {
+    result_field: string;
+    content_field: string;
+  };
+  result_digest_binding?: {
+    result_field: string;
+    content_field: string;
+  };
 }
 
-interface BrokerActionReceipt extends BrokerActionRequirement {
+interface WorkspaceFileRequirement {
+  path_field: string;
+  sha256_field: string;
+  contract: string;
+  max_bytes?: number;
+  bindings?: Array<{ file_field: string; content_field: string }>;
+}
+
+interface BrokerActionReceipt {
+  credential_ref: string;
+  broker: string;
+  action: string;
   node_id: string;
   session_id: string;
   recorded_at: number;
+  bound_results?: Record<string, string | number | boolean | null>;
+  /** Manager-produced, contract-ready content that can recover a rejected model handoff. */
+  canonical_handoff?: unknown;
 }
 
 const BROKER_ACTION_RECEIPTS_KEY = "broker_action_receipts";
 const BROKER_ACTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const BROKER_ACTION_FIELD = /^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/;
+
+function _dottedField(value: unknown, field: string): unknown {
+  let selected = value;
+  for (const segment of field.split(".")) {
+    if (!selected || typeof selected !== "object" || Array.isArray(selected)) return undefined;
+    selected = (selected as Record<string, unknown>)[segment];
+  }
+  return selected;
+}
+
+function _deepSortValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(_deepSortValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, _deepSortValue(entry)]),
+  );
+}
+
+function _boundedBrokerResult(value: unknown): value is string | number | boolean | null {
+  return value === null
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value))
+    || (typeof value === "string" && value.length <= 1_024);
+}
+
+function _boundedCanonicalHandoff(value: unknown): unknown | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined || Buffer.byteLength(encoded, "utf8") > 64 * 1024) return undefined;
+    return JSON.parse(encoded) as unknown;
+  } catch {
+    return undefined;
+  }
+}
 
 function _outputBrokerActionRequirements(
   run: ActiveRun,
@@ -1357,19 +1498,34 @@ function _outputBrokerActionRequirements(
       if (!entry.when || typeof entry.when !== "object" || Array.isArray(entry.when)) return [];
       const rawWhen = entry.when as Record<string, unknown>;
       if (typeof rawWhen.field !== "string"
-        || !/^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/.test(rawWhen.field)
+        || !BROKER_ACTION_FIELD.test(rawWhen.field)
         || !("equals" in rawWhen)) return [];
       when = { field: rawWhen.field, equals: rawWhen.equals };
     }
+    let resultBinding: BrokerActionRequirement["result_binding"];
+    if (entry.result_binding !== undefined) {
+      if (!entry.result_binding || typeof entry.result_binding !== "object" || Array.isArray(entry.result_binding)) return [];
+      const rawBinding = entry.result_binding as Record<string, unknown>;
+      if (typeof rawBinding.result_field !== "string" || !BROKER_ACTION_FIELD.test(rawBinding.result_field)
+        || typeof rawBinding.content_field !== "string" || !BROKER_ACTION_FIELD.test(rawBinding.content_field)) return [];
+      resultBinding = {
+        result_field: rawBinding.result_field,
+        content_field: rawBinding.content_field,
+      };
+    }
+    let resultDigestBinding: BrokerActionRequirement["result_digest_binding"];
+    if (entry.result_digest_binding !== undefined) {
+      if (!entry.result_digest_binding || typeof entry.result_digest_binding !== "object" || Array.isArray(entry.result_digest_binding)) return [];
+      const rawBinding = entry.result_digest_binding as Record<string, unknown>;
+      if (typeof rawBinding.result_field !== "string" || !BROKER_ACTION_FIELD.test(rawBinding.result_field)
+        || typeof rawBinding.content_field !== "string" || !BROKER_ACTION_FIELD.test(rawBinding.content_field)) return [];
+      resultDigestBinding = {
+        result_field: rawBinding.result_field,
+        content_field: rawBinding.content_field,
+      };
+    }
     if (evaluateConditions && when) {
-      let actual = content;
-      for (const segment of when.field.split(".")) {
-        if (!actual || typeof actual !== "object" || Array.isArray(actual)) {
-          actual = undefined;
-          break;
-        }
-        actual = (actual as Record<string, unknown>)[segment];
-      }
+      const actual = _dottedField(content, when.field);
       if (!isDeepStrictEqual(actual, when.equals)) return [];
     }
     return [{
@@ -1377,6 +1533,45 @@ function _outputBrokerActionRequirements(
       broker: String(entry.broker),
       action: String(entry.action),
       ...(when ? { when } : {}),
+      ...(resultBinding ? { result_binding: resultBinding } : {}),
+      ...(resultDigestBinding ? { result_digest_binding: resultDigestBinding } : {}),
+    }];
+  });
+}
+
+function _outputWorkspaceFileRequirements(
+  run: ActiveRun,
+  nodeId: string,
+  port: string,
+): WorkspaceFileRequirement[] {
+  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  const workflowSpec = node?.extra?.workflow_spec_v1;
+  if (!workflowSpec || typeof workflowSpec !== "object" || Array.isArray(workflowSpec)) return [];
+  const rawByPort = (workflowSpec as Record<string, unknown>).output_workspace_file_requirements;
+  if (!rawByPort || typeof rawByPort !== "object" || Array.isArray(rawByPort)) return [];
+  const selected = (rawByPort as Record<string, unknown>)[port];
+  if (!Array.isArray(selected)) return [];
+  return selected.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.path_field !== "string" || !BROKER_ACTION_FIELD.test(entry.path_field)
+      || typeof entry.sha256_field !== "string" || !BROKER_ACTION_FIELD.test(entry.sha256_field)
+      || typeof entry.contract !== "string" || !BROKER_ACTION_NAME.test(entry.contract)) return [];
+    const rawBindings = entry.bindings;
+    if (rawBindings !== undefined && !Array.isArray(rawBindings)) return [];
+    const bindings = (rawBindings as unknown[] | undefined)?.flatMap((binding) => {
+      if (!binding || typeof binding !== "object" || Array.isArray(binding)) return [];
+      const raw = binding as Record<string, unknown>;
+      if (typeof raw.file_field !== "string" || !BROKER_ACTION_FIELD.test(raw.file_field)
+        || typeof raw.content_field !== "string" || !BROKER_ACTION_FIELD.test(raw.content_field)) return [];
+      return [{ file_field: raw.file_field, content_field: raw.content_field }];
+    });
+    return [{
+      path_field: entry.path_field,
+      sha256_field: entry.sha256_field,
+      contract: entry.contract,
+      ...(typeof entry.max_bytes === "number" ? { max_bytes: entry.max_bytes } : {}),
+      ...(bindings?.length ? { bindings } : {}),
     }];
   });
 }
@@ -1390,6 +1585,15 @@ function _brokerActionReceipts(run: ActiveRun): BrokerActionReceipt[] {
     if (![entry.credential_ref, entry.broker, entry.action, entry.node_id, entry.session_id].every((field) => (
       typeof field === "string" && BROKER_ACTION_NAME.test(field)
     )) || typeof entry.recorded_at !== "number" || !Number.isFinite(entry.recorded_at)) return [];
+    let boundResults: BrokerActionReceipt["bound_results"];
+    if (entry.bound_results !== undefined) {
+      if (!entry.bound_results || typeof entry.bound_results !== "object" || Array.isArray(entry.bound_results)) return [];
+      const entries = Object.entries(entry.bound_results as Record<string, unknown>);
+      if (entries.length > 8 || entries.some(([field, result]) => !BROKER_ACTION_FIELD.test(field) || !_boundedBrokerResult(result))) return [];
+      boundResults = Object.fromEntries(entries) as BrokerActionReceipt["bound_results"];
+    }
+    const canonicalHandoff = _boundedCanonicalHandoff(entry.canonical_handoff);
+    if (entry.canonical_handoff !== undefined && canonicalHandoff === undefined) return [];
     return [{
       credential_ref: String(entry.credential_ref),
       broker: String(entry.broker),
@@ -1397,6 +1601,8 @@ function _brokerActionReceipts(run: ActiveRun): BrokerActionReceipt[] {
       node_id: String(entry.node_id),
       session_id: String(entry.session_id),
       recorded_at: entry.recorded_at,
+      ...(boundResults ? { bound_results: boundResults } : {}),
+      ...(canonicalHandoff !== undefined ? { canonical_handoff: canonicalHandoff } : {}),
     }];
   });
 }
@@ -1408,15 +1614,16 @@ export function recordActiveRunBrokerActionSuccess(input: {
   credential_ref: string;
   broker: string;
   action: string;
+  result?: unknown;
 }): void {
   const run = store.get(input.run_id);
   if (!run || run.status !== "active") throw new Error("Broker action receipt run is not active");
-  const required = _outputBrokerActionRequirements(run, input.node_id).some((requirement) => (
+  const requirements = _outputBrokerActionRequirements(run, input.node_id).filter((requirement) => (
     requirement.credential_ref === input.credential_ref
     && requirement.broker === input.broker
     && requirement.action === input.action
   ));
-  if (!required) return;
+  if (requirements.length === 0) return;
   const session = run.nodeSessions.get(input.node_id);
   if (!session || session.sessionId !== input.session_id) {
     throw new Error("Broker action receipt session is stale");
@@ -1428,6 +1635,19 @@ export function recordActiveRunBrokerActionSuccess(input: {
     node_id: input.node_id,
     session_id: input.session_id,
     recorded_at: Date.now(),
+    ...(() => {
+      const boundResults = Object.fromEntries(requirements.flatMap((requirement) => {
+        const field = requirement.result_binding?.result_field ?? requirement.result_digest_binding?.result_field;
+        if (!field) return [];
+        const value = _dottedField(input.result, field);
+        return _boundedBrokerResult(value) ? [[field, value] as const] : [];
+      }));
+      return Object.keys(boundResults).length > 0 ? { bound_results: boundResults } : {};
+    })(),
+    ...(() => {
+      const canonicalHandoff = _boundedCanonicalHandoff(_dottedField(input.result, "review_decision"));
+      return canonicalHandoff === undefined ? {} : { canonical_handoff: canonicalHandoff };
+    })(),
   };
   const receipts = _brokerActionReceipts(run).filter((entry) => !(
     entry.node_id === receipt.node_id
@@ -1462,6 +1682,86 @@ export function getCurrentNodeSession(runId: string, nodeId: string): NodeSessio
   const run = store.get(runId);
   if (!run || !run.dagRun.nodeStates.has(nodeId)) return undefined;
   return _ensureNodeSession(run, nodeId);
+}
+
+function _reviewEvidenceEnabled(run: ActiveRun, nodeId: string): boolean {
+  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  const workflowSpec = node?.extra?.workflow_spec_v1;
+  if (workflowSpec && typeof workflowSpec === "object" && !Array.isArray(workflowSpec)) {
+    const spec = workflowSpec as Record<string, unknown>;
+    if (spec.review_evidence === true) return true;
+    const capabilities = spec.capabilities;
+    if (Array.isArray(capabilities) && capabilities.includes("runtime_evidence")) return true;
+  }
+  return Boolean(run.contracts?.review_evidence === true);
+}
+
+/** True when this node is declared to own durable review evidence. */
+export function isReviewEvidenceNode(runId: string, nodeId: string): boolean {
+  const run = store.get(runId);
+  return run ? _reviewEvidenceEnabled(run, nodeId) : false;
+}
+
+function _reviewEvidenceContext(
+  run: ActiveRun,
+  nodeId: string,
+  attempt?: number,
+): ReviewEvidenceIdentity | undefined {
+  if (!_reviewEvidenceEnabled(run, nodeId)) return undefined;
+  const actor = getDagActorByNode(run.runId, nodeId);
+  const session = run.nodeSessions.get(nodeId);
+  if (!actor || !session) return undefined;
+  return {
+    runId: run.runId,
+    reviewer: actor.actor_id,
+    nodeId,
+    sessionId: session.sessionId,
+    roundId: run.currentRound.round_id,
+    generation: actor.generation,
+    attempt: attempt ?? (run.counters.corrections[nodeId] ?? 0) + 1,
+  };
+}
+
+function _refreshReviewEvidenceProjection(
+  run: ActiveRun,
+  nodeId: string,
+  evidenceContext: ReviewEvidenceIdentity,
+): void {
+  try {
+    // Select only the authoritative node/session/round/generation fence.
+    // Aggregating run/reviewer rows would leak stale dispatch evidence into
+    // correction and downstream ReviewEvidenceState mailboxes.
+    const projection = buildReviewEvidenceProjectionFor(evidenceContext);
+    if (!projection) return;
+    run.dagRun.mailboxes.get(nodeId)?.set("review_evidence", [projection]);
+    writeReviewEvidenceProjectionFile(evidenceContext);
+    if (projection.projection_truncated) {
+      emit("dag:review_evidence_projection_truncated", {
+        runId: run.runId,
+        nodeId,
+        omittedFindings: projection.omitted_findings,
+        omittedDiagnostics: projection.omitted_diagnostics,
+      });
+    }
+    // Deliver the same bounded projection to downstream command nodes whose
+    // ReviewEvidenceState inputs normalize persisted accepted evidence. This
+    // must happen before correction-exhaustion returns so the final failed
+    // attempt remains visible to the review gate.
+    for (const edge of run.dagRun.graph.edges) {
+      if (edge.from_node !== nodeId || !edge.to_node || edge.label === "after_dep") continue;
+      const target = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === edge.to_node);
+      const targetSpec = target?.extra?.workflow_spec_v1;
+      if (!targetSpec || typeof targetSpec !== "object" || Array.isArray(targetSpec)) continue;
+      const inputContracts = (targetSpec as Record<string, unknown>).input_contracts;
+      if (!inputContracts || typeof inputContracts !== "object" || Array.isArray(inputContracts)) continue;
+      for (const [portName, contract] of Object.entries(inputContracts as Record<string, unknown>)) {
+        if (contract !== "ReviewEvidenceState") continue;
+        run.dagRun.mailboxes.get(edge.to_node)?.set(portName, [projection]);
+      }
+    }
+  } catch {
+    // Evidence projection is best-effort and never blocks correction.
+  }
 }
 
 export function isCurrentNodeSession(runId: string, nodeId: string, sessionId: string | undefined): boolean {
@@ -2019,6 +2319,16 @@ export type NodeCorrectionResult =
   | { status: "exhausted"; run: ActiveRun; attempts: number; maxAttempts: number }
   | { status: "unavailable"; reason: string };
 
+function _isRejectedHandoff(value: unknown): value is { port: string; content: unknown } {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as Record<string, unknown>).port === "string"
+    && Object.prototype.hasOwnProperty.call(value, "content"),
+  );
+}
+
 function _correctionPrompt(
   nodeId: string,
   reason: string,
@@ -2028,7 +2338,10 @@ function _correctionPrompt(
   successPorts: string[],
   failurePorts: string[],
   outputContracts: Record<string, { contract: string; schema: unknown }>,
+  workspaceFileContracts: Record<string, Array<WorkspaceFileRequirement & { schema: unknown }>>,
   brokerRequirements: BrokerActionRequirement[],
+  brokerReceipts: BrokerActionReceipt[],
+  rejectedHandoff?: { port: string; content: unknown },
 ): string {
   const declaredPorts = outputPorts.length > 0 ? outputPorts.join(", ") : "done";
   const contractGuidance = Object.keys(outputContracts).length > 0
@@ -2037,13 +2350,54 @@ function _correctionPrompt(
         `Exact output contracts by port (JSON Schema): ${JSON.stringify(outputContracts)}`,
       ]
     : [];
-  const brokerGuidance = brokerRequirements.length > 0
+  const workspaceEvidenceGuidance = Object.keys(workspaceFileContracts).length > 0
+    ? [
+        `Exact workspace evidence requirements by port: ${JSON.stringify(workspaceFileContracts)}`,
+        "If the previous error is a DAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT, inspect and repair only the declared evidence JSON file under .homerail; do not edit source files, rerun completed tests, or repeat external side effects. Recompute the file SHA-256 after the repair.",
+      ]
+    : [];
+  const brokerActions = Array.from(new Set(brokerRequirements.map(
+    (requirement) => `${requirement.credential_ref}/${requirement.broker}/${requirement.action}`,
+  )));
+  const existingReceipts = brokerReceipts.map((receipt) => ({
+    credential_ref: receipt.credential_ref,
+    broker: receipt.broker,
+    action: receipt.action,
+    ...(receipt.bound_results ? { bound_results: receipt.bound_results } : {}),
+    ...(receipt.canonical_handoff !== undefined
+      ? { canonical_handoff: redactTelemetry(receipt.canonical_handoff) }
+      : {}),
+  }));
+  const brokerGuidance = brokerActions.length > 0
     ? [
         "Correction mode permits only declared credential_broker_call verification actions and the final handoff tool call. Do not use any built-in tools or other DAG tools.",
-        `Broker verification actions available when required by the corrected output: ${brokerRequirements.map((requirement) => `${requirement.credential_ref}/${requirement.broker}/${requirement.action}`).join(", ")}.`,
+        `Broker verification actions available when required by the corrected output: ${brokerActions.join(", ")}.`,
+        ...(existingReceipts.length > 0 ? [
+          `Valid durable broker receipts already exist for this exact node session: ${JSON.stringify(existingReceipts)}.`,
+          "Reuse the receipt bound_results verbatim in the corrected handoff. Do not repeat an already successful side-effecting broker action.",
+        ] : []),
+        "If a read-only verification action returns a complete handoff object such as review_decision, use that object verbatim as handoff content.",
+        "A digest-bound content field must stay value-identical to the array/object submitted to the successful broker action; do not discard non-actionable entries. Repeat a read-only verification action when necessary to obtain a final canonical result.",
         "If the corrected output triggers one of those requirements and no valid receipt exists, call that declared broker action before the handoff. Otherwise call handoff directly.",
       ]
     : ["Correction mode permits only the handoff tool. Do not repeat investigation, file changes, or other side effects."];
+  const rejectedHandoffGuidance = rejectedHandoff === undefined
+    ? []
+    : (() => {
+        let encoded: string;
+        try {
+          encoded = JSON.stringify(redactTelemetry(rejectedHandoff));
+        } catch {
+          encoded = JSON.stringify({ port: rejectedHandoff.port, content: "[unserializable]" });
+        }
+        const bounded = encoded.length <= 24_000
+          ? encoded
+          : `${encoded.slice(0, 24_000)}...[truncated]`;
+        return [
+          `Previous rejected handoff (redacted; repair this value instead of reconstructing it from memory): ${bounded}`,
+          "Preserve valid evidence and findings from the rejected content unless the authoritative error specifically requires changing them.",
+        ];
+      })();
   return [
     `Correction attempt ${attempt}/${maxAttempts} for DAG node ${nodeId}.`,
     `Previous attempt ended without a valid DAG handoff: ${reason}`,
@@ -2051,6 +2405,8 @@ function _correctionPrompt(
     `Preferred success ports: ${successPorts.length > 0 ? successPorts.join(", ") : "none declared"}.`,
     `Failure ports: ${failurePorts.length > 0 ? failurePorts.join(", ") : "none declared"}.`,
     ...contractGuidance,
+    ...workspaceEvidenceGuidance,
+    ...rejectedHandoffGuidance,
     "A contract or transport error from the previous attempt is not a failure of the original task. Retry a preferred success port when the original work is complete.",
     "Use a failure port only when the original task itself cannot complete; never use it merely to report this correction error.",
     "Treat that error as authoritative. Preserve required field names and JSON array/object/number types exactly.",
@@ -2065,7 +2421,17 @@ export function requestNodeCorrection(
   runId: string,
   nodeId: string,
   reason: string,
+  diagnosticsOrRejectedHandoff?: unknown,
+  explicitRejectedHandoff?: { port: string; content: unknown },
 ): NodeCorrectionResult {
+  const legacyRejectedHandoff = explicitRejectedHandoff === undefined
+    && _isRejectedHandoff(diagnosticsOrRejectedHandoff)
+    ? diagnosticsOrRejectedHandoff
+    : undefined;
+  const rejectedHandoff = explicitRejectedHandoff ?? legacyRejectedHandoff;
+  const diagnostics = legacyRejectedHandoff === undefined
+    ? diagnosticsOrRejectedHandoff
+    : undefined;
   const run = store.get(runId);
   if (!run) return { status: "unavailable", reason: `Unknown run: ${runId}` };
   if (run.status !== "active") return { status: "unavailable", reason: `Run is not active: ${run.status}` };
@@ -2073,6 +2439,22 @@ export function requestNodeCorrection(
 
   const maxAttempts = run.limits.max_corrections_per_node;
   const previousAttempts = run.counters.corrections[nodeId] ?? 0;
+  const failedAttempt = previousAttempts + 1;
+  const evidenceContext = _reviewEvidenceContext(run, nodeId, failedAttempt);
+  if (evidenceContext) {
+    try {
+      recordAttemptDiagnostic({
+        identity: evidenceContext,
+        diagnostic: sanitizeAttemptDiagnostic(diagnostics, {
+          attempt: evidenceContext.attempt,
+          failure_reason: reason,
+        }),
+      });
+    } catch {
+      // Evidence persistence is best-effort and never blocks correction.
+    }
+    _refreshReviewEvidenceProjection(run, nodeId, evidenceContext);
+  }
   if (previousAttempts >= maxAttempts) {
     return { status: "exhausted", run, attempts: previousAttempts, maxAttempts };
   }
@@ -2094,6 +2476,25 @@ export function requestNodeCorrection(
       ? [[port, { contract: contract.contract, schema: contract.schema }] as const]
       : [];
   }));
+  const workspaceFileContracts = Object.fromEntries(outputPorts.flatMap((port) => {
+    const requirements = _outputWorkspaceFileRequirements(run, nodeId, port).flatMap((requirement) => {
+      const schema = run.contracts?.[requirement.contract];
+      return schema === undefined ? [] : [{ ...requirement, schema }];
+    });
+    return requirements.length > 0 ? [[port, requirements] as const] : [];
+  }));
+  const brokerRequirements = _outputBrokerActionRequirements(run, nodeId);
+  const sessionId = run.nodeSessions.get(nodeId)?.sessionId;
+  const brokerActionKeys = new Set(brokerRequirements.map(
+    (requirement) => `${requirement.credential_ref}\u0000${requirement.broker}\u0000${requirement.action}`,
+  ));
+  const brokerReceipts = sessionId === undefined
+    ? []
+    : _brokerActionReceipts(run).filter((receipt) => (
+        receipt.node_id === nodeId
+        && receipt.session_id === sessionId
+        && brokerActionKeys.has(`${receipt.credential_ref}\u0000${receipt.broker}\u0000${receipt.action}`)
+      ));
   run.counters.corrections[nodeId] = attempt;
   const mailbox = run.dagRun.mailboxes.get(nodeId);
   if (mailbox) {
@@ -2107,7 +2508,10 @@ export function requestNodeCorrection(
       successPorts,
       failurePorts,
       outputContracts,
-      _outputBrokerActionRequirements(run, nodeId),
+      workspaceFileContracts,
+      brokerRequirements,
+      brokerReceipts,
+      rejectedHandoff,
     ));
     mailbox.set("correction", values);
   }
@@ -2155,6 +2559,43 @@ export function autoHandoffAfterCorrectionExhausted(
   const run = store.get(runId);
   if (!run || run.status !== "active" || !run.dagRun.nodeStates.has(nodeId)) return undefined;
   const port = _defaultSuccessPort(run, nodeId);
+  const sessionId = run.nodeSessions.get(nodeId)?.sessionId;
+  const canonicalReceipt = sessionId === undefined
+    ? undefined
+    : [..._brokerActionReceipts(run)].reverse().find((receipt) => (
+        receipt.node_id === nodeId
+        && receipt.session_id === sessionId
+        && receipt.canonical_handoff !== undefined
+      ));
+  if (canonicalReceipt?.canonical_handoff !== undefined) {
+    try {
+      const next = handoffActiveRun(runId, nodeId, port, canonicalReceipt.canonical_handoff);
+      if (next) {
+        emit("dag:node_auto_handoff", {
+          runId,
+          nodeId,
+          port,
+          reason,
+          source: "canonical_broker_result",
+        });
+      }
+      return next;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return abortActiveRun(
+        runId,
+        `canonical broker handoff failed after correction exhaustion: ${message}`,
+        nodeId,
+      );
+    }
+  }
+  if (
+    _outputContract(run, nodeId, port)
+    || _outputBrokerActionRequirements(run, nodeId, port).length > 0
+    || _outputWorkspaceFileRequirements(run, nodeId, port).length > 0
+  ) {
+    return failActiveRun(runId, nodeId, `handoff failed after correction exhaustion: ${reason}`);
+  }
   let next: ActiveRun | undefined;
   try {
     next = handoffActiveRun(runId, nodeId, port, {
@@ -2310,6 +2751,7 @@ export function handoffActiveRun(
   port: string,
   content: unknown,
   fence?: HandoffTransportFence,
+  evidence?: ReviewEvidenceWriteInput,
 ): ActiveRun | undefined {
   const run = store.get(runId);
   if (!run) return undefined;
@@ -2319,14 +2761,59 @@ export function handoffActiveRun(
   if (sourceState === "COMPLETED" || sourceState === "FAILED" || sourceState === "CANCELLED" || sourceState === "SKIPPED") {
     throw new Error(`Node ${fromNode} cannot hand off from terminal state ${sourceState}`);
   }
+  // Persist bounded accepted findings/coverage before final contract
+  // validation so a later incomplete or contract-invalid handoff cannot erase
+  // evidence that was already accepted. The success path below re-persists
+  // with the authoritative transport diagnostic; both writes are idempotent.
+  const submission = evidence?.submission ?? extractReviewEvidence(content);
+  if (submission) {
+    try {
+      const evidenceContext = _reviewEvidenceContext(run, fromNode);
+      if (evidenceContext) {
+        recordReviewHandoffEvidence(evidenceContext, { submission });
+        writeReviewEvidenceProjectionFile(evidenceContext);
+      }
+    } catch {
+      // Evidence persistence is best-effort and never blocks handoff processing.
+    }
+  }
   _assertHandoffPreconditions(run, fromNode, port, content, true);
+  const handedOffNode = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === fromNode);
+  const effectiveContent = handedOffNode
+    ? _materializeManagerOwnedFanoutCommit(run, handedOffNode, port, content)
+    : content;
+  if (effectiveContent !== content) {
+    _assertHandoffPreconditions(run, fromNode, port, effectiveContent, true);
+  }
+  const workspaceEvidence = _validatedWorkspaceFiles(run, fromNode, port, effectiveContent);
+  const evidenceSessionId = workspaceEvidence.length > 0
+    ? run.nodeSessions.get(fromNode)?.sessionId
+    : undefined;
+  if (workspaceEvidence.length > 0 && !evidenceSessionId) {
+    throw new Error(`DAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT ${fromNode}.${port}: producer has no active session`);
+  }
   const mutableBefore = _snapshotMutableRun(run);
   const before = _snapshotNodeStates(run);
   const readyBefore = new Set(getReadyNodes(run.dagRun));
   let transition!: ReturnType<typeof handoff>;
+  const evidenceArtifacts: RunArtifactRecord[] = [];
   try {
     getDb().transaction(() => {
       run.counters.handoffs++;
+
+      for (const evidence of workspaceEvidence) {
+        evidenceArtifacts.push(publishWorkspaceEvidenceArtifact({
+          run_id: runId,
+          node_id: fromNode,
+          session_id: evidenceSessionId!,
+          port,
+          declared_path: evidence.declared_path,
+          workspace_path: evidence.path,
+          contract: evidence.contract,
+          sha256: evidence.sha256,
+          bytes: evidence.bytes,
+        }));
+      }
 
       for (const edge of run.dagRun.graph.edges) {
         if (edge.from_node !== fromNode || edge.to_node === "" || edge.label === "after_dep") continue;
@@ -2356,7 +2843,7 @@ export function handoffActiveRun(
           });
         }
       }
-      transition = handoff(run.dagRun, fromNode, port, content);
+      transition = handoff(run.dagRun, fromNode, port, effectiveContent);
       _markNodeSessionStatus(
         run,
         fromNode,
@@ -2371,7 +2858,7 @@ export function handoffActiveRun(
         roundId: run.currentRound.round_id,
         fromNode,
         port,
-        content,
+        content: effectiveContent,
         timestamp: Date.now(),
       });
       if (fencedCommand) {
@@ -2393,8 +2880,14 @@ export function handoffActiveRun(
           });
         }
       }
-      const handedOffNode = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === fromNode);
-      if (handedOffNode) _recordFanoutChild(run, handedOffNode, port, content);
+      if (handedOffNode) _recordFanoutChild(run, handedOffNode, port, effectiveContent);
+      if (evidence) {
+        const evidenceContext = _reviewEvidenceContext(run, fromNode);
+        if (evidenceContext) {
+          recordReviewHandoffEvidence(evidenceContext, evidence);
+          writeReviewEvidenceProjectionFile(evidenceContext);
+        }
+      }
       writeRunMetadata(runId, serializeRunMetadata(run));
     }).immediate();
   } catch (error) {
@@ -2402,6 +2895,16 @@ export function handoffActiveRun(
     throw error;
   }
   _emitNodeStateChanges(run, before);
+  for (const artifact of evidenceArtifacts) {
+    emit("dag:artifact_ready", {
+      runId,
+      artifactId: artifact.artifact_id,
+      name: artifact.name,
+      status: artifact.status,
+      sizeBytes: artifact.size_bytes,
+      sha256: artifact.sha256,
+    });
+  }
   emit("dag:handoff", { runId, fromNode, port });
   if (transition.terminalFailure) {
     emit("dag:terminal_failure_handoff", { runId, fromNode, port });
@@ -2500,6 +3003,8 @@ function _assertHandoffPreconditions(
   if (contractViolation) throw new Error(contractViolation);
   const brokerRequirementViolation = _handoffBrokerRequirementViolation(run, fromNode, port, content);
   if (brokerRequirementViolation) throw new Error(brokerRequirementViolation);
+  const workspaceFileViolation = _handoffWorkspaceFileRequirementViolation(run, fromNode, port, content);
+  if (workspaceFileViolation) throw new Error(workspaceFileViolation);
   if (run.counters.handoffs >= run.limits.max_handoffs) {
     if (abortOnLimit) abortActiveRun(run.runId, `max_handoffs (${run.limits.max_handoffs}) exceeded`, fromNode);
     throw new Error(`max_handoffs (${run.limits.max_handoffs}) exceeded`);
@@ -2517,6 +3022,199 @@ function _assertHandoffPreconditions(
   }
 }
 
+export interface ValidatedWorkspaceFile {
+  path: string;
+  sha256: string;
+  contract: string;
+  value: unknown;
+  artifact_name?: string;
+}
+
+interface ValidatedWorkspaceFileBytes extends ValidatedWorkspaceFile {
+  declared_path: string;
+  bytes: Buffer;
+}
+
+function _singleWritableWorkspace(run: ActiveRun, nodeId: string): { relative: string; absolute: string } {
+  const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+  const runtime = node?.extra?.agent_runtime;
+  const access = runtime && typeof runtime === "object" && !Array.isArray(runtime)
+    ? (runtime as Record<string, unknown>).workspace_access
+    : undefined;
+  const writable = access && typeof access === "object" && !Array.isArray(access)
+    ? (access as Record<string, unknown>).writable_paths
+    : undefined;
+  if (!Array.isArray(writable) || writable.length !== 1 || typeof writable[0] !== "string") {
+    throw new Error("producer must have exactly one writable workspace path");
+  }
+  const relative = _fanoutSafeRelativePath(writable[0], "workspace");
+  const runRoot = realpathSync(path.resolve(getHomerailHome(), "workspace", ...run.runId.split("/")));
+  const absolute = realpathSync(path.resolve(runRoot, ...relative.split("/")));
+  if (!_pathIsWithin(runRoot, absolute)) throw new Error("producer workspace escaped the run workspace");
+  return { relative, absolute };
+}
+
+function _workspaceFilePath(base: string, raw: unknown): { relative: string; absolute: string } {
+  const relative = _fanoutSafeRelativePath(raw, "evidence.json");
+  let current = base;
+  for (const segment of relative.split("/")) {
+    current = path.join(current, segment);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      throw new Error("workspace evidence path does not exist");
+    }
+    if (stat.isSymbolicLink()) throw new Error("workspace evidence path contains a symbolic link");
+  }
+  let absolute: string;
+  try {
+    absolute = realpathSync(current);
+  } catch {
+    throw new Error("workspace evidence path is unavailable");
+  }
+  if (!_pathIsWithin(base, absolute)) throw new Error("workspace evidence path escaped the producer workspace");
+  if (!lstatSync(absolute).isFile()) throw new Error("workspace evidence is not a regular file");
+  return { relative, absolute };
+}
+
+function _validatedWorkspaceFiles(
+  run: ActiveRun,
+  nodeId: string,
+  port: string,
+  content: unknown,
+): ValidatedWorkspaceFileBytes[] {
+  const requirements = _outputWorkspaceFileRequirements(run, nodeId, port);
+  if (requirements.length === 0) return [];
+  const workspace = _singleWritableWorkspace(run, nodeId);
+  return requirements.map((requirement) => {
+    const declaredPath = _dottedField(content, requirement.path_field);
+    const declaredSha256 = _dottedField(content, requirement.sha256_field);
+    if (typeof declaredPath !== "string" || typeof declaredSha256 !== "string" || !/^[0-9a-f]{64}$/.test(declaredSha256)) {
+      throw new Error(`${requirement.path_field} and ${requirement.sha256_field} must identify a SHA-256-bound file`);
+    }
+    const evidencePath = _workspaceFilePath(workspace.absolute, declaredPath);
+    const bytes = readFileSync(evidencePath.absolute);
+    const maxBytes = Math.max(1, Math.floor(requirement.max_bytes ?? 256 * 1024));
+    if (bytes.byteLength > maxBytes) throw new Error(`workspace evidence exceeds ${maxBytes} bytes`);
+    const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+    if (actualSha256 !== declaredSha256) throw new Error(`${requirement.sha256_field} does not match workspace evidence bytes`);
+    const text = bytes.toString("utf8");
+    if (Buffer.from(text, "utf8").compare(bytes) !== 0 || text.includes("\0")) {
+      throw new Error("workspace evidence must be canonical UTF-8 JSON");
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(text) as unknown;
+    } catch {
+      throw new Error("workspace evidence is not valid JSON");
+    }
+    const schema = run.contracts?.[requirement.contract];
+    if (schema === undefined) throw new Error(`workspace evidence contract '${requirement.contract}' is missing`);
+    const validation = validateJsonContract(schema, value);
+    if (!validation.valid) throw new Error(`workspace evidence contract '${requirement.contract}' failed: ${validation.details}`);
+    for (const binding of requirement.bindings ?? []) {
+      if (!isDeepStrictEqual(_dottedField(value, binding.file_field), _dottedField(content, binding.content_field))) {
+        throw new Error(`workspace evidence ${binding.file_field} must equal handoff ${binding.content_field}`);
+      }
+    }
+    return {
+      declared_path: declaredPath,
+      path: `${workspace.relative}/${evidencePath.relative}`,
+      sha256: actualSha256,
+      contract: requirement.contract,
+      value,
+      bytes,
+    };
+  });
+}
+
+function _handoffWorkspaceFileRequirementViolation(
+  run: ActiveRun,
+  nodeId: string,
+  port: string,
+  content: unknown,
+): string | undefined {
+  try {
+    _validatedWorkspaceFiles(run, nodeId, port, content);
+    return undefined;
+  } catch (error) {
+    return `DAG_HANDOFF_WORKSPACE_FILE_REQUIREMENT ${nodeId}.${port}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+export function getVerifiedRunWorkspaceEvidence(
+  runId: string,
+  headSha: string,
+  contract: string,
+): ValidatedWorkspaceFile | undefined {
+  const run = store.get(runId);
+  if (!run || run.status !== "active") return undefined;
+  const snapshot = loadRunSnapshot(runId);
+  const artifacts = listRunArtifacts(runId);
+  const handoffs = [...(snapshot?.handoffs ?? [])].reverse();
+  for (const handoff of handoffs) {
+    if (_dottedField(handoff.content, "head_sha") !== headSha) continue;
+    const requirements = _outputWorkspaceFileRequirements(run, handoff.fromNode, handoff.port)
+      .filter((requirement) => requirement.contract === contract);
+    for (const requirement of requirements) {
+      const declaredPath = _dottedField(handoff.content, requirement.path_field);
+      const declaredSha256 = _dottedField(handoff.content, requirement.sha256_field);
+      if (typeof declaredPath !== "string" || typeof declaredSha256 !== "string") continue;
+      const artifact = artifacts.find((candidate) => (
+        candidate.status === "ready"
+        && candidate.sha256 === declaredSha256
+        && candidate.source.type === "workspace_evidence"
+        && candidate.source.node_id === handoff.fromNode
+        && candidate.source.port === handoff.port
+        && candidate.source.declared_path === declaredPath
+        && candidate.source.contract === contract
+        && candidate.source.sha256 === declaredSha256
+      ));
+      const blobPath = artifact ? getRunArtifactBlobPath(runId, artifact.name) : undefined;
+      if (!artifact || !blobPath) continue;
+      if (artifact.source.type !== "workspace_evidence") continue;
+      let bytes: Buffer;
+      try {
+        bytes = readFileSync(blobPath);
+      } catch {
+        continue;
+      }
+      if (createHash("sha256").update(bytes).digest("hex") !== declaredSha256) continue;
+      const text = bytes.toString("utf8");
+      if (Buffer.from(text, "utf8").compare(bytes) !== 0 || text.includes("\0")) continue;
+      let value: unknown;
+      try {
+        value = JSON.parse(text) as unknown;
+      } catch {
+        continue;
+      }
+      const schema = run.contracts?.[contract];
+      if (schema === undefined || !validateJsonContract(schema, value).valid) continue;
+      if (!(requirement.bindings ?? []).every((binding) => isDeepStrictEqual(
+        _dottedField(value, binding.file_field),
+        _dottedField(handoff.content, binding.content_field),
+      ))) continue;
+      return {
+        path: artifact.source.workspace_path,
+        sha256: declaredSha256,
+        contract,
+        value,
+        artifact_name: artifact.name,
+      };
+    }
+    // Compatibility for runs accepted before workspace evidence became durable.
+    try {
+      const workspaceEvidence = _validatedWorkspaceFiles(run, handoff.fromNode, handoff.port, handoff.content)
+        .find((entry) => entry.contract === contract);
+      if (workspaceEvidence) return workspaceEvidence;
+    } catch {
+      // A pre-upgrade workspace may already be gone; try older handoffs.
+    }
+  }
+  return undefined;
+}
+
 function _handoffBrokerRequirementViolation(
   run: ActiveRun,
   fromNode: string,
@@ -2528,15 +3226,39 @@ function _handoffBrokerRequirementViolation(
   const sessionId = run.nodeSessions.get(fromNode)?.sessionId;
   if (!sessionId) return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: node has no active session`;
   const receipts = _brokerActionReceipts(run);
-  const missing = requirements.find((requirement) => !receipts.some((receipt) => (
+  const receiptFor = (requirement: BrokerActionRequirement) => receipts.find((receipt) => (
     receipt.node_id === fromNode
     && receipt.session_id === sessionId
     && receipt.credential_ref === requirement.credential_ref
     && receipt.broker === requirement.broker
     && receipt.action === requirement.action
-  )));
-  if (!missing) return undefined;
-  return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: ${missing.credential_ref}/${missing.broker}/${missing.action}`;
+  ));
+  for (const requirement of requirements) {
+    const receipt = receiptFor(requirement);
+    const actionName = `${requirement.credential_ref}/${requirement.broker}/${requirement.action}`;
+    if (!receipt) {
+      return `DAG_HANDOFF_BROKER_REQUIREMENT_MISSING ${fromNode}.${port}: ${actionName}`;
+    }
+    const binding = requirement.result_binding;
+    const digestBinding = requirement.result_digest_binding;
+    if (!binding && !digestBinding) continue;
+    const resultField = binding?.result_field ?? digestBinding!.result_field;
+    if (!receipt.bound_results
+      || !Object.prototype.hasOwnProperty.call(receipt.bound_results, resultField)) {
+      return `DAG_HANDOFF_BROKER_RESULT_MISSING ${fromNode}.${port}: ${actionName} did not return ${resultField}`;
+    }
+    const expected = binding
+      ? _dottedField(content, binding.content_field)
+      : createHash("sha256").update(JSON.stringify(_deepSortValue(_dottedField(content, digestBinding!.content_field)))).digest("hex");
+    if (!isDeepStrictEqual(
+      receipt.bound_results[resultField],
+      expected,
+    )) {
+      const contentField = binding?.content_field ?? digestBinding!.content_field;
+      return `DAG_HANDOFF_BROKER_RESULT_MISMATCH ${fromNode}.${port}: ${actionName} ${resultField} must bind ${contentField}`;
+    }
+  }
+  return undefined;
 }
 
 function _requiredSurfaceFinalViolation(
@@ -2779,6 +3501,7 @@ function _afterDepEdges(node: DAGGraphNode): DAGEdge[] {
 }
 
 function _isBackwardEdge(run: ActiveRun, edge: DAGEdge): boolean {
+  if (edge.label === "feedback") return true;
   const target = run.dagRun.graph.nodes.find((node) => node.node_id === edge.to_node);
   if (target?.node_type === "loop_gateway" || target?.node_type === "while_gateway") {
     const source = run.dagRun.graph.nodes.find((node) => node.node_id === edge.from_node);
@@ -3523,10 +4246,103 @@ function _isGatewayNode(node: DAGGraphNode): boolean {
     node.node_type === "join_gateway" ||
     node.node_type === "while_gateway" ||
     node.node_type === "command_gateway" ||
+    node.node_type === "broker_gateway" ||
     node.node_type === "approval_gateway" ||
     node.node_type === "state_gateway" ||
     node.node_type === "fanout_gateway" ||
     node.node_type === "await_command_gateway";
+}
+
+const inFlightBrokerGateways = new Set<string>();
+
+function _brokerGatewayInput(run: ActiveRun, node: DAGGraphNode): Record<string, unknown> {
+  const config = node.gateway_config;
+  const inputs = _nodeInputs(run.dagRun, node.node_id);
+  const selectedValues = config?.input ? inputs[config.input] : undefined;
+  const selected = selectedValues && selectedValues.length > 0
+    ? selectedValues[selectedValues.length - 1]
+    : _firstInputValue(inputs);
+  const mapped: Record<string, unknown> = {};
+  if (config?.input_map) {
+    for (const [key, field] of Object.entries(config.input_map)) {
+      mapped[key] = _fieldValue(selected, field);
+    }
+  } else {
+    const value = _fieldValue(selected, config?.input_field);
+    if (value !== undefined) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("broker gateway selected input must be an object");
+      }
+      Object.assign(mapped, value as Record<string, unknown>);
+    }
+  }
+  if (config?.static_input) Object.assign(mapped, structuredClone(config.static_input));
+  return mapped;
+}
+
+function _startBrokerGateway(
+  run: ActiveRun,
+  node: DAGGraphNode,
+  dispatcher: DAGDispatcher,
+): boolean {
+  const key = `${run.runId}:${node.node_id}`;
+  if (inFlightBrokerGateways.has(key)) return false;
+  const config = node.gateway_config;
+  if (!config?.credential_ref || !config.broker || !config.action) {
+    throw new Error("broker gateway configuration is incomplete");
+  }
+  const input = _brokerGatewayInput(run, node);
+  const request: DagCredentialBrokerCallRequest = {
+    request_id: randomUUID(),
+    run_id: run.runId,
+    node_id: node.node_id,
+    session_id: `manager-broker-${node.node_id}-${randomUUID()}`,
+    credential_ref: config.credential_ref,
+    broker: config.broker,
+    action: config.action,
+    input,
+  };
+  startNode(run.dagRun, node.node_id);
+  inFlightBrokerGateways.add(key);
+  writeRunMetadata(run.runId, serializeRunMetadata(run));
+  emit("dag:gateway_executed", {
+    runId: run.runId,
+    nodeId: node.node_id,
+    gatewayType: node.node_type,
+    phase: "started",
+    broker: config.broker,
+    action: config.action,
+  });
+  void import("./credential-broker.js")
+    .then(({ executeManagerCredentialBrokerCall }) => executeManagerCredentialBrokerCall(request))
+    .then((result) => {
+      const current = getActiveRun(run.runId);
+      if (!current || current.status !== "active" || current.dagRun.nodeStates.get(node.node_id) !== "RUNNING") return;
+      const port = result.ok ? config.result_port || "result" : config.error_port || "error";
+      const payload = result.ok ? result.result : { ok: false, error: result.error };
+      handoffActiveRun(run.runId, node.node_id, port, payload);
+      emit("dag:gateway_executed", {
+        runId: run.runId,
+        nodeId: node.node_id,
+        gatewayType: node.node_type,
+        phase: "completed",
+        port,
+      });
+      dispatchReadyNodesUntilStable(run.runId, dispatcher);
+    })
+    .catch((error) => {
+      const current = getActiveRun(run.runId);
+      if (!current || current.status !== "active" || current.dagRun.nodeStates.get(node.node_id) !== "RUNNING") return;
+      failActiveRun(
+        run.runId,
+        node.node_id,
+        `broker gateway execution failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    })
+    .finally(() => {
+      inFlightBrokerGateways.delete(key);
+    });
+  return true;
 }
 
 function _roundResetNodeIds(
@@ -3794,13 +4610,30 @@ function _terminateLoopSource(run: ActiveRun, nodeId: string): void {
   run.dagRun.loopSources.delete(nodeId);
 }
 
+function _unwrapSingleJoinValue(input: unknown): unknown {
+  const structured = _structuredGatewayValue(input);
+  if (!structured || typeof structured !== "object" || Array.isArray(structured)) return structured;
+  const envelope = structured as Record<string, unknown>;
+  if (
+    !Array.isArray(envelope.values)
+    || envelope.values.length !== 1
+    || envelope.total !== 1
+    || typeof envelope.passed !== "boolean"
+    || (envelope.mode !== "all" && envelope.mode !== "any" && envelope.mode !== "n_of_m")
+  ) return structured;
+  return envelope.values[0];
+}
+
 function _whileGatewayResult(
   run: ActiveRun,
   node: DAGGraphNode,
   input: unknown,
 ): { port: string; payload: Record<string, unknown> } {
   const config = node.gateway_config;
-  const selected = _fieldValue(input, config?.field);
+  const normalizedInput = config?.unwrap_single_join_value === true
+    ? _unwrapSingleJoinValue(input)
+    : input;
+  const selected = _fieldValue(normalizedInput, config?.field);
   const matched = _gatewayComparison(selected, config?.operator, config?.value);
   const iteration = run.counters.gateway_iterations[node.node_id] ?? 0;
   const maxIterations = Math.max(1, Math.floor(config?.max_iterations ?? 3));
@@ -3808,20 +4641,20 @@ function _whileGatewayResult(
     _terminateLoopSource(run, node.node_id);
     return {
       port: config?.done_port || "done",
-      payload: { input, iteration, max_iterations: maxIterations, matched: true },
+      payload: { input: normalizedInput, iteration, max_iterations: maxIterations, matched: true },
     };
   }
   if (iteration >= maxIterations) {
     _terminateLoopSource(run, node.node_id);
     return {
       port: config?.exhausted_port || "exhausted",
-      payload: { input, iteration, max_iterations: maxIterations, matched: false, exhausted: true },
+      payload: { input: normalizedInput, iteration, max_iterations: maxIterations, matched: false, exhausted: true },
     };
   }
   run.counters.gateway_iterations[node.node_id] = iteration + 1;
   return {
     port: config?.continue_port || "continue",
-    payload: { input, iteration: iteration + 1, max_iterations: maxIterations, matched: false },
+    payload: { input: normalizedInput, iteration: iteration + 1, max_iterations: maxIterations, matched: false },
   };
 }
 
@@ -3836,6 +4669,17 @@ const RUN_INPUT_ARGUMENT_PREFIX = "$run_input/";
 function _pathIsWithin(root: string, target: string): boolean {
   const relative = path.relative(root, target);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function _pathsReferToSameLocation(left: string, right: string): boolean {
+  if (path.relative(left, right) === "" && path.relative(right, left) === "") return true;
+  try {
+    const leftStat = statSync(left, { bigint: true });
+    const rightStat = statSync(right, { bigint: true });
+    return leftStat.ino !== 0n && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+  } catch {
+    return false;
+  }
 }
 
 function _commandGatewayCwd(
@@ -4261,6 +5105,12 @@ function _fanoutChildWorkspacePath(node: DAGGraphNode, state: FanoutRuntimeState
   return `${root}/${node.node_id}/inv_${String(state.invocation).padStart(4, "0")}/item_${String(index + 1).padStart(4, "0")}`;
 }
 
+function _fanoutRepositoryPath(node: DAGGraphNode): string {
+  return node.gateway_config?.repository_path === "."
+    ? "."
+    : _fanoutSafeRelativePath(node.gateway_config?.repository_path, "repo");
+}
+
 function _fanoutWorkerRuntime(
   node: DAGGraphNode,
   state: FanoutRuntimeState,
@@ -4287,6 +5137,7 @@ function _fanoutWorkerRuntime(
   const access = rawAccess && typeof rawAccess === "object" && !Array.isArray(rawAccess)
     ? structuredClone(rawAccess as Record<string, unknown>)
     : {};
+  const managerReadOnlyPaths = ["input"];
   if (workspacePath) {
     const declaredWritablePaths = Array.isArray(access.writable_paths)
       ? access.writable_paths.filter((entry): entry is string => typeof entry === "string")
@@ -4295,18 +5146,134 @@ function _fanoutWorkerRuntime(
       throw new Error("isolated git worktree fanout must explicitly declare {{fanout_workspace}} as its writable path");
     }
     access.writable_paths = [workspacePath];
+    // Every isolated fan-out child snapshots the shared run workspace. Sibling
+    // worktrees may legitimately change while this child is running, so exclude
+    // only those Manager-derived paths from mutation ownership accounting. This
+    // runtime-only field is deliberately not accepted by WorkflowSpec v1.
+    access.snapshot_exclude_paths = state.items
+      .map((_item, siblingIndex) => siblingIndex === index
+        ? undefined
+        : _fanoutChildWorkspacePath(node, state, siblingIndex))
+      .filter((entry): entry is string => typeof entry === "string");
+    const repositoryPath = _fanoutRepositoryPath(node);
+    // The primary checkout is Manager-owned and shares its common Git object
+    // store with every linked worktree. Marking it read-only also causes the
+    // Worker snapshotter to ignore only that checkout's root `.git` directory,
+    // so a sibling's Manager-owned commit cannot look like a worker mutation.
+    // Nested `.git` directories created inside this child's writable worktree
+    // remain visible to the snapshot policy.
+    if (repositoryPath !== ".") managerReadOnlyPaths.push(repositoryPath);
   } else {
     access.writable_paths = Array.isArray(access.writable_paths) ? access.writable_paths.map(replacePath) : [];
   }
   access.readonly_paths = Array.from(new Set([
-    "input",
+    ...managerReadOnlyPaths,
     ...(Array.isArray(access.readonly_paths) ? access.readonly_paths.map(replacePath).filter((entry): entry is string => typeof entry === "string") : []),
   ])).sort();
   policy.workspace_access = access;
-  policy.allowed_builtin_tools = Array.isArray(policy.allowed_builtin_tools) ? policy.allowed_builtin_tools : [];
+  if (policy.builtin_tool_policy === "backend_native") {
+    if (policy.allowed_builtin_tools !== undefined) {
+      throw new Error("fanout builtin_tool_policy is mutually exclusive with allowed_builtin_tools");
+    }
+  } else {
+    policy.allowed_builtin_tools = Array.isArray(policy.allowed_builtin_tools) ? policy.allowed_builtin_tools : [];
+  }
   policy.allowed_dag_tools = Array.isArray(policy.allowed_dag_tools) ? policy.allowed_dag_tools : ["handoff"];
   policy.credentials = Array.isArray(policy.credentials) ? policy.credentials : [];
   return policy;
+}
+
+function _portableGitMetadataPath(from: string, to: string): string {
+  const relative = path.relative(from, to);
+  if (!relative || path.isAbsolute(relative) || /[\r\n\0]/u.test(relative)) {
+    throw new Error("fanout git worktree metadata path is not portable");
+  }
+  return relative.split(path.sep).join("/");
+}
+
+function _findWorktreeAdminDirectory(worktreesRoot: string, target: string): string | undefined {
+  for (const entry of readdirSync(worktreesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(worktreesRoot, entry.name);
+    if (_pathsReferToSameLocation(candidate, target)) return candidate;
+  }
+  return undefined;
+}
+
+function _replaceExistingFileContents(target: string, content: string): void {
+  // Git for Windows marks the linked worktree `.git` pointer hidden. Opening a
+  // hidden file with CREATE_ALWAYS (Node's default `writeFileSync(path, ...)`
+  // behaviour) fails with EPERM even after its read-only bit is cleared. Open
+  // the already-validated file in place, then truncate and rewrite it through
+  // the same handle so its Windows attributes are preserved.
+  const fd = openSync(target, "r+");
+  try {
+    ftruncateSync(fd, 0);
+    writeFileSync(fd, content, { encoding: "utf8" });
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function _makeFanoutGitWorktreeRelocatable(repository: string, target: string): void {
+  const worktreeGitFile = path.join(target, ".git");
+  const match = /^gitdir:\s*(.+?)\s*$/u.exec(readFileSync(worktreeGitFile, "utf8"));
+  if (!match?.[1]) throw new Error("fanout git worktree metadata is malformed");
+
+  // Git for Windows can expand an 8.3 path (for example RUNNER~1) while
+  // Node's portable realpath keeps the caller's spelling. Resolve every side
+  // through the native filesystem identity before enforcing containment and
+  // the bidirectional linked-worktree binding.
+  const commonGitDir = realpathSync.native(path.join(repository, ".git"));
+  const portableWorktreesRoot = path.join(repository, ".git", "worktrees");
+  const worktreesRoot = realpathSync.native(portableWorktreesRoot);
+  const referencedAdminGitDir = path.resolve(target, match[1]);
+  const adminGitDir = realpathSync.native(referencedAdminGitDir);
+  if (!_pathsReferToSameLocation(worktreesRoot, realpathSync.native(path.join(commonGitDir, "worktrees")))) {
+    throw new Error("fanout git worktree metadata root is not bound to the declared repository");
+  }
+
+  // Enumerate the repository's own worktree entries instead of rebuilding a
+  // path from Git's host-specific spelling. Git for Windows may write an 8.3
+  // alias into the worktree pointer; readdir returns the actual directory name
+  // under HomeRail's run-workspace spelling. Finding the same filesystem object
+  // also proves that the referenced admin directory is a direct child of this
+  // repository's worktree metadata root.
+  const portableAdminGitDir = _findWorktreeAdminDirectory(portableWorktreesRoot, adminGitDir);
+  if (!portableAdminGitDir) {
+    throw new Error("fanout git worktree metadata escaped the repository or is not bound to it");
+  }
+
+  const adminBackPointer = path.join(portableAdminGitDir, "gitdir");
+  const backPointerValue = readFileSync(adminBackPointer, "utf8").trim();
+  const backPointer = path.resolve(portableAdminGitDir, backPointerValue);
+  // On Windows, realpathSync.native() can return EPERM when the target is the
+  // linked worktree's ordinary `.git` pointer file. Compare the paths directly
+  // and fall back to their stat identity instead; this still requires both
+  // sides of the Git link to reference the exact same filesystem object.
+  if (!_pathsReferToSameLocation(backPointer, worktreeGitFile)) {
+    throw new Error("fanout git worktree metadata is not bidirectionally bound");
+  }
+
+  // Linked-worktree metadata generated by Git contains absolute host paths.
+  // Workers see the whole run workspace mounted at /workspace, so those paths
+  // are invalid in the container. Relative pointers preserve the binding in
+  // both namespaces and if the retained run workspace is moved as a unit.
+  // Git for Windows marks linked-worktree pointer files read-only. Clear that
+  // attribute only after validating both ends of the binding. Rewrite the
+  // existing files in place because Windows also marks the `.git` pointer hidden.
+  chmodSync(worktreeGitFile, 0o600);
+  chmodSync(adminBackPointer, 0o600);
+  _replaceExistingFileContents(worktreeGitFile, `gitdir: ${_portableGitMetadataPath(target, portableAdminGitDir)}\n`);
+  _replaceExistingFileContents(adminBackPointer, `${_portableGitMetadataPath(portableAdminGitDir, worktreeGitFile)}\n`);
+
+  const verified = spawnManagerGitSync(target, ["rev-parse", "--is-inside-work-tree"], {
+    timeout: 10_000,
+  });
+  if (verified.status !== 0 || verified.error || String(verified.stdout).trim() !== "true") {
+    const detail = String(verified.stderr || verified.error?.message || "unknown error").trim().slice(0, 1_000);
+    throw new Error(`fanout git worktree portable metadata verification failed: ${detail}`);
+  }
 }
 
 function _prepareFanoutGitWorktree(
@@ -4320,21 +5287,20 @@ function _prepareFanoutGitWorktree(
   const resolved = _commandGatewayCwd(run, RUN_WORKSPACE_CWD);
   if ("error" in resolved) throw new Error(resolved.error);
   const runWorkspace = resolved.cwd;
-  const repositoryPath = node.gateway_config?.repository_path === "."
-    ? "."
-    : _fanoutSafeRelativePath(node.gateway_config?.repository_path, "repo");
+  const repositoryPath = _fanoutRepositoryPath(node);
   const repository = path.resolve(runWorkspace, repositoryPath);
   const target = path.resolve(runWorkspace, workspacePath);
   if (!_pathIsWithin(runWorkspace, repository) || !_pathIsWithin(runWorkspace, target)) {
     throw new Error("fanout git worktree path escaped the run workspace");
   }
   mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  const existing = spawnSync("git", ["-C", target, "rev-parse", "--is-inside-work-tree"], {
-    encoding: "utf8",
+  const existing = spawnManagerGitSync(target, ["rev-parse", "--is-inside-work-tree"], {
     timeout: 10_000,
-    shell: false,
   });
-  if (existing.status === 0 && String(existing.stdout).trim() === "true") return workspacePath;
+  if (existing.status === 0 && String(existing.stdout).trim() === "true") {
+    _makeFanoutGitWorktreeRelocatable(repository, target);
+    return workspacePath;
+  }
   const selectedRevision = node.gateway_config?.revision_field
     ? _fieldValue(state.context, node.gateway_config.revision_field)
     : undefined;
@@ -4342,17 +5308,13 @@ function _prepareFanoutGitWorktree(
     ? selectedRevision.toLowerCase()
     : "HEAD";
   if (revision !== "HEAD") {
-    const local = spawnSync("git", ["-C", repository, "cat-file", "-e", `${revision}^{commit}`], {
-      encoding: "utf8",
+    const local = spawnManagerGitSync(repository, ["cat-file", "-e", `${revision}^{commit}`], {
       timeout: 10_000,
-      shell: false,
     });
     if (local.status !== 0) {
-      const fetched = spawnSync("git", ["-C", repository, "fetch", "--no-tags", "origin", revision], {
-        encoding: "utf8",
+      const fetched = spawnManagerGitSync(repository, ["fetch", "--no-tags", "origin", revision], {
         timeout: 60_000,
         maxBuffer: 256_000,
-        shell: false,
       });
       if (fetched.status !== 0 || fetched.error) {
         const detail = String(fetched.stderr || fetched.error?.message || "unknown error").trim().slice(0, 1_000);
@@ -4360,16 +5322,15 @@ function _prepareFanoutGitWorktree(
       }
     }
   }
-  const created = spawnSync("git", ["-C", repository, "worktree", "add", "--detach", target, revision], {
-    encoding: "utf8",
+  const created = spawnManagerGitSync(repository, ["worktree", "add", "--detach", target, revision], {
     timeout: 60_000,
     maxBuffer: 256_000,
-    shell: false,
   });
   if (created.status !== 0 || created.error) {
     const detail = String(created.stderr || created.error?.message || "unknown error").trim().slice(0, 1_000);
     throw new Error(`fanout git worktree creation failed: ${detail}`);
   }
+  _makeFanoutGitWorktreeRelocatable(repository, target);
   return workspacePath;
 }
 
@@ -4400,6 +5361,12 @@ function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutR
           workflow_spec_v1: {
             input_contracts: {},
             output_contracts: { result: config.result_contract },
+            ...(Array.isArray(config.result_required_broker_actions) ? {
+              output_broker_requirements: { result: config.result_required_broker_actions },
+            } : {}),
+            ...(Array.isArray(config.result_required_workspace_files) ? {
+              output_workspace_file_requirements: { result: config.result_required_workspace_files },
+            } : {}),
           },
         } : {}),
       },
@@ -4420,6 +5387,18 @@ function _spawnFanoutChildren(run: ActiveRun, node: DAGGraphNode, state: FanoutR
 
 function _startFanout(run: ActiveRun, node: DAGGraphNode): boolean {
   const config = node.gateway_config;
+  const resultEvidenceConfigured = (
+    (Array.isArray(config?.result_required_broker_actions) && config.result_required_broker_actions.length > 0)
+    || (Array.isArray(config?.result_required_workspace_files) && config.result_required_workspace_files.length > 0)
+  );
+  if (resultEvidenceConfigured && !config?.result_contract) {
+    abortActiveRun(
+      run.runId,
+      "DAG_FANOUT_RESULT_CONTRACT_REQUIRED fanout result evidence requirements require result_contract",
+      node.node_id,
+    );
+    return false;
+  }
   const inputs = _nodeInputs(run.dagRun, node.node_id);
   const raw = inputs[config?.input || "items"]?.at(-1) ?? _firstInputValue(inputs);
   const selected = _fieldValue(raw, config?.item_field);
@@ -4470,28 +5449,29 @@ function _interruptDynamicNode(run: ActiveRun, nodeId: string): void {
   }
 }
 
-function _assertFanoutGitCommitResult(
+interface FanoutGitResultContext {
+  workspace: string;
+  git: (args: string[], timeout?: number) => ReturnType<typeof spawnSync>;
+}
+
+function _fanoutGitResultContext(
   run: ActiveRun,
   parent: DAGGraphNode,
   state: FanoutRuntimeState,
   index: number,
   content: unknown,
-): void {
+): FanoutGitResultContext {
   const validation = parent.gateway_config?.result_git_commit;
-  if (!validation) return;
+  if (!validation) throw new Error("DAG_FANOUT_GIT_RESULT_INVALID result_git_commit is not configured");
   if (parent.gateway_config?.workspace_strategy !== "isolated_git_worktree") {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID result_git_commit requires isolated_git_worktree");
   }
-  const commitSha = _fieldValue(content, validation.commit_field);
   const reportedWorkspace = _fieldValue(content, validation.workspace_field);
   const expectedWorkspace = _fanoutChildWorkspacePath(parent, state, index);
   if (reportedWorkspace !== expectedWorkspace) {
     throw new Error(
       `DAG_FANOUT_GIT_RESULT_INVALID workspace '${String(reportedWorkspace ?? "")}' does not match '${expectedWorkspace}'`,
     );
-  }
-  if (typeof commitSha !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
-    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID commit SHA is missing or malformed");
   }
   const resolved = _commandGatewayCwd(run, RUN_WORKSPACE_CWD);
   if ("error" in resolved) throw new Error(`DAG_FANOUT_GIT_RESULT_INVALID ${resolved.error}`);
@@ -4504,11 +5484,9 @@ function _assertFanoutGitCommitResult(
     ? "."
     : _fanoutSafeRelativePath(parent.gateway_config?.repository_path, "repo");
   const repository = path.resolve(runWorkspace, repositoryPath);
-  const git = (args: string[], timeout = 10_000) => spawnSync("git", ["-C", workspace, ...args], {
-    encoding: "utf8",
+  const git = (args: string[], timeout = 10_000) => spawnManagerGitSync(workspace, args, {
     timeout,
     maxBuffer: 256_000,
-    shell: false,
   });
   const topLevel = git(["rev-parse", "--show-toplevel"]);
   const commonDir = git(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
@@ -4516,23 +5494,45 @@ function _assertFanoutGitCommitResult(
   let resolvedTopLevel: string;
   let resolvedCommonDir: string;
   let resolvedGitDir: string;
+  let expectedTopLevel: string;
   let expectedCommonDir: string;
   try {
-    resolvedTopLevel = realpathSync(String(topLevel.stdout).trim());
-    resolvedCommonDir = realpathSync(String(commonDir.stdout).trim());
-    resolvedGitDir = realpathSync(String(gitDir.stdout).trim());
-    expectedCommonDir = realpathSync(path.join(repository, ".git"));
+    // Git for Windows can expand an 8.3 path (for example RUNNER~1) while
+    // Node's portable realpath keeps the caller's spelling. Native realpath
+    // gives both sides one OS-resolved identity before the security checks.
+    resolvedTopLevel = realpathSync.native(String(topLevel.stdout).trim());
+    resolvedCommonDir = realpathSync.native(String(commonDir.stdout).trim());
+    resolvedGitDir = realpathSync.native(String(gitDir.stdout).trim());
+    expectedTopLevel = realpathSync.native(workspace);
+    expectedCommonDir = realpathSync.native(path.join(repository, ".git"));
   } catch {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree Git metadata could not be resolved");
   }
   if (
     topLevel.status !== 0 || commonDir.status !== 0 || gitDir.status !== 0
-    || resolvedTopLevel !== realpathSync(workspace)
-    || resolvedCommonDir !== expectedCommonDir
+    || !_pathsReferToSameLocation(resolvedTopLevel, expectedTopLevel)
+    || !_pathsReferToSameLocation(resolvedCommonDir, expectedCommonDir)
     || !_pathIsWithin(path.join(expectedCommonDir, "worktrees"), resolvedGitDir)
   ) {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID isolated worktree Git binding is invalid");
   }
+  return { workspace, git };
+}
+
+function _assertFanoutGitCommitResult(
+  run: ActiveRun,
+  parent: DAGGraphNode,
+  state: FanoutRuntimeState,
+  index: number,
+  content: unknown,
+): void {
+  const validation = parent.gateway_config?.result_git_commit;
+  if (!validation) return;
+  const commitSha = _fieldValue(content, validation.commit_field);
+  if (typeof commitSha !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID commit SHA is missing or malformed");
+  }
+  const { git } = _fanoutGitResultContext(run, parent, state, index, content);
   const exists = git(["cat-file", "-e", `${commitSha.toLowerCase()}^{commit}`]);
   if (exists.status !== 0 || exists.error) {
     throw new Error("DAG_FANOUT_GIT_RESULT_INVALID commit does not exist in the isolated worktree");
@@ -4549,6 +5549,89 @@ function _assertFanoutGitCommitResult(
   }
 }
 
+function _fanoutChildSucceeded(parent: DAGGraphNode, port: string, content: unknown): boolean {
+  const config = parent.gateway_config;
+  const selected = _fieldValue(content, config?.success_field);
+  const successValues = config?.success_values ?? [true, "pass", "passed", "success", "approved", "yes", "act"];
+  return port !== "failed" && (!config?.success_field || successValues.some((value) => value === selected));
+}
+
+function _materializeManagerOwnedFanoutCommit(
+  run: ActiveRun,
+  child: DAGGraphNode,
+  port: string,
+  content: unknown,
+): unknown {
+  const dynamic = child.extra?.dynamic_fanout;
+  if (!dynamic || typeof dynamic !== "object" || Array.isArray(dynamic)) return content;
+  const info = dynamic as Record<string, unknown>;
+  const parentId = typeof info.parent_node === "string" ? info.parent_node : "";
+  const index = typeof info.index === "number" ? info.index : -1;
+  const invocation = typeof info.invocation === "number" ? info.invocation : 1;
+  const parent = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === parentId);
+  const state = parent ? _fanoutState(parent) : undefined;
+  const validation = parent?.gateway_config?.result_git_commit;
+  if (
+    !parent || !state || invocation !== state.invocation || index < 0
+    || validation?.commit_mode !== "manager"
+    || !_fanoutChildSucceeded(parent, port, content)
+  ) {
+    return content;
+  }
+  if (!content || typeof content !== "object" || Array.isArray(content)) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID manager-owned commit requires an object result");
+  }
+
+  const enriched = structuredClone(content as Record<string, unknown>);
+  const { git } = _fanoutGitResultContext(run, parent, state, index, enriched);
+  const message = `homerail fanout ${parent.node_id}/${child.node_id}`;
+  const status = git(["status", "--porcelain"]);
+  if (status.status !== 0 || status.error) {
+    throw new Error(`DAG_FANOUT_GIT_RESULT_INVALID unable to inspect manager-owned changes: ${String(status.stderr || status.error?.message || "unknown error").trim().slice(0, 1_000)}`);
+  }
+  if (String(status.stdout).trim()) {
+    const added = git(["add", "--all", "--", "."]);
+    if (added.status !== 0 || added.error) {
+      throw new Error(`DAG_FANOUT_GIT_RESULT_INVALID Manager could not stage worker changes: ${String(added.stderr || added.error?.message || "unknown error").trim().slice(0, 1_000)}`);
+    }
+    const staged = git(["diff", "--cached", "--quiet"]);
+    if (staged.status !== 1 || staged.error) {
+      throw new Error("DAG_FANOUT_GIT_RESULT_INVALID worker produced no committable changes");
+    }
+    const committed = git([
+      "-c", "user.name=HomeRail Manager",
+      "-c", "user.email=homerail-manager@localhost",
+      "-c", "commit.gpgsign=false",
+      "commit", "--no-gpg-sign", "-m", message,
+    ], 60_000);
+    if (committed.status !== 0 || committed.error) {
+      throw new Error(`DAG_FANOUT_GIT_RESULT_INVALID Manager could not commit worker changes: ${String(committed.stderr || committed.error?.message || "unknown error").trim().slice(0, 1_000)}`);
+    }
+  } else {
+    const subject = git(["log", "-1", "--format=%s"]);
+    if (subject.status !== 0 || subject.error || String(subject.stdout).trim() !== message) {
+      throw new Error("DAG_FANOUT_GIT_RESULT_INVALID worker produced no changes for Manager to commit");
+    }
+  }
+
+  const head = git(["rev-parse", "HEAD"]);
+  const commitSha = String(head.stdout).trim().toLowerCase();
+  if (head.status !== 0 || head.error || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
+    throw new Error("DAG_FANOUT_GIT_RESULT_INVALID Manager commit did not produce a valid HEAD");
+  }
+  enriched[validation.commit_field] = commitSha;
+  _assertFanoutGitCommitResult(run, parent, state, index, enriched);
+  emit("dag:fanout_git_commit_created", {
+    runId: run.runId,
+    nodeId: child.node_id,
+    parentNodeId: parent.node_id,
+    index,
+    commitSha,
+    owner: "manager",
+  });
+  return enriched;
+}
+
 function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, content: unknown): void {
   const dynamic = child.extra?.dynamic_fanout;
   if (!dynamic || typeof dynamic !== "object" || Array.isArray(dynamic)) return;
@@ -4561,9 +5644,7 @@ function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, c
   if (!parent || !state || invocation !== state.invocation || index < 0 || state.results.some((result) => result.node_id === child.node_id)) return;
   state.active = state.active.filter((id) => id !== child.node_id);
   const config = parent.gateway_config;
-  const selected = _fieldValue(content, config?.success_field);
-  const successValues = config?.success_values ?? [true, "pass", "passed", "success", "approved", "yes", "act"];
-  const success = port !== "failed" && (!config?.success_field || successValues.some((value) => value === selected));
+  const success = _fanoutChildSucceeded(parent, port, content);
   if (success) _assertFanoutGitCommitResult(run, parent, state, index, content);
   state.results.push({ index, node_id: child.node_id, port, content, success });
   state.results.sort((left, right) => left.index - right.index);
@@ -4602,7 +5683,12 @@ function _recordFanoutChild(run: ActiveRun, child: DAGGraphNode, port: string, c
   handoffActiveRun(run.runId, parentId, passed ? config?.result_port || "done" : config?.failed_port || "failed", payload);
 }
 
-function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode): boolean {
+function _executeGatewayNode(
+  runId: string,
+  run: ActiveRun,
+  node: DAGGraphNode,
+  dispatcher: DAGDispatcher,
+): boolean {
   if (node.node_type === "await_command_gateway") {
     if (!_startAwaitCommand(run, node)) return false;
     emit("dag:gateway_executed", {
@@ -4626,6 +5712,10 @@ function _executeGatewayNode(runId: string, run: ActiveRun, node: DAGGraphNode):
   if (node.node_type === "command_gateway") {
     const result = _commandGatewayResult(run, node);
     return Boolean(handoffActiveRun(runId, node.node_id, result.port, result.payload));
+  }
+
+  if (node.node_type === "broker_gateway") {
+    return _startBrokerGateway(run, node, dispatcher);
   }
 
   if (node.node_type === "state_gateway") {
@@ -4846,10 +5936,15 @@ function _workspaceAccess(node: DAGGraphNode): DagWorkspaceAccess | undefined {
   const readonly = Array.isArray(value.readonly_paths)
     ? value.readonly_paths.filter((entry): entry is string => typeof entry === "string")
     : undefined;
+  const snapshotExclude = Array.isArray(value.snapshot_exclude_paths)
+    ? value.snapshot_exclude_paths.filter((entry): entry is string => typeof entry === "string")
+    : undefined;
   return {
     writable_paths: writable,
     ...(readonly ? { readonly_paths: readonly } : {}),
+    ...(value.git_metadata_read_only === true ? { git_metadata_read_only: true } : {}),
     ...(typeof value.max_snapshot_files === "number" ? { max_snapshot_files: value.max_snapshot_files } : {}),
+    ...(snapshotExclude ? { snapshot_exclude_paths: snapshotExclude } : {}),
   };
 }
 
@@ -4860,6 +5955,13 @@ function _allowedBuiltinTools(node: DAGGraphNode): AgentBuiltinToolName[] | unde
   return raw.filter((entry): entry is AgentBuiltinToolName => (
     typeof entry === "string" && allowed.has(entry)
   ));
+}
+
+function _builtinToolPolicy(node: DAGGraphNode): AgentBuiltinToolPolicy | undefined {
+  const raw = _agentRuntimeConfig(node).builtin_tool_policy;
+  if (raw === undefined) return undefined;
+  if (raw !== "backend_native") throw new Error(`unsupported builtin_tool_policy '${String(raw)}'`);
+  return raw;
 }
 
 function _maxBuiltinToolCalls(run: ActiveRun, node: DAGGraphNode): number | undefined {
@@ -4874,6 +5976,15 @@ function _maxBuiltinToolCalls(run: ActiveRun, node: DAGGraphNode): number | unde
     return Math.min(nodeLimit, workflowLimit);
   }
   return nodeLimit ?? workflowLimit;
+}
+
+function _codexSandbox(node: DAGGraphNode): "read-only" | "workspace-write" | "danger-full-access" | undefined {
+  const raw = _agentRuntimeConfig(node).codex_sandbox;
+  if (raw === undefined) return undefined;
+  if (raw !== "read-only" && raw !== "workspace-write" && raw !== "danger-full-access") {
+    throw new Error(`unsupported codex_sandbox '${String(raw)}'`);
+  }
+  return raw;
 }
 
 function _allowedDagTools(node: DAGGraphNode): DagAgentToolName[] | undefined {
@@ -5102,6 +6213,14 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
   const outgoingEdges = run.dagRun.graph.edges.filter(
     (e) => e.from_node === nodeId && e.label !== "after_dep",
   );
+  const outputContracts = Object.fromEntries(Array.from(new Set(
+    outgoingEdges.map((edge) => edge.from_port),
+  )).sort().flatMap((port) => {
+    const outputContract = _outputContract(run, nodeId, port);
+    return outputContract?.schema === undefined
+      ? []
+      : [[port, { contract: outputContract.contract, schema: outputContract.schema }] as const];
+  }));
 
   return {
     ok: true,
@@ -5114,6 +6233,7 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
       ...(skillContext ? { skillContext } : {}),
       inputs: dispatchInputs,
       outgoingEdges,
+      ...(Object.keys(outputContracts).length > 0 ? { outputContracts } : {}),
       checkpointResume: nodeSession.resumeInstruction
         ? {
             parentSessionId: nodeSession.parentSessionId,
@@ -5131,8 +6251,10 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
       requiredCapabilities: _requiredDispatchCapabilities(run, node),
       advisors: advisorResolution.advisors,
       workspaceAccess: _workspaceAccess(node),
+      builtinToolPolicy: _builtinToolPolicy(node),
       allowedBuiltinTools: _allowedBuiltinTools(node),
       maxBuiltinToolCalls: _maxBuiltinToolCalls(run, node),
+      codexSandbox: _codexSandbox(node),
       allowedDagTools: _allowedDagTools(node),
       ...(effectiveCredentialProjections.length > 0
         ? { credentialProjections: effectiveCredentialProjections }
@@ -5193,7 +6315,7 @@ export function dispatchReadyNodes(
     if (!node) continue;
     if (_isGatewayNode(node)) {
       try {
-        if (_executeGatewayNode(runId, run, node)) count++;
+        if (_executeGatewayNode(runId, run, node, dispatcher)) count++;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         failActiveRun(runId, nodeId, `gateway execution failed: ${message}`);
@@ -5260,6 +6382,30 @@ export function dispatchReadyNodes(
     _emitNodeStateChanges(run, before);
   }
   return count;
+}
+
+/**
+ * Advance every synchronously reachable READY node, stopping once execution
+ * is waiting on an agent, an asynchronous gateway, or external capacity.
+ *
+ * Broker gateways complete outside GraphExecutor.tick(). Their callback must
+ * therefore drain condition/join/while chains itself; otherwise a newly READY
+ * deterministic gateway has no subsequent event that can wake it.
+ */
+export function dispatchReadyNodesUntilStable(
+  runId: string,
+  dispatcher: DAGDispatcher,
+): number {
+  const run = store.get(runId);
+  if (!run || run.status !== "active") return 0;
+  const maxPasses = Math.max(1, run.dagRun.graph.nodes.length * 2);
+  let total = 0;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const advanced = dispatchReadyNodes(runId, dispatcher);
+    total += advanced;
+    if (advanced === 0) break;
+  }
+  return total;
 }
 
 export function markNodeDispatched(

@@ -116,6 +116,97 @@ nodes:
 `);
 }
 
+function dormantWhileDag() {
+  return parseDAGYaml(`
+name: cold-recovery-dormant-while
+workflow_id: cold-recovery-dormant-while
+workspace:
+  project_id: project-a
+agents:
+  worker:
+    agent_type: deterministic
+nodes:
+  gate:
+    type: while_gateway
+    gateway_config:
+      field: status
+      operator: eq
+      value: approved
+      max_iterations: 2
+      continue_port: improve
+      done_port: reached
+      exhausted_port: stopped
+    outputs:
+      improve:
+        to: worker.in:task
+      reached:
+        to: success.in:result
+      stopped:
+        to: exhausted.in:result
+  worker:
+    agent: worker
+    after: [gate]
+    outputs:
+      measured:
+        to: gate.in:state
+        retry_policy: { max_retries: 2 }
+  success:
+    agent: worker
+    after: [gate]
+    outputs: { done: { to: "" } }
+  exhausted:
+    agent: worker
+    after: [gate]
+    outputs: { done: { to: "" } }
+`);
+}
+
+function recoverableWhileDag() {
+  return parseDAGYaml(`
+name: cold-recovery-recoverable-while
+workflow_id: cold-recovery-recoverable-while
+workspace:
+  project_id: project-a
+agents:
+  worker:
+    agent_type: deterministic
+nodes:
+  gate:
+    type: while_gateway
+    gateway_config:
+      field: status
+      operator: eq
+      value: approved
+      max_iterations: 2
+      continue_port: improve
+      done_port: reached
+      exhausted_port: stopped
+    outputs:
+      improve: { to: worker.in:task }
+      reached: { to: success.in:result }
+      stopped: { to: exhausted.in:result }
+  worker:
+    agent: worker
+    after: [gate]
+    outputs:
+      measured: { to: gate.in:state, retry_policy: { max_retries: 2 } }
+      error: { to: recovery.in:error }
+  recovery:
+    agent: worker
+    after: [gate, worker]
+    outputs:
+      measured: { to: gate.in:state, retry_policy: { max_retries: 2 } }
+  success:
+    agent: worker
+    after: [gate]
+    outputs: { done: { to: "" } }
+  exhausted:
+    agent: worker
+    after: [gate]
+    outputs: { done: { to: "" } }
+`);
+}
+
 describe("manager cold recovery", () => {
   let tmpHome: string;
   let oldHome: string | undefined;
@@ -210,6 +301,76 @@ describe("manager cold recovery", () => {
     expect(run.dagRun.nodeStates.get("work")).toBe("FAILED");
     expect(getDagSessionIndex("run-running", "work")?.status).toBe("failed");
     expect(events.some((e) => e.nodeId === "work")).toBe(true);
+  });
+
+  it("preserves a dormant RUNNING while source that is waiting for feedback", () => {
+    createActiveRun("run-dormant-while", dormantWhileDag());
+    const dispatcher = new CaptureDispatcher();
+    expect(dispatchReadyNodes("run-dormant-while", dispatcher)).toBe(1);
+    expect(getActiveRun("run-dormant-while")?.dagRun.nodeStates.get("gate")).toBe("RUNNING");
+    expect(getActiveRun("run-dormant-while")?.dagRun.nodeStates.get("worker")).toBe("READY");
+
+    _clearActiveRuns();
+    const summary = recoverAllActiveRuns();
+
+    expect(summary.recovered).toContain("run-dormant-while");
+    expect(summary.failed).toEqual([]);
+    expect(getActiveRun("run-dormant-while")?.dagRun.nodeStates.get("gate")).toBe("RUNNING");
+    expect(getActiveRun("run-dormant-while")?.dagRun.nodeStates.get("worker")).toBe("READY");
+
+    expect(dispatchReadyNodes("run-dormant-while", dispatcher)).toBe(1);
+    handoffActiveRun("run-dormant-while", "worker", "measured", { status: "approved" });
+    expect(dispatchReadyNodes("run-dormant-while", dispatcher)).toBe(1);
+    expect(getActiveRun("run-dormant-while")?.dagRun.nodeStates.get("gate")).toBe("COMPLETED");
+    expect(getActiveRun("run-dormant-while")?.dagRun.nodeStates.get("success")).toBe("READY");
+  });
+
+  it("fails a dormant RUNNING while source when its in-flight feedback worker is lost", () => {
+    createActiveRun("run-orphaned-while-worker", dormantWhileDag());
+    const dispatcher = new CaptureDispatcher();
+    expect(dispatchReadyNodes("run-orphaned-while-worker", dispatcher)).toBe(1);
+    expect(dispatchReadyNodes("run-orphaned-while-worker", dispatcher)).toBe(1);
+    expect(getActiveRun("run-orphaned-while-worker")?.dagRun.nodeStates.get("gate")).toBe("RUNNING");
+    expect(getActiveRun("run-orphaned-while-worker")?.dagRun.nodeStates.get("worker")).toBe("RUNNING");
+
+    _clearActiveRuns();
+    const summary = recoverAllActiveRuns();
+
+    const run = getActiveRun("run-orphaned-while-worker")!;
+    expect(summary.failed).toEqual([expect.objectContaining({
+      runId: "run-orphaned-while-worker",
+      demotedNodes: expect.arrayContaining(["gate", "worker"]),
+    })]);
+    expect(run.status).toBe("failed");
+    expect(run.dagRun.nodeStates.get("gate")).toBe("FAILED");
+    expect(run.dagRun.nodeStates.get("worker")).toBe("FAILED");
+    expect(run.dagRun.nodeStates.get("success")).toBe("SKIPPED");
+    expect(run.dagRun.nodeStates.get("exhausted")).toBe("SKIPPED");
+    expect(loadRunMetadata("run-orphaned-while-worker")?.status).toBe("failed");
+  });
+
+  it("preserves a dormant while source when orphan failure wakes a live recovery path", () => {
+    createActiveRun("run-recoverable-while-worker", recoverableWhileDag());
+    const dispatcher = new CaptureDispatcher();
+    expect(dispatchReadyNodes("run-recoverable-while-worker", dispatcher)).toBe(1);
+    expect(dispatchReadyNodes("run-recoverable-while-worker", dispatcher)).toBe(1);
+
+    _clearActiveRuns();
+    const summary = recoverAllActiveRuns();
+
+    const run = getActiveRun("run-recoverable-while-worker")!;
+    expect(summary.recovered).toContain("run-recoverable-while-worker");
+    expect(summary.failed).toEqual([]);
+    expect(run.status).toBe("active");
+    expect(run.dagRun.nodeStates.get("gate")).toBe("RUNNING");
+    expect(run.dagRun.nodeStates.get("worker")).toBe("FAILED");
+    expect(run.dagRun.nodeStates.get("recovery")).toBe("READY");
+
+    expect(dispatchReadyNodes("run-recoverable-while-worker", dispatcher)).toBe(1);
+    handoffActiveRun("run-recoverable-while-worker", "recovery", "measured", { status: "approved" });
+    expect(dispatchReadyNodes("run-recoverable-while-worker", dispatcher)).toBe(1);
+    expect(run.dagRun.nodeStates.get("gate")).toBe("COMPLETED");
+    expect(run.dagRun.nodeStates.get("success")).toBe("READY");
   });
 
   it("fails recovery when orphan demotion leaves only blocked pending nodes", () => {

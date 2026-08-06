@@ -602,13 +602,27 @@ export class WsDispatchAdapter implements DAGDispatcher {
       `provisioned-${envelope.runId}-${envelope.nodeId}-${randomUUID()}`,
     );
     const agentBackend = normalizeAgentBackend(envelope.agentConfig.agent_type);
+    const codexNestedSandbox = agentBackend === "codex_appserver"
+      && envelope.builtinToolPolicy === "backend_native";
     const workspaceInputs = dagWorkspaceInputProjections(envelope.runId);
+    const writablePaths = Array.isArray(envelope.workspaceAccess?.writable_paths)
+      ? envelope.workspaceAccess.writable_paths
+      : undefined;
+    const workspaceWritableSubpath = writablePaths?.length === 1
+      && writablePaths[0] !== "."
+      ? writablePaths[0]
+      : undefined;
     const provisionerOpts: ProvisionerOptions = {
       ...this.provisionerOpts,
       image: envelope.image ?? this.provisionerOpts?.image,
       workspace: this.provisionerOpts?.workspace ?? envelope.workspace,
-      workspaceReadOnly: Array.isArray(envelope.workspaceAccess?.writable_paths) &&
-        envelope.workspaceAccess.writable_paths.length === 0,
+      workspaceReadOnly: writablePaths !== undefined
+        && (writablePaths.length === 0 || workspaceWritableSubpath !== undefined),
+      ...(workspaceWritableSubpath === undefined ? {} : { workspaceWritableSubpath }),
+      ...(workspaceWritableSubpath === undefined || envelope.workspaceAccess?.git_metadata_read_only !== true
+        ? {}
+        : { workspaceGitMetadataReadOnly: true }),
+      codexNestedSandbox,
       ...(workspaceInputs.length > 0 ? { workspaceInputs } : {}),
       env: {
         ...(this.provisionerOpts?.env ?? {}),
