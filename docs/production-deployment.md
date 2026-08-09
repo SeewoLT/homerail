@@ -97,6 +97,15 @@ the production Manager. The newest three releases and their Worker images are
 retained; database, model settings, sessions, certificates, and external Skills
 remain outside release directories.
 
+The revision-tagged Worker image honors the public build network contract:
+optional `HOMERAIL_WORKER_BUILD_APT_MIRROR`,
+`HOMERAIL_WORKER_BUILD_APT_SECURITY_MIRROR`, and
+`HOMERAIL_WORKER_BUILD_NPM_REGISTRY` values are validated before Docker
+starts and added as build arguments, while unset values keep the default
+Debian sources and npm registry. Standard proxy variables are forwarded to
+Docker by name only; their values never enter deployment argv or logs. See
+[Worker build network sources](worker-build-network.md).
+
 The workflow also has a maintainer-only manual dispatch for immediate recovery
 or an explicitly selected revision. Scheduled and default manual deployments
 resolve `main` at job start. The release switch never changes

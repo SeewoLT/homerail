@@ -14,6 +14,10 @@
 //   HOMERAIL_UI_HTTPS_CERT      PEM cert path (HTTPS only)
 //   HOMERAIL_MANAGER_HTTP       manager HTTP origin, e.g. http://localhost:19191
 //   HOMERAIL_MANAGER_WS         manager WS origin, e.g. ws://localhost:19191
+//   HOMERAIL_UI_PUBLIC_URL      explicit public UI URL (exact http(s) Origin) additionally
+//                               accepted for protected mutations when a reverse proxy
+//                               rewrites the Host header; unset keeps strict
+//                               request-derived same-origin behavior
 //   HOMERAIL_DAG_MUTATION_TOKEN internal token added to trusted same-origin mutations
 import http from "node:http";
 import https from "node:https";
@@ -24,6 +28,7 @@ import { URL } from "node:url";
 import {
   authorizeUiAdminProxyMutation,
   isProtectedApiMutation,
+  normalizeExactHttpOrigin,
 } from "./ui-admin-proxy.js";
 
 const ROOT = path.resolve(process.env.HOMERAIL_STATIC_UI_DIR || "");
@@ -34,6 +39,27 @@ const MANAGER_WS = process.env.HOMERAIL_MANAGER_WS || "ws://localhost:19191";
 const DAG_MUTATION_TOKEN = process.env.HOMERAIL_DAG_MUTATION_TOKEN?.trim();
 const USE_HTTPS = process.env.HOMERAIL_UI_HTTPS === "1";
 const BUILD_MANIFEST = "homerail-build.json";
+
+// Explicit operator-configured public Origin (shared name with the CLI's
+// --ui-public-url / HOMERAIL_UI_PUBLIC_URL). Validated with the same exact
+// HTTP(S) Origin rule the Manager admin allowlist uses; anything ambiguous
+// fails the startup instead of silently widening the mutation trust boundary.
+const CONFIGURED_PUBLIC_ORIGIN = resolveConfiguredPublicOrigin();
+
+function resolveConfiguredPublicOrigin(): string | undefined {
+  const configured = process.env.HOMERAIL_UI_PUBLIC_URL?.trim();
+  if (!configured) return undefined;
+  const normalized = normalizeExactHttpOrigin(configured);
+  if (!normalized) {
+    // eslint-disable-next-line no-console
+    console.error(
+      "static-ui-server fatal: HOMERAIL_UI_PUBLIC_URL must be an exact http(s) Origin " +
+      `without wildcard, path, query, fragment, or credentials: ${configured}`,
+    );
+    process.exit(1);
+  }
+  return normalized;
+}
 
 // WebSocket upgrade allowlist. Manager-published routes that the Agent UI must
 // reach same-origin are listed here; everything else is destroyed. Keep these in
@@ -182,7 +208,7 @@ function proxyHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
       host: req.headers.host,
       origin: req.headers.origin,
       secFetchSite: req.headers["sec-fetch-site"],
-    });
+    }, CONFIGURED_PUBLIC_ORIGIN);
     if (!authorization.allowed) {
       req.resume();
       res.writeHead(403, {

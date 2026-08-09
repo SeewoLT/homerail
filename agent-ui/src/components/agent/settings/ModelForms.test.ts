@@ -430,6 +430,14 @@ describe('model purpose forms', () => {
     expect(root.querySelector('input[placeholder="Responses URL"]')).toBeNull()
     expect(root.querySelector('input[placeholder="Anthropic URL"]')).toBeNull()
 
+    // A derived realtime candidate is only saved automatically after a
+    // verified WebSocket handshake (issue #193).
+    root.querySelector<HTMLButtonElement>('[data-testid="provider-test-voice-endpoints"]')!.click()
+    await nextTick()
+    await nextTick()
+    expect(root.querySelector('[data-testid="provider-endpoint-test-result"]')?.textContent)
+      .toContain('端点可用')
+
     const save = Array.from(root.querySelectorAll('button')).find(
       button => button.textContent?.trim() === '保存'
     )!
@@ -444,6 +452,263 @@ describe('model purpose forms', () => {
         voice_adapter: 'openai_audio',
         asr_async_url: 'http://192.168.100.10:5002/v1/audio/transcriptions',
         asr_realtime_url: 'ws://192.168.100.10:5002/v1/realtime'
+      })
+    )
+  })
+
+  it('persists a derived realtime URL verified through the explicit capability outcome', async () => {
+    vi.mocked(testVoiceEndpoints).mockResolvedValueOnce({
+      success: true,
+      data: {
+        ok: true,
+        results: [
+          {
+            id: 'asr_http',
+            kind: 'http',
+            url: 'http://192.168.100.10:5002/v1/audio/transcriptions',
+            ok: true,
+            reachable: true,
+            status_code: 200,
+            message: 'Endpoint is reachable'
+          },
+          {
+            id: 'asr_realtime',
+            kind: 'websocket',
+            url: 'ws://192.168.100.10:5002/v1/realtime',
+            ok: true,
+            reachable: true,
+            capability: 'verified',
+            message: 'WebSocket handshake succeeded'
+          }
+        ]
+      }
+    } as never)
+    const root = await mount(CustomProviderManager, {
+      providers: [asrProvider],
+      settings: [asrSetting]
+    })
+
+    root.querySelector<HTMLButtonElement>('[data-testid="provider-test-voice-endpoints"]')!.click()
+    await nextTick()
+    await nextTick()
+    Array.from(root.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === '保存')!
+      .click()
+    await nextTick()
+    await nextTick()
+
+    expect(agentSettingsApi.updateProvider).toHaveBeenCalledWith(
+      asrProvider.id,
+      expect.objectContaining({ asr_realtime_url: 'ws://192.168.100.10:5002/v1/realtime' })
+    )
+  })
+
+  it('does not persist the derived realtime WebSocket URL before it is verified', async () => {
+    const root = await mount(CustomProviderManager, {
+      providers: [asrProvider],
+      settings: [asrSetting]
+    })
+
+    Array.from(root.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === '保存')!
+      .click()
+    await nextTick()
+    await nextTick()
+
+    expect(agentSettingsApi.updateProvider).toHaveBeenCalledWith(
+      asrProvider.id,
+      expect.objectContaining({
+        asr_async_url: 'http://192.168.100.10:5002/v1/audio/transcriptions',
+        asr_realtime_url: ''
+      })
+    )
+  })
+
+  // Reporter's SenseVoice case (issue #193): batch transcription works but
+  // the derived realtime candidate answers 401 before any WebSocket
+  // upgrade. The settings flow must not persist the derived URL and must
+  // not label the endpoint as verified realtime support.
+  it.each([
+    ['401 (legacy ok=true shape)', { ok: true, reachable: true, status_code: 401, message: 'WebSocket endpoint is reachable and requires authentication or handshake parameters' }],
+    ['403 (explicit authentication_required)', { ok: false, reachable: true, status_code: 403, capability: 'authentication_required', message: 'Endpoint requires authentication' }],
+    ['404 (explicit not_found)', { ok: false, reachable: true, status_code: 404, capability: 'not_found', message: 'WebSocket handshake returned HTTP 404' }]
+  ])('does not persist the derived realtime URL when batch works but the probe returns %s', async (_label, realtimeProbe) => {
+    vi.mocked(testVoiceEndpoints).mockResolvedValueOnce({
+      success: true,
+      data: {
+        ok: false,
+        results: [
+          {
+            id: 'asr_http',
+            kind: 'http',
+            url: 'http://192.168.100.10:5002/v1/audio/transcriptions',
+            ok: true,
+            reachable: true,
+            status_code: 200,
+            message: 'Endpoint is reachable'
+          },
+          {
+            id: 'asr_realtime',
+            kind: 'websocket',
+            url: 'ws://192.168.100.10:5002/v1/realtime',
+            ...realtimeProbe
+          }
+        ]
+      }
+    } as never)
+    const root = await mount(CustomProviderManager, {
+      providers: [asrProvider],
+      settings: [asrSetting]
+    })
+
+    root.querySelector<HTMLButtonElement>('[data-testid="provider-test-voice-endpoints"]')!.click()
+    await nextTick()
+    await nextTick()
+
+    const resultText = root.querySelector('[data-testid="provider-endpoint-test-result"]')!
+    expect(resultText.textContent).toContain('部分端点不可用')
+    // The batch HTTP endpoint stays reachable (✓); the realtime WebSocket
+    // endpoint must be marked failed, never verified.
+    expect(resultText.textContent).toMatch(/ASR 实时 WebSocket \(\d+\) ✕/)
+    expect(resultText.textContent).not.toMatch(/ASR 实时 WebSocket[^·]*✓/)
+    expect(resultText.textContent).not.toContain('端点可用')
+
+    Array.from(root.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === '保存')!
+      .click()
+    await nextTick()
+    await nextTick()
+
+    expect(agentSettingsApi.updateProvider).toHaveBeenCalledWith(
+      asrProvider.id,
+      expect.objectContaining({
+        asr_async_url: 'http://192.168.100.10:5002/v1/audio/transcriptions',
+        asr_realtime_url: ''
+      })
+    )
+  })
+
+  it('shows the authentication-required probe message without labeling it verified', async () => {
+    vi.mocked(testVoiceEndpoints).mockResolvedValueOnce({
+      success: true,
+      data: {
+        ok: false,
+        results: [
+          {
+            id: 'asr_realtime',
+            kind: 'websocket',
+            url: 'ws://192.168.100.10:5002/v1/realtime',
+            ok: false,
+            reachable: true,
+            status_code: 401,
+            capability: 'authentication_required',
+            message: 'Endpoint requires authentication before the WebSocket upgrade'
+          }
+        ]
+      }
+    } as never)
+    const root = await mount(CustomProviderManager, {
+      providers: [asrProvider],
+      settings: [asrSetting]
+    })
+
+    root.querySelector<HTMLButtonElement>('[data-testid="provider-test-voice-endpoints"]')!.click()
+    await nextTick()
+    await nextTick()
+
+    const resultText = root.querySelector('[data-testid="provider-endpoint-test-result"]')!.textContent!
+    expect(resultText).toContain('(401)')
+    expect(resultText).toContain('Endpoint requires authentication before the WebSocket upgrade')
+    expect(resultText).toContain('✕')
+    expect(resultText).not.toContain('✓')
+  })
+
+  it('keeps a user-entered realtime URL through unrelated edits without a probe', async () => {
+    const root = await mount(CustomProviderManager, {
+      providers: [asrProvider],
+      settings: [asrSetting]
+    })
+    const wsInput = root.querySelector<HTMLInputElement>('[data-testid="provider-asr-realtime-url"]')!
+    wsInput.value = 'ws://speech.example/custom-realtime'
+    wsInput.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    // Unrelated edit: change the display name only.
+    const nameInput = Array.from(root.querySelectorAll<HTMLInputElement>('input')).find(
+      input => input.value === asrProvider.name
+    )!
+    nameInput.value = 'Renamed ASR Provider'
+    nameInput.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    Array.from(root.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === '保存')!
+      .click()
+    await nextTick()
+    await nextTick()
+
+    expect(agentSettingsApi.updateProvider).toHaveBeenCalledWith(
+      asrProvider.id,
+      expect.objectContaining({
+        name: 'Renamed ASR Provider',
+        asr_realtime_url: 'ws://speech.example/custom-realtime'
+      })
+    )
+  })
+
+  it('keeps an explicitly cleared realtime URL empty when saving', async () => {
+    const root = await mount(CustomProviderManager, {
+      providers: [asrProvider],
+      settings: [asrSetting]
+    })
+    const wsInput = root.querySelector<HTMLInputElement>('[data-testid="provider-asr-realtime-url"]')!
+    wsInput.value = ''
+    wsInput.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    Array.from(root.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === '保存')!
+      .click()
+    await nextTick()
+    await nextTick()
+
+    // The derived ws:// default must not be silently restored.
+    expect(agentSettingsApi.updateProvider).toHaveBeenCalledWith(
+      asrProvider.id,
+      expect.objectContaining({ asr_realtime_url: '' })
+    )
+  })
+
+  it('loads a saved empty realtime URL as intentionally cleared and keeps it empty on later edits', async () => {
+    const clearedProvider: Provider = { ...asrProvider, asr_realtime_url: '' }
+    const root = await mount(CustomProviderManager, {
+      providers: [clearedProvider],
+      settings: [asrSetting]
+    })
+
+    const wsInput = root.querySelector<HTMLInputElement>('[data-testid="provider-asr-realtime-url"]')!
+    expect(wsInput.value).toBe('')
+    expect(root.textContent).toContain('恢复自动')
+
+    // Later unrelated edit: rename the provider and save again.
+    const nameInput = Array.from(root.querySelectorAll<HTMLInputElement>('input')).find(
+      input => input.value === clearedProvider.name
+    )!
+    nameInput.value = 'Local ASR (batch only)'
+    nameInput.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    Array.from(root.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === '保存')!
+      .click()
+    await nextTick()
+    await nextTick()
+
+    expect(agentSettingsApi.updateProvider).toHaveBeenCalledWith(
+      clearedProvider.id,
+      expect.objectContaining({
+        name: 'Local ASR (batch only)',
+        asr_realtime_url: ''
       })
     )
   })

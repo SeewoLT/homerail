@@ -17,9 +17,19 @@ import { getHomerailHome } from "../config/env.js";
 import { emit } from "../events/bus.js";
 import { getAllWorkers } from "../worker/registry.js";
 import { dagResourceStatusPath } from "./dag-resource-status.js";
+import {
+  normalizeWorkerBuildNetworkSummary,
+  resolveWorkerBuildNetwork,
+  workerBuildNetworkDockerArgs,
+  workerBuildNetworkSummary,
+  type WorkerBuildNetworkConfig,
+  type WorkerBuildNetworkSummary,
+} from "./worker-build-network.js";
 
 const SOURCE_INPUTS = [
   "homerail_worker/Dockerfile",
+  "homerail_worker/native/codex-secret-guard.c",
+  "homerail_worker/scripts/configure-apt-sources.mjs",
   "homerail_worker/package.json",
   "homerail_worker/package-lock.json",
   "homerail_worker/tsconfig.json",
@@ -61,6 +71,7 @@ export type DagEnvironmentReasonCode =
   | "worker_image_missing"
   | "worker_image_stale"
   | "worker_image_incompatible"
+  | "worker_build_network_invalid"
   | "worker_image_build_failed";
 
 export type ImageCompatibility = "current" | "stale" | "incompatible" | "unknown";
@@ -132,6 +143,7 @@ export interface DagEnvironmentStatus {
     updated_at?: number;
     error?: string;
     compatibility?: ImageCompatibility;
+    build_network?: WorkerBuildNetworkSummary;
   };
   images: DagEnvironmentImage[];
   workers: DagEnvironmentWorker[];
@@ -437,6 +449,9 @@ export class DagEnvironmentController {
   private readonly statusPath: string;
   private readonly workerImage: string;
   private readonly buildTimeoutMs: number;
+  private readonly buildNetworkConfig?: WorkerBuildNetworkConfig;
+  private readonly buildNetworkError?: Error;
+  private persistedBuildNetworkSummary?: WorkerBuildNetworkSummary;
   private status: DagEnvironmentStatus;
   private checkPromise: Promise<DagEnvironmentStatus> | null = null;
   private monitorTimer: ReturnType<typeof setInterval> | null = null;
@@ -457,7 +472,13 @@ export class DagEnvironmentController {
       ?? nonEmpty(this.env.HOMERAIL_WORKER_IMAGE)
       ?? HOMERAIL_WORKER_IMAGE;
     this.buildTimeoutMs = Math.max(1, options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS);
+    try {
+      this.buildNetworkConfig = resolveWorkerBuildNetwork(this.env);
+    } catch (error) {
+      this.buildNetworkError = error instanceof Error ? error : new Error(String(error));
+    }
     this.status = this.readPersistedStatus();
+    this.persistedBuildNetworkSummary = this.status.worker_image.build_network;
   }
 
   getStatus(): DagEnvironmentStatus {
@@ -470,6 +491,7 @@ export class DagEnvironmentController {
       protocol_version: WORKER_CONTRACT_VERSION,
     };
     this.status.workers = this.connectedWorkers(sourceFingerprint);
+    this.applyBuildNetworkStatus();
     return cloneStatus(this.status);
   }
 
@@ -815,10 +837,27 @@ export class DagEnvironmentController {
     const initialBuild = this.status.build;
     if (!initialBuild) return;
     const operationId = initialBuild.operation_id;
+    // Invalid source configuration must fail the build before Docker starts.
+    const network = this.buildNetworkConfig;
+    if (!network) {
+      this.failBuild(
+        this.buildNetworkError?.message ?? "Worker build network configuration is invalid.",
+        "worker_build_network_invalid",
+        operationId,
+      );
+      return;
+    }
+    const networkSummary = workerBuildNetworkSummary(network);
     this.status.build = {
       ...initialBuild,
       status: "running",
-      logs: [...initialBuild.logs, "Checking Docker before build…"],
+      logs: [
+        ...initialBuild.logs,
+        `Worker build network: apt_main=${networkSummary.apt_main}`
+          + ` apt_security=${networkSummary.apt_security}`
+          + ` npm=${networkSummary.npm} proxy=${networkSummary.proxy}`,
+        "Checking Docker before build…",
+      ],
     };
     this.status.worker_image.message = `Building ${this.workerImage}.`;
     this.commit();
@@ -865,6 +904,7 @@ export class DagEnvironmentController {
       "--build-arg", `HOMERAIL_WORKER_PROTOCOL_VERSION=${WORKER_CONTRACT_VERSION}`,
       "--build-arg", `HOMERAIL_WORKER_VERSION=${workerVersion}`,
       "--build-arg", `HOMERAIL_WORKER_IMAGE_REVISION=${revision}`,
+      ...workerBuildNetworkDockerArgs(network),
       "-t", this.workerImage,
       ".",
     ];
@@ -1038,9 +1078,37 @@ export class DagEnvironmentController {
     });
   }
 
+  private currentBuildNetworkSummary(): WorkerBuildNetworkSummary | undefined {
+    return this.buildNetworkConfig ? workerBuildNetworkSummary(this.buildNetworkConfig) : undefined;
+  }
+
+  private applyBuildNetworkStatus(): void {
+    if (this.buildNetworkError) {
+      const message = this.buildNetworkError.message;
+      this.status.worker_image = {
+        ...this.status.worker_image,
+        status: "error",
+        image: this.workerImage,
+        reason: "worker_build_network_invalid",
+        reason_code: "worker_build_network_invalid",
+        message,
+        error: message,
+      };
+      delete this.status.worker_image.build_network;
+      return;
+    }
+    const summary = this.currentBuildNetworkSummary() ?? this.persistedBuildNetworkSummary;
+    if (summary) {
+      this.status.worker_image.build_network = summary;
+    } else {
+      delete this.status.worker_image.build_network;
+    }
+  }
+
   private commit(): void {
     this.status.revision += 1;
     this.status.updated_at = this.now();
+    this.applyBuildNetworkStatus();
     this.status.workers = this.connectedWorkers(this.status.source.fingerprint);
     const dir = path.dirname(this.statusPath);
     fs.mkdirSync(dir, { recursive: true });
@@ -1068,7 +1136,13 @@ export class DagEnvironmentController {
         platform: this.platform,
         source: { ...fallback.source, ...parsed.source, repo_root: this.repoRoot },
         docker: { ...fallback.docker, ...parsed.docker },
-        worker_image: { ...fallback.worker_image, ...parsed.worker_image, image: this.workerImage },
+        worker_image: {
+          ...fallback.worker_image,
+          ...parsed.worker_image,
+          image: this.workerImage,
+          build_network: this.currentBuildNetworkSummary()
+            ?? normalizeWorkerBuildNetworkSummary(parsed.worker_image.build_network),
+        },
         images: Array.isArray(parsed.images) ? parsed.images : [],
         workers: [],
         build: parsed.build?.status === "running" || parsed.build?.status === "queued"

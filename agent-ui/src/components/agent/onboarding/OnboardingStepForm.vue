@@ -26,6 +26,7 @@ import {
   updateVoiceSettings,
   type VoiceEndpointProbeResult,
 } from '@/api/services/voice-api'
+import { decideAsrRealtimeUrlPersistence } from '@/components/agent/asr-endpoint-capability'
 import {
   BUILTIN_EDGE_TTS_MODEL,
   BUILTIN_EDGE_TTS_OPTION_ID,
@@ -539,11 +540,17 @@ async function detectCustomAsrEndpoints(): Promise<CustomVoiceUrls> {
       realtime: endpointProbeMessage(realtimeResult),
     }))
   }
+  // 派生的 realtime 候选只在 WebSocket 真正握手成功后才自动持久化；
+  // 401/403/404、其他预升级响应或网络失败一律按未验证处理（issue #193）。
+  const realtimePersistence = decideAsrRealtimeUrlPersistence({
+    derivedUrl: realtimeUrl,
+    probeResult: realtimeResult,
+  })
   return {
     // Empty strings deliberately clear stale guessed endpoints on an existing
     // local provider. The Manager normalizes them back to undefined.
     asr_async_url: asyncResult?.ok ? asyncUrl : '',
-    asr_realtime_url: realtimeResult?.ok ? realtimeUrl : '',
+    asr_realtime_url: realtimePersistence.url,
   }
 }
 

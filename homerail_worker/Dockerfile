@@ -1,6 +1,14 @@
 # Build from repo root: docker build -t homerail-worker:latest -f homerail_worker/Dockerfile .
 FROM node:22-slim AS secret-guard-build
 
+# Optional public Debian mirror overrides for Worker image builds. Unset
+# values keep the base image defaults; the helper rewrites the deb822
+# sources stanza by stanza before the first apt-get update.
+ARG HOMERAIL_WORKER_BUILD_APT_MIRROR
+ARG HOMERAIL_WORKER_BUILD_APT_SECURITY_MIRROR
+COPY homerail_worker/scripts/configure-apt-sources.mjs /opt/homerail/scripts/configure-apt-sources.mjs
+RUN node /opt/homerail/scripts/configure-apt-sources.mjs
+
 RUN apt-get update \
   && apt-get install -y --no-install-recommends gcc libc6-dev \
   && rm -rf /var/lib/apt/lists/*
@@ -9,6 +17,17 @@ RUN gcc -O2 -Wall -Wextra -Werror -fPIC -shared \
   -o /homerail-codex-secret-guard.so /tmp/codex-secret-guard.c
 
 FROM node:22-slim
+
+# Optional public Debian mirror overrides for Worker image builds. ARG
+# declarations are stage-scoped, so they are repeated in this stage.
+ARG HOMERAIL_WORKER_BUILD_APT_MIRROR
+ARG HOMERAIL_WORKER_BUILD_APT_SECURITY_MIRROR
+# Optional public npm registry override. Build-only: Docker exposes the ARG
+# to every RUN npm operation in this stage without persisting a runtime ENV.
+ARG NPM_CONFIG_REGISTRY
+
+COPY homerail_worker/scripts/configure-apt-sources.mjs /opt/homerail/scripts/configure-apt-sources.mjs
+RUN node /opt/homerail/scripts/configure-apt-sources.mjs
 
 WORKDIR /app
 ENV PATH="/app/node_modules/.bin:${PATH}"
