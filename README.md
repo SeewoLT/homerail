@@ -317,10 +317,13 @@ Origin — no wildcard, path, query, fragment, or credentials. HomeRail rejects
 anything else at startup instead of silently trusting a truncated Origin. The
 same canonical Origin is shared with the Manager admin allowlist
 (`HOMERAIL_MANAGER_ADMIN_ORIGINS`) and with the static Agent UI proxy, which
-authorizes protected UI mutations from either the request-derived self Origin
-(direct local/LAN access) or the explicitly configured public Origin. With no
-explicit public URL, mutation authorization stays strictly request-derived.
-`Forwarded` and `X-Forwarded-*` headers are never trusted for this decision.
+authorizes protected UI mutations from either the explicitly configured public
+Origin or a request-derived localhost/literal-IP Origin. Named LAN hosts such
+as `homerail.lan`, mDNS names, and custom domains must be pinned with
+`--ui-public-url`; otherwise protected mutations and the browser-renderer ticket
+fail closed with HTTP 403. This prevents an arbitrary DNS-rebinding Host from
+being promoted to the trusted Manager proxy hop. `Forwarded` and
+`X-Forwarded-*` headers are never trusted for this decision.
 
 FN Connect (fnOS) rewrites the Host it forwards to HomeRail, so the browser
 Origin no longer matches the internal Host. Configure the exact public Origin

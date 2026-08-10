@@ -377,6 +377,19 @@ function reviewEvidenceProjectionRelativePath(
   );
 }
 
+/**
+ * Exact run-workspace-relative path of the Manager-owned projection for one
+ * logical review dispatch. The Worker receives this path only as a runtime
+ * snapshot exclusion; workflow authors cannot add their own exclusions.
+ */
+export function reviewEvidenceProjectionWorkspacePath(
+  context: ReviewEvidenceFenceInput,
+): string {
+  const selection = resolveReviewEvidenceSelection(context);
+  return reviewEvidenceProjectionRelativePath(selection.reviewer, selection.fence)
+    .replace(/\\/g, "/");
+}
+
 const REVIEW_EVIDENCE_COLUMNS = `
   seq, schema_version, run_id, reviewer, node_id, session_id,
   round_id, generation, attempt, kind, dedup_key, payload_json, created_at

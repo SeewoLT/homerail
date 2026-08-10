@@ -17,6 +17,7 @@ import {
 } from "./manager-agent-config.js";
 import { getSetting } from "../persistence/llm-settings.js";
 import { ManagerAgentRuntimeError, runManagerAgentTurn } from "./manager-agent-runtime.js";
+import { pinHomeRailBrowserUiTurnBinding } from "./browser-ui-tools.js";
 import { dagResourcesUnavailableForRun } from "./dag-resource-status.js";
 import { fireDagEventTrigger } from "../runtime/dag-triggers.js";
 import { updateDagState } from "../persistence/dag-runtime-primitives.js";
@@ -293,6 +294,10 @@ export function mutationRoutesHandler(
           _badRequest(res, "Missing required field: message");
           return;
         }
+        const browserTools = pinHomeRailBrowserUiTurnBinding(
+          b.browser_tools_transport,
+          b.browser_tools_target,
+        );
         const projectId = typeof b.project_id === "string" ? b.project_id : undefined;
         const managerSettingId =
           typeof b.manager_setting_id === "string" && b.manager_setting_id.trim()
@@ -380,6 +385,8 @@ export function mutationRoutesHandler(
             message,
             project_id: projectId,
             session_id: sessionId,
+            browser_tools_transport: browserTools.browser_tools_transport,
+            browser_tools_target: browserTools.browser_tools_target ?? undefined,
             continue_chat: b.continue_chat !== false,
             history: historyForAgent,
             required_tool_calls: requiredToolCalls,

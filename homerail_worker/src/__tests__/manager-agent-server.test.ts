@@ -1346,6 +1346,49 @@ describe("manager-agent server", () => {
     }
   });
 
+  it("routes Worker UI tools through the Manager Browser Tools broker", async () => {
+    let observed: Record<string, unknown> | null = null;
+    const managerApi = http.createServer((req, res) => {
+      const pathname = new URL(req.url || "/", "http://localhost").pathname;
+      if (req.method !== "POST" || pathname !== "/api/browser-tools/invoke") {
+        res.writeHead(404).end();
+        return;
+      }
+      let raw = "";
+      req.on("data", (chunk) => { raw += chunk; });
+      req.on("end", () => {
+        observed = JSON.parse(raw) as Record<string, unknown>;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          success: true,
+          data: { result: { ok: true, surface: "dag_status", dag_run_id: "run-ui-1" } },
+        }));
+      });
+    });
+    const managerPort = await listen(managerApi);
+    vi.stubEnv("MANAGER_REST_URL", `http://127.0.0.1:${managerPort}/api`);
+    try {
+      const tool = requireManagerTool(createManagerTools({
+        ...managerToolState(),
+        browserToolsTransport: "desktop",
+      }, "chat"), "ui_open_surface");
+      const result = await tool.handler({ surface: "dag_status", query: "review" });
+      expect(observed).toEqual({
+        name: "ui_open_surface",
+        input: { surface: "dag_status", query: "review" },
+      });
+      expect(JSON.stringify(result)).toContain("run-ui-1");
+    } finally {
+      await close(managerApi);
+    }
+  });
+
+  it("does not expose Worker UI tools without a signed browser route", () => {
+    const names = createManagerTools(managerToolState(), "chat").map((tool) => tool.name);
+    expect(names).not.toContain("ui_get_state");
+    expect(names).not.toContain("ui_open_surface");
+  });
+
   it("maps Worker supervisor tools to actor-only Manager REST requests", async () => {
     const observed: ObservedSupervisorRequest[] = [];
     const managerApi = makeSupervisorManagerApiServer(observed);

@@ -254,6 +254,33 @@ describe("runtime pattern worker tools", () => {
     }
   });
 
+  it("excludes only the exact Manager review projection and still detects sibling evidence writes", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-review-projection-"));
+    try {
+      const projection = "review-evidence/qwen/qwen_review/session/round-0001/generation-1.json";
+      fs.mkdirSync(path.join(root, "review-evidence", "qwen", "qwen_review", "session", "round-0001"), {
+        recursive: true,
+      });
+      const policy = {
+        writable_paths: [],
+        readonly_paths: ["review-evidence"],
+        snapshot_exclude_paths: [projection],
+      };
+      const before = snapshotWorkspace(root, policy);
+
+      fs.writeFileSync(path.join(root, projection), "manager projection");
+      fs.writeFileSync(path.join(root, "review-evidence", "unexpected.json"), "worker mutation");
+
+      const result = verifyWorkspacePolicy(before, snapshotWorkspace(root, policy), policy);
+      expect(result.valid).toBe(false);
+      expect(result.changed_paths).toEqual(["review-evidence/unexpected.json"]);
+      expect(result.protected_changes).toEqual(["review-evidence/unexpected.json"]);
+      expect(result.unauthorized_changes).toEqual(["review-evidence/unexpected.json"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("ignores shared Manager Git writes during parallel fanout without hiding nested Git metadata", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-workspace-parallel-git-"));
     try {

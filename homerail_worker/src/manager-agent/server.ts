@@ -58,7 +58,10 @@ import {
   type HomerailPluginTurnContextV1,
   type HomerailPluginToolExecutionEnvelopeV1,
   type ManagerAgentTurnEnvelopeV1,
+  type BrowserRendererConnectionRefV1,
+  type BrowserToolsTurnTransportV1,
   HOMERAIL_MANAGER_TURN_HEADER,
+  HOMERAIL_UI_TOOL_NAMES,
 } from "homerail-protocol";
 
 interface ManagerAgentConfig {
@@ -79,6 +82,8 @@ interface ChatRequest {
   project_id?: string;
   session_id?: string;
   voice_session_id?: string;
+  browser_tools_transport?: BrowserToolsTurnTransportV1;
+  browser_tools_target?: BrowserRendererConnectionRefV1;
   continue_chat?: boolean;
   response_mode?: "chat" | "voice";
   generative_ui_mode?: "off" | "shadow" | "prefer";
@@ -650,6 +655,9 @@ export function createManagerTools(state: {
   finalNotes: string[];
   objectiveToolCalls: Array<{ name: string; success: boolean; error?: string; inferred?: boolean }>;
   voiceSurface: VoiceSurfaceState;
+  browserToolsTransport?: BrowserToolsTurnTransportV1;
+  browserToolsTarget?: BrowserRendererConnectionRefV1 | null;
+  abortSignal?: AbortSignal;
 }, responseMode: "chat" | "voice", pluginContext?: HomerailPluginTurnContextV1, pluginToolTurnToken?: string, canvasContext?: GenerativeUiCanvasContextV1, managerSkills?: ManagerAgentPromptSkill[]): DagToolDefinition[] {
   if (pluginContext && (
     !validateHomerailPluginTurnContext(pluginContext).valid
@@ -657,7 +665,23 @@ export function createManagerTools(state: {
   )) {
     throw new Error("Plugin Context failed validation or digest verification in Worker Manager Agent");
   }
+  const browserUiTools: DagToolDefinition[] = (
+    state.browserToolsTransport === "desktop"
+    || (state.browserToolsTransport === "renderer" && Boolean(state.browserToolsTarget))
+  ) ? HOMERAIL_UI_TOOL_NAMES.map((name) => ({
+      ...managerAgentToolSpec(name),
+      async handler(args: Record<string, unknown>) {
+        const body = await requestManager("/browser-tools/invoke", {
+          method: "POST",
+          body: JSON.stringify({ name, input: args }),
+          signal: state.abortSignal,
+        });
+        const data = managerData(body);
+        return { content: [{ type: "text" as const, text: short(data.result ?? null) }] };
+      },
+    })) : [];
   const tools: DagToolDefinition[] = [
+    ...browserUiTools,
     {
       name: "list_projects",
       description: "List projects known by the HomeRail Manager.",
@@ -1792,6 +1816,8 @@ async function handleChat(
     ? nativeSessionId ?? randomUUID()
     : requestedSessionId || `manager-${randomUUID()}`;
   const now = new Date().toISOString();
+  const abortController = new AbortController();
+  const turnScope = activeManagerTurn.getStore()?.claims.scope;
   const session = sessions.get(sessionId) ?? {
     session_id: sessionId,
     messages: [],
@@ -1808,6 +1834,9 @@ async function handleChat(
     finalNotes: [] as string[],
     objectiveToolCalls: [] as Array<{ name: string; success: boolean; error?: string; inferred?: boolean }>,
     voiceSurface: emptyVoiceSurface(),
+    browserToolsTransport: turnScope?.browser_tools_transport ?? "none",
+    browserToolsTarget: turnScope?.browser_tools_target ?? null,
+    abortSignal: abortController.signal,
   };
   const toolCalls: ToolTrace[] = [];
   const toolResults: ToolResultTrace[] = [];
@@ -1836,7 +1865,6 @@ async function handleChat(
   const config = body.agent_config ?? {};
   const model = String(config.model || config.model_name || "");
   const turnTimeoutMs = managerAgentTurnTimeoutMs();
-  const abortController = new AbortController();
   let timedOut = false;
   let timeout: NodeJS.Timeout | undefined;
   if (turnTimeoutMs > 0) {

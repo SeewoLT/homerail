@@ -4,6 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  BROWSER_TOOLS_PROTOCOL_VERSION,
+  HOMERAIL_UI_TOOL_CONTRACTS,
+  uiToolContractDigest,
+  type BrowserRendererConnectionRefV1,
+  type BrowserRendererTargetV1,
+} from "homerail-protocol";
 
 vi.mock("../src/server/edge-tts.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/server/edge-tts.js")>();
@@ -43,6 +50,7 @@ import {
 import type { CodexModelCatalog } from "../src/server/codex-models.js";
 import { applyVoiceCanonicalProjectionPatch } from "../src/generative-ui/canonical-voice-service.js";
 import { persistentGenerativeUiDocumentService } from "../src/generative-ui/shadow-service.js";
+import { getBrowserRendererToolsBroker } from "../src/server/browser-renderer-tools-websocket.js";
 
 const TEST_CODEX_MODEL_CATALOG: CodexModelCatalog = {
   binary: "codex",
@@ -58,6 +66,8 @@ const TEST_CODEX_MODEL_CATALOG: CodexModelCatalog = {
   }],
 };
 
+const voiceBrowserRendererSockets = new Set<WebSocket>();
+
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const addr = server.address();
@@ -67,6 +77,76 @@ async function listen(server: http.Server): Promise<number> {
 
 async function close(server: http.Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
+function browserRendererContracts(): Array<{ name: string; contract_digest: string }> {
+  return HOMERAIL_UI_TOOL_CONTRACTS.map((contract) => ({
+    name: contract.name,
+    contract_digest: uiToolContractDigest(contract),
+  }));
+}
+
+async function connectBrowserRenderer(
+  port: number,
+  target: BrowserRendererTargetV1,
+): Promise<{ socket: WebSocket; ref: BrowserRendererConnectionRefV1 }> {
+  const broker = getBrowserRendererToolsBroker();
+  if (!broker) throw new Error("Browser renderer broker is unavailable in the voice test server");
+  const origin = `http://127.0.0.1:${port}`;
+  const ticket = broker.issueTicket(target, origin, `direct:${origin}`).ticket;
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/browser-tools/renderer`, {
+    headers: { Origin: origin },
+  });
+  voiceBrowserRendererSockets.add(socket);
+  socket.once("close", () => voiceBrowserRendererSockets.delete(socket));
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  const ready = new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Timed out authenticating voice test renderer")), 2_000);
+    timer.unref?.();
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type !== "auth.ready") return;
+      clearTimeout(timer);
+      resolve(message);
+    });
+    socket.once("close", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`Voice test renderer closed during authentication (${code})`));
+    });
+  });
+  socket.send(JSON.stringify({
+    type: "auth.ticket",
+    version: BROWSER_TOOLS_PROTOCOL_VERSION,
+    ticket,
+    ...target,
+    contracts: browserRendererContracts(),
+  }));
+  const authenticated = await ready;
+  return {
+    socket,
+    ref: {
+      connection_id: String(authenticated.connection_id),
+      ...target,
+    },
+  };
+}
+
+async function closeBrowserRenderer(socket: WebSocket): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) return;
+  const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+  socket.close(1000, "voice test complete");
+  await closed;
+}
+
+function parseNdjson(text: string): Record<string, unknown>[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
 function installVoiceHostManagerStub(input: {
@@ -205,6 +285,8 @@ describe("voice bootstrap routes", () => {
     _setHostCodexManagerAgentStreamRunnerForTest();
     await shutdownHostShellManagerAgents();
     _forgetHostShellManagerAgentsForTest();
+    for (const socket of voiceBrowserRendererSockets) socket.terminate();
+    voiceBrowserRendererSockets.clear();
     await close(server);
     closeDb();
     if (oldHome === undefined) delete process.env.HOMERAIL_HOME;
@@ -3709,6 +3791,175 @@ describe("voice bootstrap routes", () => {
     expect(body.data.manager.text).not.toBe("当前 TS Manager 已记录确认；真实执行请通过 DAG 或后续 harness 接入。");
     expect(body.data.workspace.progress_brief.status).toBe("done");
     expect(body.data.workspace.debug_events).not.toContainEqual(expect.objectContaining({ code: "manager_agent_unavailable" }));
+  });
+
+  it("pins a regular confirmation to its renderer and rejects the stale target without running Manager Agent", async () => {
+    const inputs: HostCodexManagerAgentInput[] = [];
+    _setHostCodexManagerAgentRunnerForTest(async (input) => {
+      inputs.push(input);
+      return {
+        text: "renderer-bound confirmation complete",
+        spoken_text: "确认完成。",
+        session_id: input.session_id || "host-session-renderer-confirm",
+        run_id: null,
+        run_ids: [],
+        objective: { required: false, satisfied: true, tool_calls: [] },
+        tool_calls: [],
+        tool_results: [],
+        worker_id: "host-codex",
+      };
+    });
+    const port = await listen(server);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await fetch(`${baseUrl}/api/voice-agent/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ harness: "codex_appserver", model_name: "gpt-5.5", reasoning_effort: "low" }),
+    });
+    const created = await fetch(`${baseUrl}/api/voice-agent/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const createdBody = await created.json() as { data: { session_id: string } };
+    const renderer = await connectBrowserRenderer(port, {
+      ui_session_id: "voice-ui-session-regular",
+      tab_id: "voice-tab-regular",
+      navigation_id: "voice-navigation-regular",
+    });
+    const confirmationUrl = `${baseUrl}/api/voice-agent/sessions/${createdBody.data.session_id}/confirm`;
+
+    const confirmed = await fetch(confirmationUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirmation_id: "submit-task",
+        browser_tools_transport: "renderer",
+        browser_tools_target: renderer.ref,
+      }),
+    });
+    const confirmedBody = await confirmed.json() as { success: boolean };
+    expect(confirmed.status).toBe(200);
+    expect(confirmedBody.success).toBe(true);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toMatchObject({
+      browser_tools_transport: "renderer",
+      browser_tools_target: renderer.ref,
+    });
+
+    await closeBrowserRenderer(renderer.socket);
+    await vi.waitFor(() => {
+      expect(getBrowserRendererToolsBroker()?.connection(renderer.ref.connection_id)).toBeNull();
+    });
+    await connectBrowserRenderer(port, {
+      ui_session_id: renderer.ref.ui_session_id,
+      tab_id: renderer.ref.tab_id,
+      navigation_id: "voice-navigation-regular-replacement",
+    });
+    const stale = await fetch(confirmationUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirmation_id: "submit-task",
+        browser_tools_transport: "renderer",
+        browser_tools_target: renderer.ref,
+      }),
+    });
+    const staleBody = await stale.json() as { error?: string };
+    expect(stale.status).toBe(400);
+    expect(staleBody.error).toMatch(/stale or unavailable/);
+    expect(inputs).toHaveLength(1);
+  });
+
+  it("pins a streaming confirmation to its renderer and streams an error for a stale target", async () => {
+    const inputs: HostCodexManagerAgentInput[] = [];
+    _setHostCodexManagerAgentStreamRunnerForTest(async function* (input) {
+      inputs.push(input);
+      yield {
+        type: "result",
+        result: {
+          text: "streamed renderer-bound confirmation complete",
+          spoken_text: "流式确认完成。",
+          session_id: input.session_id || "host-session-renderer-confirm-stream",
+          run_id: null,
+          run_ids: [],
+          objective: { required: false, satisfied: true, tool_calls: [] },
+          tool_calls: [],
+          tool_results: [],
+          worker_id: "host-codex",
+        },
+      };
+    });
+    const port = await listen(server);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await fetch(`${baseUrl}/api/voice-agent/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ harness: "codex_appserver", model_name: "gpt-5.5", reasoning_effort: "low" }),
+    });
+    const created = await fetch(`${baseUrl}/api/voice-agent/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const createdBody = await created.json() as { data: { session_id: string } };
+    const renderer = await connectBrowserRenderer(port, {
+      ui_session_id: "voice-ui-session-stream",
+      tab_id: "voice-tab-stream",
+      navigation_id: "voice-navigation-stream",
+    });
+    const confirmationUrl = `${baseUrl}/api/voice-agent/sessions/${createdBody.data.session_id}/confirm/stream`;
+
+    const confirmed = await fetch(confirmationUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirmation_id: "submit-task",
+        browser_tools_transport: "renderer",
+        browser_tools_target: renderer.ref,
+      }),
+    });
+    const confirmedText = await confirmed.text();
+    const confirmedEvents = parseNdjson(confirmedText);
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.headers.get("content-type")).toContain("application/x-ndjson");
+    expect(confirmedEvents).toContainEqual(expect.objectContaining({ type: "done" }));
+    expect(confirmedEvents).not.toContainEqual(expect.objectContaining({ type: "error" }));
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toMatchObject({
+      browser_tools_transport: "renderer",
+      browser_tools_target: renderer.ref,
+    });
+
+    await closeBrowserRenderer(renderer.socket);
+    await vi.waitFor(() => {
+      expect(getBrowserRendererToolsBroker()?.connection(renderer.ref.connection_id)).toBeNull();
+    });
+    await connectBrowserRenderer(port, {
+      ui_session_id: renderer.ref.ui_session_id,
+      tab_id: renderer.ref.tab_id,
+      navigation_id: "voice-navigation-stream-replacement",
+    });
+    const stale = await fetch(confirmationUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirmation_id: "submit-task",
+        browser_tools_transport: "renderer",
+        browser_tools_target: renderer.ref,
+      }),
+    });
+    const staleText = await stale.text();
+    const staleEvents = parseNdjson(staleText);
+    expect(stale.status).toBe(200);
+    expect(staleEvents).toContainEqual(expect.objectContaining({
+      type: "error",
+      message: expect.stringMatching(/stale or unavailable/),
+    }));
+    expect(staleEvents).not.toContainEqual(expect.objectContaining({ phase: "accepted" }));
+    expect(staleEvents).not.toContainEqual(expect.objectContaining({ type: "done" }));
+    expect(staleText).toMatch(/stale or unavailable/);
+    expect(inputs).toHaveLength(1);
   });
 
   // ── P1 回归：同 session 并发 turn 不能丢消息 ──────────────────────────

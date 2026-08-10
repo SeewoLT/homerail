@@ -195,11 +195,11 @@ describe("Codex model catalog", () => {
 
     expect(spawnOptions).toMatchObject({
       env: expect.objectContaining({
-        PATH: [
+        PATH: Array.from(new Set([
           path.dirname(command),
           path.dirname(process.execPath),
-          "/usr/bin:/bin",
-        ].join(path.delimiter),
+          ..."/usr/bin:/bin".split(path.delimiter),
+        ])).join(path.delimiter),
       }),
     });
   });

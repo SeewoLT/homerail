@@ -48,10 +48,12 @@ import {
   managerAgentPluginOwnedLegacyWidgetType,
   normalizeManagerAgentRequiredToolCalls,
   normalizeManagerAgentHarness,
+  type BrowserToolsTurnBindingV1,
   type GenerativeUiNodeV1,
   type HomerailPluginTurnContextV1,
   type ManagerAgentDagContextV1,
 } from "homerail-protocol";
+import { pinHomeRailBrowserUiTurnBinding } from "./browser-ui-tools.js";
 import {
   listWidgetFileTypes,
   readWidgetFile,
@@ -1618,6 +1620,10 @@ async function submitVoiceWorkspaceToManagerAgent(
   realtimeHooks?: ManagerAgentRealtimeHooks,
   selectedNodeId?: string,
   requiredToolCalls: string[] = [],
+  browserTools: BrowserToolsTurnBindingV1 = {
+    browser_tools_transport: "none",
+    browser_tools_target: null,
+  },
 ): Promise<ManagerAgentHandoffResult> {
   if (workspace.task_draft) workspace.task_draft.status = "submitted";
   workspace.pending_confirmations = [];
@@ -1663,6 +1669,8 @@ async function submitVoiceWorkspaceToManagerAgent(
       project_id: workspace.project_id ?? undefined,
       session_id: workspace.manager_session_id ?? undefined,
       voice_session_id: workspace.session_id,
+      browser_tools_transport: browserTools.browser_tools_transport,
+      browser_tools_target: browserTools.browser_tools_target ?? undefined,
       continue_chat: true,
       response_mode: "voice",
       generative_ui_mode: generativeUiMode,
@@ -1816,6 +1824,10 @@ async function processTurn(
   managerAgentConfigOptions: ManagerAgentConfigRoutesOptions = {},
   selectedNodeId?: string,
   requiredToolCalls: string[] = [],
+  browserTools: BrowserToolsTurnBindingV1 = {
+    browser_tools_transport: "none",
+    browser_tools_target: null,
+  },
 ): Promise<VoiceTurnResult> {
   appendConversation(workspace, "user", text);
   ensureVoiceSessionTitle(workspace, text);
@@ -1831,6 +1843,7 @@ async function processTurn(
     realtimeHooks,
     selectedNodeId,
     requiredToolCalls,
+    browserTools,
   );
 }
 
@@ -1910,6 +1923,8 @@ export async function createCodexLiveVoiceBinding(input: {
   selectedNodeId?: string;
   managerAgentOptions?: HostShellManagerAgentOptions;
   managerAgentConfigOptions?: ManagerAgentConfigRoutesOptions;
+  browserTools?: BrowserToolsTurnBindingV1;
+  abortSignal?: AbortSignal;
 }): Promise<CodexLiveVoiceBinding> {
   const storedConfig = readManagerAgentConfig();
   const storedConfigDigest = crypto.createHash("sha256")
@@ -1942,11 +1957,17 @@ export async function createCodexLiveVoiceBinding(input: {
   const canvasContext = liveVoiceCanvasContext(workspace, input.selectedNodeId);
   const dagContext = workspaceDagContext(workspace);
   const generativeUiMode = effectiveGenerativeUiMode(workspace);
+  const browserTools = input.browserTools ?? {
+    browser_tools_transport: "none" as const,
+    browser_tools_target: null,
+  };
   const turnAssets = resolveManagerAgentTurnAssets({
     message: "Start the trusted HomeRail Live Voice Manager session.",
     project_id: workspace.project_id ?? undefined,
     session_id: workspace.manager_session_id ?? undefined,
     voice_session_id: workspace.session_id,
+    browser_tools_transport: browserTools.browser_tools_transport,
+    browser_tools_target: browserTools.browser_tools_target ?? undefined,
     continue_chat: true,
     response_mode: "voice",
     generative_ui_mode: generativeUiMode,
@@ -1975,6 +1996,9 @@ export async function createCodexLiveVoiceBinding(input: {
     finalNotes: [],
     objectiveToolCalls: [],
     voiceSurface: emptyVoiceSurface(),
+    browserToolsTransport: browserTools.browser_tools_transport,
+    browserToolsTarget: browserTools.browser_tools_target ?? undefined,
+    abortSignal: input.abortSignal,
   };
   const pluginTokenSource = pluginContext.tools.length > 0 && generativeUiMode === "prefer"
     ? () => getPluginToolTurnAuthority().issue({
@@ -2489,6 +2513,10 @@ export function voiceAgentBootstrapHandler(
         const projectIdPatch = typeof body.project_id === "string" ? body.project_id : null;
         const selectedNodeId = selectedGenerativeUiNodeId(body);
         const requiredToolCalls = normalizeManagerAgentRequiredToolCalls(body.required_tool_calls);
+        const browserTools = pinHomeRailBrowserUiTurnBinding(
+          body.browser_tools_transport,
+          body.browser_tools_target,
+        );
         // workspace 必须在锁内重新读取：否则并发 turn 的第二个请求会拿着旧快照覆盖第一个的结果。
         const result = await withSessionLock(sessionId, async () => {
           const workspace = loadWorkspace(sessionId);
@@ -2505,6 +2533,7 @@ export function voiceAgentBootstrapHandler(
               managerAgentConfigOptions,
               selectedNodeId,
               requiredToolCalls,
+              browserTools,
             );
             const saved = saveWorkspace(workspace);
             completeTurn(sessionId, saved.progress_brief?.status || "done");
@@ -2540,6 +2569,10 @@ export function voiceAgentBootstrapHandler(
         const projectIdPatch = typeof body.project_id === "string" ? body.project_id : null;
         const selectedNodeId = selectedGenerativeUiNodeId(body);
         const requiredToolCalls = normalizeManagerAgentRequiredToolCalls(body.required_tool_calls);
+        const browserTools = pinHomeRailBrowserUiTurnBinding(
+          body.browser_tools_transport,
+          body.browser_tools_target,
+        );
         res.writeHead(200, { "Content-Type": "application/x-ndjson" });
         if (!text) {
           streamLine(res, { type: "error", message: "Missing required field: text" });
@@ -2596,7 +2629,7 @@ export function voiceAgentBootstrapHandler(
                 }
                 streamLine(res, { type: "speech", event, workspace: saved });
               },
-            }, managerAgentConfigOptions, selectedNodeId, requiredToolCalls);
+            }, managerAgentConfigOptions, selectedNodeId, requiredToolCalls, browserTools);
             const saved = saveWorkspace(workspace);
             if (streamGenerativeUi) {
               generativeUiCursor = streamCommittedGenerativeUiTransactions(
@@ -2648,6 +2681,10 @@ export function voiceAgentBootstrapHandler(
       .then(async (body) => {
         const sessionId = decodeURIComponent(confirmMatch[1]);
         const requested = typeof body.confirmation_id === "string" ? body.confirmation_id : "";
+        const browserTools = pinHomeRailBrowserUiTurnBinding(
+          body.browser_tools_transport,
+          body.browser_tools_target,
+        );
         const config = await readConfig(managerAgentConfigOptions);
         // workspace 在锁内重新读取，确保 confirm 基于最新 workspace。
         const result = await withSessionLock(sessionId, async () => {
@@ -2665,6 +2702,10 @@ export function voiceAgentBootstrapHandler(
               confirmedTaskMessage(workspace),
               config,
               managerAgentOptions,
+              undefined,
+              undefined,
+              [],
+              browserTools,
             );
             const saved = saveWorkspace(workspace);
             completeTurn(sessionId, saved.progress_brief?.status || "done");
@@ -2693,8 +2734,12 @@ export function voiceAgentBootstrapHandler(
   const confirmStreamMatch = pathname.match(/^\/api\/voice-agent\/sessions\/([^/]+)\/confirm\/stream$/);
   if (confirmStreamMatch && method === "POST") {
     readJsonBody(req)
-      .then(async () => {
+      .then(async (body) => {
         const sessionId = decodeURIComponent(confirmStreamMatch[1]);
+        const browserTools = pinHomeRailBrowserUiTurnBinding(
+          body.browser_tools_transport,
+          body.browser_tools_target,
+        );
         const config = await readConfig(managerAgentConfigOptions);
         res.writeHead(200, { "Content-Type": "application/x-ndjson" });
         // workspace 在锁内重新读取。
@@ -2749,6 +2794,9 @@ export function voiceAgentBootstrapHandler(
                   streamLine(res, { type: "speech", event, workspace: saved });
                 },
               },
+              undefined,
+              [],
+              browserTools,
             );
             const saved = saveWorkspace(workspace);
             if (streamGenerativeUi) {

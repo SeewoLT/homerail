@@ -153,6 +153,7 @@ import {
   buildReviewEvidenceProjectionFor,
   recordAttemptDiagnostic,
   recordReviewHandoffEvidence,
+  reviewEvidenceProjectionWorkspacePath,
   writeReviewEvidenceProjectionFile,
   type ReviewEvidenceIdentity,
   type ReviewHandoffEvidenceInput,
@@ -5926,7 +5927,10 @@ function _advisorConfigs(run: ActiveRun, node: DAGGraphNode): DispatchCredential
   return { ok: true, agentConfig: {}, advisors };
 }
 
-function _workspaceAccess(node: DAGGraphNode): DagWorkspaceAccess | undefined {
+function _workspaceAccess(
+  run: ActiveRun,
+  node: DAGGraphNode,
+): DagWorkspaceAccess | undefined {
   const raw = _agentRuntimeConfig(node).workspace_access;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
@@ -5939,13 +5943,24 @@ function _workspaceAccess(node: DAGGraphNode): DagWorkspaceAccess | undefined {
   const snapshotExclude = Array.isArray(value.snapshot_exclude_paths)
     ? value.snapshot_exclude_paths.filter((entry): entry is string => typeof entry === "string")
     : undefined;
-  return {
+  const access: DagWorkspaceAccess = {
     writable_paths: writable,
     ...(readonly ? { readonly_paths: readonly } : {}),
     ...(value.git_metadata_read_only === true ? { git_metadata_read_only: true } : {}),
     ...(typeof value.max_snapshot_files === "number" ? { max_snapshot_files: value.max_snapshot_files } : {}),
     ...(snapshotExclude ? { snapshot_exclude_paths: snapshotExclude } : {}),
   };
+  const projectionExclusions = run.dagRun.graph.nodes.flatMap((candidate) => {
+    const evidenceContext = _reviewEvidenceContext(run, candidate.node_id);
+    return evidenceContext ? [reviewEvidenceProjectionWorkspacePath(evidenceContext)] : [];
+  });
+  if (projectionExclusions.length > 0) {
+    access.snapshot_exclude_paths = Array.from(new Set([
+      ...(access.snapshot_exclude_paths ?? []),
+      ...projectionExclusions,
+    ])).sort();
+  }
+  return access;
 }
 
 function _allowedBuiltinTools(node: DAGGraphNode): AgentBuiltinToolName[] | undefined {
@@ -6250,7 +6265,7 @@ function _buildDispatchEnvelope(run: ActiveRun, nodeId: string): DispatchEnvelop
       container_group: node.container_group,
       requiredCapabilities: _requiredDispatchCapabilities(run, node),
       advisors: advisorResolution.advisors,
-      workspaceAccess: _workspaceAccess(node),
+      workspaceAccess: _workspaceAccess(run, node),
       builtinToolPolicy: _builtinToolPolicy(node),
       allowedBuiltinTools: _allowedBuiltinTools(node),
       maxBuiltinToolCalls: _maxBuiltinToolCalls(run, node),
@@ -6310,6 +6325,16 @@ export function dispatchReadyNodes(
   let dispatchCounterChanged = false;
   const before = _snapshotNodeStates(run);
   const ready = getReadyNodes(run.dagRun);
+  // Reviewers share one run workspace and execute concurrently. Materialize
+  // every ready reviewer's session before building any envelope so each Worker
+  // can exclude the exact set of Manager-owned projection files that sibling
+  // reviewers may publish while its snapshot is active.
+  for (const nodeId of ready) {
+    const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId);
+    if (node && !_isGatewayNode(node) && _reviewEvidenceEnabled(run, nodeId)) {
+      _prepareNodeSessionForDispatch(run, node);
+    }
+  }
   for (const nodeId of ready) {
     const node = run.dagRun.graph.nodes.find((n) => n.node_id === nodeId);
     if (!node) continue;

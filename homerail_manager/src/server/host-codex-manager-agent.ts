@@ -61,6 +61,9 @@ import {
   resolvePrCloseout,
   validateHomerailPluginTurnContext,
   redactTelemetry,
+  HOMERAIL_UI_TOOL_NAMES,
+  type BrowserRendererConnectionRefV1,
+  type BrowserToolsTurnTransportV1,
   type ManagerAgentWidgetFileToolAdapter,
   type ManagerAgentWidgetFileToolResult,
   type ManagerAgentToolName,
@@ -75,6 +78,10 @@ import {
 } from "homerail-protocol";
 import { pluginJsonDigest } from "../plugins/descriptor.js";
 import { acquireCodexThreadLease } from "./codex-thread-lease.js";
+import {
+  homeRailBrowserUiToolsAvailable,
+  invokeHomeRailBrowserUiTool,
+} from "./browser-ui-tools.js";
 
 type ToolHandlerResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -224,6 +231,9 @@ export interface HostCodexManagerToolState {
   finalNotes: string[];
   objectiveToolCalls: Array<{ name: string; success: boolean; error?: string }>;
   voiceSurface: VoiceSurfaceState;
+  browserToolsTransport?: BrowserToolsTurnTransportV1;
+  browserToolsTarget?: BrowserRendererConnectionRefV1;
+  abortSignal?: AbortSignal;
 }
 
 export type PluginToolTurnTokenSource = string | (() => string | undefined);
@@ -315,6 +325,8 @@ export interface HostCodexManagerAgentInput {
   project_id?: string;
   session_id?: string;
   voice_session_id?: string;
+  browser_tools_transport?: BrowserToolsTurnTransportV1;
+  browser_tools_target?: BrowserRendererConnectionRefV1;
   continue_chat?: boolean;
   history?: Array<{ role?: string; content?: string; timestamp?: string }>;
   canvas_context?: GenerativeUiCanvasContextV1;
@@ -1058,7 +1070,22 @@ export function createManagerTools(
   )) {
     throw new Error("Plugin Context failed validation or digest verification in Host Manager Agent");
   }
+  const browserUiTools: ToolDefinition[] = homeRailBrowserUiToolsAvailable(
+    state.browserToolsTransport ?? "none",
+    state.browserToolsTarget,
+  ) ? HOMERAIL_UI_TOOL_NAMES.map((name) => ({
+      ...managerAgentToolSpec(name),
+      async handler(args: Record<string, unknown>) {
+        const result = await invokeHomeRailBrowserUiTool(name, args, {
+          browser_tools_transport: state.browserToolsTransport ?? "none",
+          browser_tools_target: state.browserToolsTarget,
+          signal: state.abortSignal,
+        });
+        return { content: [{ type: "text" as const, text: short(result) }] };
+      },
+    })) : [];
   const tools: ToolDefinition[] = [
+    ...browserUiTools,
     {
       name: "list_projects",
       description: "List projects known by the HomeRail Manager.",
@@ -2503,6 +2530,7 @@ async function* runHostCodexManagerAgentTurnEvents(
   const restUrl = managerRestUrl(input.managerRestUrl);
   const workspace = workspaceFromConfig(config);
   const managerSessionId = input.session_id || `host-codex-${randomUUID()}`;
+  const abortController = new AbortController();
   const state = {
     restUrl,
     workspace,
@@ -2512,6 +2540,9 @@ async function* runHostCodexManagerAgentTurnEvents(
     finalNotes: [] as string[],
     objectiveToolCalls: [] as Array<{ name: string; success: boolean; error?: string }>,
     voiceSurface: emptyVoiceSurface(),
+    browserToolsTransport: input.browser_tools_transport ?? "none",
+    browserToolsTarget: input.browser_tools_target,
+    abortSignal: abortController.signal,
   };
   const responseMode = input.response_mode ?? "chat";
   const voiceUiRules = responseMode === "voice" ? input.voice_ui_rules ?? loadVoiceUiRules() : undefined;
@@ -2522,7 +2553,6 @@ async function* runHostCodexManagerAgentTurnEvents(
   const commentaryTexts: string[] = [];
   const agentErrors: string[] = [];
   const requiredToolCalls = normalizeManagerAgentRequiredToolCalls(input.required_tool_calls);
-  const abortController = new AbortController();
   const turnTimeoutMs = managerAgentTurnTimeoutMs();
   const timeout = turnTimeoutMs > 0 ? setTimeout(() => abortController.abort(), turnTimeoutMs) : undefined;
   timeout?.unref?.();

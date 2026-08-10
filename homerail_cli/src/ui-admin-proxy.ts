@@ -1,3 +1,5 @@
+import net from "node:net";
+
 const MUTATION_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export interface UiMutationRequestTrust {
@@ -41,14 +43,12 @@ export function normalizeExactHttpOrigin(value: string): string | undefined {
 }
 
 /**
- * Keep the UI proxy zero-config by deriving its self Origin from the request
- * that reached the server. When the operator explicitly configures the public
- * UI URL (`--ui-public-url` / `HOMERAIL_UI_PUBLIC_URL`), its exact canonical
- * Origin is additionally accepted so reverse proxies that rewrite the Host
- * header keep working; the request-derived self Origin remains accepted for
- * direct local/LAN access. Manager performs the canonical authorization after
- * this hop; this check only rejects obvious browser cross-origin mutations.
- * `Forwarded`/`X-Forwarded-*` headers are never consulted here.
+ * The request-derived Origin is accepted without configuration only for a
+ * literal IP address or the special-use localhost domain. Named LAN/public
+ * hosts must be explicitly pinned with `--ui-public-url` /
+ * `HOMERAIL_UI_PUBLIC_URL`. Otherwise a DNS-rebinding origin could choose an
+ * arbitrary matching Host+Origin pair and be promoted to the Manager's trusted
+ * loopback proxy hop. `Forwarded`/`X-Forwarded-*` are never consulted here.
  */
 export function authorizeUiAdminProxyMutation(
   request: UiMutationRequestTrust,
@@ -74,7 +74,8 @@ export function authorizeUiAdminProxyMutation(
   const publicOrigin = configuredPublicOrigin
     ? normalizeExactHttpOrigin(configuredPublicOrigin)
     : undefined;
-  if (requestOrigin !== selfOrigin && requestOrigin !== publicOrigin) {
+  const safeDirectOrigin = requestOrigin === selfOrigin && isSafeDirectUiOrigin(selfOrigin);
+  if (!safeDirectOrigin && requestOrigin !== publicOrigin) {
     return { allowed: false, reason: "Cross-origin UI mutation requests are forbidden" };
   }
 
@@ -83,6 +84,16 @@ export function authorizeUiAdminProxyMutation(
     return { allowed: false, reason: "Cross-origin UI mutation requests are forbidden" };
   }
   return { allowed: true };
+}
+
+function isSafeDirectUiOrigin(origin: string): boolean {
+  const parsed = new URL(origin);
+  const hostname = parsed.hostname.startsWith("[") && parsed.hostname.endsWith("]")
+    ? parsed.hostname.slice(1, -1)
+    : parsed.hostname;
+  return hostname === "localhost"
+    || hostname.endsWith(".localhost")
+    || net.isIP(hostname) !== 0;
 }
 
 function singleHeader(value: string | string[] | undefined): string | undefined {

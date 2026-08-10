@@ -6,7 +6,7 @@ import {
 } from "../src/ui-admin-proxy.js";
 
 describe("Agent UI mutation proxy trust", () => {
-  it("derives local and LAN self Origins from each request", () => {
+  it("derives localhost and literal LAN-IP self Origins from each request", () => {
     expect(authorizeUiAdminProxyMutation({
       protocol: "https",
       host: "localhost:19192",
@@ -15,10 +15,22 @@ describe("Agent UI mutation proxy trust", () => {
     })).toEqual({ allowed: true });
     expect(authorizeUiAdminProxyMutation({
       protocol: "http",
-      host: "homerail.lan:19193",
-      origin: "http://homerail.lan:19193",
+      host: "192.168.1.25:19193",
+      origin: "http://192.168.1.25:19193",
       secFetchSite: "same-origin",
     })).toEqual({ allowed: true });
+  });
+
+  it("rejects an unpinned named Host even when Host and Origin match", () => {
+    expect(authorizeUiAdminProxyMutation({
+      protocol: "http",
+      host: "attacker-rebind.example:19193",
+      origin: "http://attacker-rebind.example:19193",
+      secFetchSite: "same-origin",
+    })).toEqual({
+      allowed: false,
+      reason: "Cross-origin UI mutation requests are forbidden",
+    });
   });
 
   it("rejects missing and cross-origin browser mutations", () => {
@@ -45,6 +57,7 @@ describe("Agent UI mutation proxy trust", () => {
     expect(isProtectedApiMutation("PUT", "/api/manager-agent/config")).toBe(true);
     expect(isProtectedApiMutation("PATCH", "/api/future-route")).toBe(true);
     expect(isProtectedApiMutation("DELETE", "/api/plugins/demo")).toBe(true);
+    expect(isProtectedApiMutation("POST", "/api/browser-tools/renderer-ticket")).toBe(true);
     expect(isProtectedApiMutation("GET", "/api/plugins")).toBe(false);
     expect(isProtectedApiMutation("POST", "/health")).toBe(false);
   });
@@ -96,6 +109,15 @@ describe("configured external UI Origin", () => {
       origin: "http://127.0.0.1:19192",
       secFetchSite: "same-origin",
     }, publicOrigin)).toEqual({ allowed: true });
+  });
+
+  it("rejects other matching named Origins once the public Origin is pinned", () => {
+    expect(authorizeUiAdminProxyMutation({
+      protocol: "http",
+      host: "attacker-rebind.example:19192",
+      origin: "http://attacker-rebind.example:19192",
+      secFetchSite: "same-origin",
+    }, publicOrigin)).toMatchObject({ allowed: false });
   });
 
   it("compares canonical Origins for case and default ports", () => {

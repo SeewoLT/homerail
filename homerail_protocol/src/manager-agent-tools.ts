@@ -9,6 +9,7 @@ import {
   MANAGER_AGENT_SKILL_VIEW_PRESENT_TOOL_NAME,
   MANAGER_AGENT_SKILL_VIEW_RENDER_TOOL_NAME,
 } from "./manager-agent-skill-views.js";
+import { homeRailUiToolContract } from "./browser-tools.js";
 
 export const MANAGER_AGENT_WIDGET_FILE_TYPES = [
   "memo",
@@ -74,6 +75,12 @@ export interface ManagerAgentDagActorCommandInput {
 }
 
 export const MANAGER_AGENT_COMMON_TOOL_NAMES = [
+  "ui_get_state",
+  "ui_open_surface",
+  "ui_close_surface",
+  "ui_describe_widget",
+  "ui_focus_widget",
+  "ui_set_widget_expanded",
   "list_projects",
   "list_skills",
   "read_skill",
@@ -818,6 +825,36 @@ const updateVoiceSurfaceSchema = {
 };
 
 export const MANAGER_AGENT_TOOL_SPECS: Record<ManagerAgentToolName, AgentToolDefinition> = {
+  ui_get_state: {
+    name: "ui_get_state",
+    description: homeRailUiToolContract("ui_get_state")!.description,
+    input_schema: homeRailUiToolContract("ui_get_state")!.input_schema,
+  },
+  ui_open_surface: {
+    name: "ui_open_surface",
+    description: homeRailUiToolContract("ui_open_surface")!.description,
+    input_schema: homeRailUiToolContract("ui_open_surface")!.input_schema,
+  },
+  ui_close_surface: {
+    name: "ui_close_surface",
+    description: homeRailUiToolContract("ui_close_surface")!.description,
+    input_schema: homeRailUiToolContract("ui_close_surface")!.input_schema,
+  },
+  ui_describe_widget: {
+    name: "ui_describe_widget",
+    description: homeRailUiToolContract("ui_describe_widget")!.description,
+    input_schema: homeRailUiToolContract("ui_describe_widget")!.input_schema,
+  },
+  ui_focus_widget: {
+    name: "ui_focus_widget",
+    description: homeRailUiToolContract("ui_focus_widget")!.description,
+    input_schema: homeRailUiToolContract("ui_focus_widget")!.input_schema,
+  },
+  ui_set_widget_expanded: {
+    name: "ui_set_widget_expanded",
+    description: homeRailUiToolContract("ui_set_widget_expanded")!.description,
+    input_schema: homeRailUiToolContract("ui_set_widget_expanded")!.input_schema,
+  },
   list_projects: {
     name: "list_projects",
     description: "List projects known by the HomeRail Manager.",

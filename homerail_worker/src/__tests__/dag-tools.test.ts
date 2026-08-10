@@ -158,6 +158,67 @@ describe("DAG tools", () => {
       expect(state.yielded).toBe(false);
     });
 
+    it("projects a shared exact output contract and rejects a top-level-only summary", async () => {
+      const voteSchema = {
+        type: "object",
+        additionalProperties: false,
+        required: ["reviewer", "summary"],
+        properties: {
+          reviewer: { type: "string", const: "qwen" },
+          summary: { type: "string", minLength: 1 },
+        },
+      };
+      const contracted = createDagToolsState(makeConfig({
+        outgoing_edges: [
+          { from_port: "voted", to_node: "normalize", to_port: "vote" },
+          { from_port: "failed", to_node: "normalize", to_port: "vote" },
+        ],
+        output_contracts: {
+          voted: { contract: "VerificationVote", schema: voteSchema },
+          failed: { contract: "VerificationVote", schema: structuredClone(voteSchema) },
+        },
+      }), "run-contracted", wsSend);
+      const handoffTool = createDagTools(contracted).find((tool) => tool.name === "handoff")!;
+
+      expect((handoffTool.input_schema.properties as Record<string, unknown>).content)
+        .toEqual(voteSchema);
+
+      const rejected = await handoffTool.handler({
+        port: "voted",
+        content: { reviewer: "qwen" },
+        summary: "This does not satisfy content.summary",
+      });
+      expect(rejected).toMatchObject({ is_error: true });
+      expect(contracted.yielded).toBe(false);
+      expect(contracted.contractStage).toBe("contract_validation");
+      expect(contracted.toolArgumentParseError).toContain("summary");
+
+      const accepted = await handoffTool.handler({
+        port: "voted",
+        content: { reviewer: "qwen", summary: "Contract summary" },
+      });
+      expect(accepted.is_error).toBeFalsy();
+      expect(contracted.yielded).toBe(true);
+    });
+
+    it("keeps generic handoff content when output ports have different contracts", () => {
+      const contracted = createDagToolsState(makeConfig({
+        outgoing_edges: [
+          { from_port: "done", to_node: "terminal", to_port: "result" },
+          { from_port: "failed", to_node: "failed", to_port: "error" },
+        ],
+        output_contracts: {
+          done: { contract: "Result", schema: { type: "object", required: ["result"] } },
+          failed: { contract: "Failure", schema: { type: "object", required: ["error"] } },
+        },
+      }), "run-mixed-contracts", wsSend);
+      const handoffTool = createDagTools(contracted).find((tool) => tool.name === "handoff")!;
+      const content = (handoffTool.input_schema.properties as Record<string, Record<string, unknown>>).content;
+
+      expect(content.type).toBeUndefined();
+      expect(content.description).toContain("完整交接内容");
+    });
+
     it("records missing and invalid tool-argument parse states without yielding", async () => {
       const tools = createDagTools(state);
       const handoffTool = tools.find((t) => t.name === "handoff")!;

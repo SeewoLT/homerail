@@ -33,6 +33,101 @@ afterEach(async () => {
 });
 
 describe("static Agent UI mutation proxy", () => {
+  it("proxies only the exact same-origin browser renderer WebSocket route", async () => {
+    const upgradedPaths: string[] = [];
+    let observedHeaders: http.IncomingHttpHeaders = {};
+    const manager = http.createServer();
+    manager.on("upgrade", (req, socket) => {
+      trackSocket(socket);
+      upgradedPaths.push(req.url || "");
+      observedHeaders = req.headers;
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: websocket\r\n\r\n",
+      );
+      socket.end();
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    await startStaticUi({ port: uiPort, host: "127.0.0.1", origin: uiOrigin, managerUrl });
+
+    expect(await websocketUpgrade(uiPort, "/ws/browser-tools/renderer", uiOrigin, {
+      Forwarded: "for=192.0.2.1;host=evil.example",
+      "X-Forwarded-Port": "443",
+      "X-Forwarded-Scheme": "https",
+      "X-Real-IP": "192.0.2.1",
+    }))
+      .toContain("HTTP/1.1 101 Switching Protocols");
+    expect(upgradedPaths).toEqual(["/ws/browser-tools/renderer"]);
+    expect(observedHeaders.forwarded).toBeUndefined();
+    expect(observedHeaders["x-forwarded-port"]).toBeUndefined();
+    expect(observedHeaders["x-forwarded-scheme"]).toBeUndefined();
+    expect(observedHeaders["x-real-ip"]).toBeUndefined();
+    expect(observedHeaders["sec-fetch-site"]).toBe("same-origin");
+
+    for (const candidate of [
+      "/ws/browser-tools",
+      "/ws/browser-tools/renderer/",
+      "/ws/browser-tools/renderer.evil",
+      "/ws/browser-tools/renderer?ticket=forbidden",
+      "/ws/unknown",
+    ]) {
+      await websocketUpgrade(uiPort, candidate, uiOrigin).catch(() => "");
+    }
+    expect(upgradedPaths).toEqual(["/ws/browser-tools/renderer"]);
+  }, 15_000);
+
+  it("guards renderer tickets at the browser-facing Origin and rewrites proxy trust headers", async () => {
+    let managerHits = 0;
+    let observedHeaders: http.IncomingHttpHeaders = {};
+    const manager = http.createServer((req, res) => {
+      managerHits += 1;
+      observedHeaders = req.headers;
+      req.resume();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    await startStaticUi({ port: uiPort, host: "127.0.0.1", origin: uiOrigin, managerUrl });
+
+    expect((await fetch(`${uiOrigin}/api/browser-tools/renderer-ticket`, {
+      method: "POST",
+      headers: {
+        Origin: "https://evil.example",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    })).status).toBe(403);
+    expect(managerHits).toBe(0);
+
+    expect((await fetch(`${uiOrigin}/api/browser-tools/renderer-ticket`, {
+      method: "POST",
+      headers: {
+        Origin: uiOrigin,
+        "Content-Type": "application/json",
+        Forwarded: "for=192.0.2.1;host=evil.example",
+        "X-Forwarded-Host": "evil.example",
+        "X-Forwarded-Port": "443",
+        "X-Forwarded-Scheme": "https",
+        "X-Real-IP": "192.0.2.1",
+      },
+      body: "{}",
+    })).status).toBe(200);
+    expect(managerHits).toBe(1);
+    expect(observedHeaders.forwarded).toBeUndefined();
+    expect(observedHeaders["x-forwarded-host"]).toBeUndefined();
+    expect(observedHeaders["x-forwarded-port"]).toBeUndefined();
+    expect(observedHeaders["x-forwarded-scheme"]).toBeUndefined();
+    expect(observedHeaders["x-real-ip"]).toBeUndefined();
+    expect(observedHeaders["sec-fetch-site"]).toBe("same-origin");
+  }, 15_000);
+
   it("proxies the Manager event WebSocket used by runtime environment updates", async () => {
     let upgradedPath = "";
     const manager = http.createServer();
@@ -443,6 +538,37 @@ describe("static Agent UI mutation proxy", () => {
     expect(managerHits).toBe(1);
   }, 15_000);
 
+  it("rejects an unpinned named Host at the real static proxy even when Origin matches", async () => {
+    let managerHits = 0;
+    const manager = http.createServer((req, res) => {
+      managerHits++;
+      req.resume();
+      res.writeHead(200).end();
+    });
+    servers.push(manager);
+    const managerUrl = await listen(manager, "127.0.0.1");
+    const uiPort = await reservePort();
+    const uiOrigin = `http://127.0.0.1:${uiPort}`;
+    const namedHost = `homerail.lan:${uiPort}`;
+    const namedOrigin = `http://${namedHost}`;
+    await startStaticUi({ port: uiPort, host: "127.0.0.1", origin: uiOrigin, managerUrl });
+
+    for (const path of ["/api/runs", "/api/browser-tools/renderer-ticket"]) {
+      const response = await mutationRequest({
+        protocol: "http",
+        port: uiPort,
+        path,
+        headers: {
+          Host: namedHost,
+          Origin: namedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+      });
+      expect(response.status, path).toBe(403);
+    }
+    expect(managerHits).toBe(0);
+  }, 15_000);
+
   it("does not trust forged Forwarded or X-Forwarded-Host headers", async () => {
     let managerHits = 0;
     const manager = http.createServer((req, res) => {
@@ -691,7 +817,12 @@ async function reservePort(host = "127.0.0.1"): Promise<number> {
   return port;
 }
 
-async function websocketUpgrade(port: number, requestPath: string, origin?: string): Promise<string> {
+async function websocketUpgrade(
+  port: number,
+  requestPath: string,
+  origin?: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const socket = trackSocket(net.createConnection({ host: "127.0.0.1", port }));
     let response = "";
@@ -701,6 +832,9 @@ async function websocketUpgrade(port: number, requestPath: string, origin?: stri
     }, 5_000);
     socket.setEncoding("utf8");
     socket.on("connect", () => {
+      const extraHeaderLines = Object.entries(extraHeaders)
+        .map(([name, value]) => `${name}: ${value}\r\n`)
+        .join("");
       socket.write(
         `GET ${requestPath} HTTP/1.1\r\n` +
         `Host: 127.0.0.1:${port}\r\n` +
@@ -709,6 +843,7 @@ async function websocketUpgrade(port: number, requestPath: string, origin?: stri
         "Sec-WebSocket-Version: 13\r\n" +
         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
         (origin ? `Origin: ${origin}\r\n` : "") +
+        extraHeaderLines +
         "\r\n",
       );
     });

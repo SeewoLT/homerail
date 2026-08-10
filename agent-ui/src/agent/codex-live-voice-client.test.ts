@@ -5,6 +5,7 @@ import {
   type CodexLiveVoiceEvent,
   type CodexLiveVoiceState,
 } from './codex-live-voice-client'
+import { setDesktopBrowserToolsTransportAvailable } from '@/browser-tools/browser-renderer-bridge'
 
 class FakeSocket extends EventTarget {
   readyState = WebSocket.CONNECTING
@@ -185,11 +186,13 @@ function fakeAudio(): HTMLAudioElement {
 }
 
 afterEach(() => {
+  setDesktopBrowserToolsTransportAvailable(false)
   vi.useRealTimers()
 })
 
 describe('CodexLiveVoiceClient', () => {
   it('negotiates WebRTC, creates oai-events before the offer, and keeps text on the Live session', async () => {
+    setDesktopBrowserToolsTransportAvailable(true)
     const socket = new FakeSocket()
     const peer = new FakePeer()
     const { stream, track } = fakeMedia()
@@ -215,6 +218,7 @@ describe('CodexLiveVoiceClient', () => {
       type: 'start',
       sdp: 'offer-sdp',
       project_id: 'project-1',
+      browser_tools_transport: 'desktop',
     }))
     expect(states).toContain('listening')
 

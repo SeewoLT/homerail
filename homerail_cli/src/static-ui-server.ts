@@ -14,10 +14,9 @@
 //   HOMERAIL_UI_HTTPS_CERT      PEM cert path (HTTPS only)
 //   HOMERAIL_MANAGER_HTTP       manager HTTP origin, e.g. http://localhost:19191
 //   HOMERAIL_MANAGER_WS         manager WS origin, e.g. ws://localhost:19191
-//   HOMERAIL_UI_PUBLIC_URL      explicit public UI URL (exact http(s) Origin) additionally
-//                               accepted for protected mutations when a reverse proxy
-//                               rewrites the Host header; unset keeps strict
-//                               request-derived same-origin behavior
+//   HOMERAIL_UI_PUBLIC_URL      explicit public/named UI URL (exact http(s) Origin) accepted
+//                               for protected mutations when a reverse proxy rewrites Host;
+//                               unset permits only localhost/.localhost or literal-IP self Origins
 //   HOMERAIL_DAG_MUTATION_TOKEN internal token added to trusted same-origin mutations
 import http from "node:http";
 import https from "node:https";
@@ -30,6 +29,11 @@ import {
   isProtectedApiMutation,
   normalizeExactHttpOrigin,
 } from "./ui-admin-proxy.js";
+
+// Keep the production static server zero-dependency. Protocol tests assert
+// these literals stay in sync with homerail-protocol.
+const BROWSER_RENDERER_TOOLS_TICKET_PATH = "/api/browser-tools/renderer-ticket";
+const BROWSER_RENDERER_TOOLS_WS_PATH = "/ws/browser-tools/renderer";
 
 const ROOT = path.resolve(process.env.HOMERAIL_STATIC_UI_DIR || "");
 const PORT = Number(process.env.HOMERAIL_UI_PORT || 19192);
@@ -69,7 +73,25 @@ function resolveConfiguredPublicOrigin(): string | undefined {
 //   /api/voice/asr/realtime               same-origin ASR realtime
 //   /api/voice-agent/sessions/<id>/live   Codex Live Voice (dynamic sessionId)
 const CODEX_LIVE_VOICE_WS_PATH = /^\/api\/voice-agent\/sessions\/[^/]+\/live$/;
-const ALLOWED_WS_PATHS = new Set(["/ws", "/ws/events", "/api/voice/asr/realtime"]);
+const ALLOWED_WS_PATHS = new Set([
+  "/ws",
+  "/ws/events",
+  "/api/voice/asr/realtime",
+  BROWSER_RENDERER_TOOLS_WS_PATH,
+]);
+
+function stripForwardingClaims(headers: http.OutgoingHttpHeaders): void {
+  for (const name of Object.keys(headers)) {
+    const normalized = name.toLowerCase();
+    if (
+      normalized === "forwarded"
+      || normalized === "x-real-ip"
+      || normalized.startsWith("x-forwarded-")
+    ) {
+      delete headers[name];
+    }
+  }
+}
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -225,6 +247,14 @@ function proxyHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
       headers["x-homerail-dag-token"] = DAG_MUTATION_TOKEN;
     }
   }
+  const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  if (pathname === BROWSER_RENDERER_TOOLS_TICKET_PATH) {
+    // The browser-facing Host/Origin pair was checked above. Strip any
+    // forwarding metadata received from an outer proxy and write the only
+    // same-origin marker Manager accepts over this loopback UI-proxy hop.
+    stripForwardingClaims(headers);
+    headers["sec-fetch-site"] = "same-origin";
+  }
   const request = target.protocol === "https:" ? https.request : http.request;
   const proxyReq = request(
     {
@@ -252,6 +282,22 @@ function handleWebSocket(req: http.IncomingMessage, socket: net.Socket, head: Bu
   // stream and Voice ASR's same-origin realtime endpoint.
   const target = new URL(MANAGER_WS);
   const request = target.protocol === "wss:" ? https.request : http.request;
+  const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  const headers: http.OutgoingHttpHeaders = { ...req.headers, host: target.host };
+  if (pathname === BROWSER_RENDERER_TOOLS_WS_PATH) {
+    const authorization = authorizeUiAdminProxyMutation({
+      protocol: USE_HTTPS ? "https" : "http",
+      host: req.headers.host,
+      origin: req.headers.origin,
+      secFetchSite: req.headers["sec-fetch-site"],
+    }, CONFIGURED_PUBLIC_ORIGIN);
+    if (!authorization.allowed) {
+      socket.destroy();
+      return;
+    }
+    stripForwardingClaims(headers);
+    headers["sec-fetch-site"] = "same-origin";
+  }
   let proxySocket: net.Socket | undefined;
   let proxyReq: http.ClientRequest | undefined;
   const destroyUpstream = (): void => {
@@ -271,7 +317,7 @@ function handleWebSocket(req: http.IncomingMessage, socket: net.Socket, head: Bu
       hostname: target.hostname,
       port: target.port,
       path: req.url,
-      headers: { ...req.headers, host: target.host },
+      headers,
     },
     (proxyRes) => {
       proxyRes.resume();
@@ -327,7 +373,12 @@ function onRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
 }
 
 server.on("upgrade", (req, socket, head) => {
-  const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  const requestUrl = new URL(req.url || "/", "http://localhost");
+  const pathname = requestUrl.pathname;
+  if (pathname === BROWSER_RENDERER_TOOLS_WS_PATH && requestUrl.search) {
+    socket.destroy();
+    return;
+  }
   if (ALLOWED_WS_PATHS.has(pathname) || CODEX_LIVE_VOICE_WS_PATH.test(pathname)) {
     handleWebSocket(req, socket as unknown as net.Socket, head);
     return;

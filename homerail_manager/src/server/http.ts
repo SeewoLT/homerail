@@ -54,13 +54,23 @@ import {
 } from "./plugin-http-trust.js";
 import { getManagerAgentTurnEnvelopeAuthority } from "./manager-agent-turn-envelope.js";
 import { startDagTriggerScheduler } from "../runtime/dag-triggers.js";
-import { readOrCreateControlPlaneToken } from "../persistence/control-plane-secret.js";
+import {
+  readOrCreateBrowserToolsToken,
+  readOrCreateControlPlaneToken,
+} from "../persistence/control-plane-secret.js";
 import { startWorkspaceCleanupScheduler } from "../runtime/workspace-retention.js";
 import { runArtifactRoutesHandler } from "./run-artifacts.js";
 import { startRunArtifactService } from "../runtime/run-artifact-service.js";
 import { startDagActorLeaseReaper } from "../runtime/dag-actor-lease-reaper.js";
 import { credentialRoutesHandler } from "./credentials.js";
 import { executeCredentialBrokerCall } from "../runtime/credential-broker.js";
+import { setupBrowserToolsWebSocket } from "./browser-tools-websocket.js";
+import { toolProviderRoutesHandler } from "./tool-providers.js";
+import { browserUiToolRoutesHandler } from "./browser-ui-tools.js";
+import {
+  browserRendererTicketRoutesHandler,
+  setupBrowserRendererToolsWebSocket,
+} from "./browser-renderer-tools-websocket.js";
 
 function json(res: http.ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -247,6 +257,7 @@ export function createServer(
     },
   });
   const workerControlPlaneAuth = resolveWorkerControlPlaneAuth();
+  const browserToolsAuthToken = readOrCreateBrowserToolsToken();
   const effectiveWorkerToken = wsOptions?.authToken?.trim()
     || workerControlPlaneAuth.token;
   const effectiveWorkerTokenIsExplicit = Boolean(wsOptions?.authToken?.trim())
@@ -387,6 +398,18 @@ export function createServer(
     }
 
     if (mcpServersRoutesHandler(req, res)) {
+      return;
+    }
+
+    if (toolProviderRoutesHandler(req, res)) {
+      return;
+    }
+
+    if (browserRendererTicketRoutesHandler(req, res)) {
+      return;
+    }
+
+    if (browserUiToolRoutesHandler(req, res)) {
       return;
     }
 
@@ -544,6 +567,8 @@ export function createServer(
   setupWorkerWebSocket(server, workerWebsocketOptions);
   setupNodeWebSocket(server, nodeWebsocketOptions);
   setupEventWebSocket(server);
+  setupBrowserToolsWebSocket(server, { authToken: browserToolsAuthToken });
+  setupBrowserRendererToolsWebSocket(server, { trustPolicy: pluginHttpTrust });
   setupVoiceRealtimeWebSocket(server);
   setupCodexLiveVoiceWebSocket(server, {
     trustPolicy: pluginHttpTrust,

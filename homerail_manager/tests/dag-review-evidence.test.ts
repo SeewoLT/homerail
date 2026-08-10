@@ -24,6 +24,7 @@ import {
   recordReviewCoverage,
   recordReviewFinding,
   reviewEvidenceProjectionPath,
+  reviewEvidenceProjectionWorkspacePath,
   writeReviewEvidenceProjectionFile,
   type ReviewEvidenceFence,
   type ReviewEvidenceIdentity,
@@ -361,26 +362,41 @@ nodes:
     outputs:
       voted:
         to: ""
+  kimi_review:
+    agent: reviewer
+    outputs:
+      voted:
+        to: ""
 `);
     createActiveRun("run-evidence-correction", parsed);
     const run = getActiveRun("run-evidence-correction")!;
-    const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === "qwen_review")!;
-    node.extra = {
-      ...node.extra,
-      workflow_spec_v1: {
-        ...(node.extra?.workflow_spec_v1 && typeof node.extra.workflow_spec_v1 === "object"
-          ? node.extra.workflow_spec_v1 as Record<string, unknown>
-          : {}),
-        review_evidence: true,
-      },
-    };
+    for (const nodeId of ["qwen_review", "kimi_review"]) {
+      const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === nodeId)!;
+      node.extra = {
+        ...node.extra,
+        agent_runtime: {
+          workspace_access: {
+            writable_paths: [],
+            readonly_paths: ["repository", "review-evidence"],
+          },
+        },
+        workflow_spec_v1: {
+          ...(node.extra?.workflow_spec_v1 && typeof node.extra.workflow_spec_v1 === "object"
+            ? node.extra.workflow_spec_v1 as Record<string, unknown>
+            : {}),
+          review_evidence: true,
+        },
+      };
+    }
+    const dispatched: Parameters<DAGDispatcher["dispatch"]>[0][] = [];
     const dispatcher: DAGDispatcher = {
       dispatched: [],
-      dispatch() {
+      dispatch(envelope) {
+        dispatched.push(envelope);
         return { status: "dispatched", targetType: "fake", targetId: "fake" };
       },
     };
-    expect(dispatchReadyNodes("run-evidence-correction", dispatcher)).toBe(1);
+    expect(dispatchReadyNodes("run-evidence-correction", dispatcher)).toBe(2);
 
     const identityFor = {
       runId: "run-evidence-correction",
@@ -391,6 +407,19 @@ nodes:
       generation: 1,
       attempt: 1,
     };
+    const kimiIdentity = {
+      ...identityFor,
+      reviewer: "kimi_review",
+      nodeId: "kimi_review",
+      sessionId: getActiveRun("run-evidence-correction")!.nodeSessions.get("kimi_review")!.sessionId,
+    };
+    const expectedProjectionExclusions = [identityFor, kimiIdentity]
+      .map(reviewEvidenceProjectionWorkspacePath)
+      .sort();
+    expect(dispatched).toHaveLength(2);
+    for (const envelope of dispatched) {
+      expect(envelope.workspaceAccess?.snapshot_exclude_paths).toEqual(expectedProjectionExclusions);
+    }
     recordReviewFinding({ identity: identityFor, finding: finding() });
 
     const correction = requestNodeCorrection(

@@ -219,6 +219,9 @@ client.on("task", async (msg) => {
         })),
         incoming_edges: [],
         graph_nodes: [nodeId],
+        output_contracts: envelope.outputContracts && typeof envelope.outputContracts === "object"
+          ? envelope.outputContracts as Record<string, { contract: string; schema: unknown }>
+          : undefined,
         session_id: sessionId,
         ...envelopeActivityToDagConfig(activity),
         advisors: Array.isArray(envelope.advisors) ? envelope.advisors as DagAdvisorConfig[] : undefined,

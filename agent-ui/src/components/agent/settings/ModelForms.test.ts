@@ -290,6 +290,33 @@ describe('model purpose forms', () => {
     }
   })
 
+  it('cancels a pending credential probe when the form unmounts', async () => {
+    vi.useFakeTimers()
+    try {
+      const root = await mount(ModelForm, {
+        providers: [provider],
+        purpose: 'asr'
+      })
+      const credential = Array.from(root.querySelectorAll('button')).find(button =>
+        button.textContent?.includes('API 计费')
+      )!
+      credential.click()
+      await nextTick()
+      const keyInput = root.querySelector<HTMLInputElement>('input[type="password"]')!
+      keyInput.value = 'pending-secret'
+      keyInput.dispatchEvent(new Event('input'))
+      await nextTick()
+
+      app?.unmount()
+      app = null
+      await vi.advanceTimersByTimeAsync(600)
+
+      expect(probeModels).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('uses a separate edit form with a read-only provider binding', async () => {
     let submitted: EditModelPayload | undefined
     const root = await mount(EditModelForm, {

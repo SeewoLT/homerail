@@ -2,6 +2,7 @@
 import { FlaskConical, Focus } from 'lucide-vue-next'
 import { useI18n } from 'vue-i18n'
 import { useUiStore } from '@/stores/ui-store'
+import BrowserToolsSettings from './BrowserToolsSettings.vue'
 
 const { t } = useI18n()
 const uiStore = useUiStore()
@@ -23,6 +24,8 @@ const uiStore = useUiStore()
         {{ t('settings.experimental.description') }}
       </p>
     </div>
+
+    <BrowserToolsSettings />
 
     <div
       class="rounded-2xl border border-[var(--hr-settings-divider)] bg-[var(--hr-settings-card)] p-5"

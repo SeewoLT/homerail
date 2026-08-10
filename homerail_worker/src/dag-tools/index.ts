@@ -77,6 +77,8 @@ export interface DagToolsState {
   commandId?: string;
   graphNodes: string[];
   availablePorts: string[];
+  /** Manager-projected exact output contracts, keyed by declared port. */
+  outputContracts?: DagNodeConfig["output_contracts"];
   outgoingEdges: Edge[];
   incomingEdges: Edge[];
   /** Whether handoff has been called this turn. */
@@ -150,6 +152,7 @@ export function createDagToolsState(
     commandId: config.command_id,
     graphNodes: config.graph_nodes,
     availablePorts: [...ports].sort(),
+    outputContracts: config.output_contracts,
     outgoingEdges: config.outgoing_edges,
     incomingEdges: config.incoming_edges,
     yielded: false,

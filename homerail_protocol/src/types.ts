@@ -614,6 +614,8 @@ export interface DagNodeConfig {
   outgoing_edges: Edge[];
   incoming_edges: Edge[];
   graph_nodes: string[];
+  /** Trusted exact output contracts projected by Manager for this dispatch. */
+  output_contracts?: Record<string, { contract: string; schema: unknown }>;
   session_id?: string;
   /** Dispatch routing metadata. It may be omitted only for legacy first-round work. */
   round_id?: string;

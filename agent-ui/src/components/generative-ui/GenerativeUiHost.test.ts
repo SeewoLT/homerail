@@ -12,6 +12,7 @@ import { GenerativeUiRendererRegistry } from '@/generative-ui/renderer-registry'
 import GenerativeUiNodeHost from './GenerativeUiNodeHost.vue'
 import GenerativeUiSurfaceHost from './GenerativeUiSurfaceHost.vue'
 import TopicOutlineRenderer from '@/plugins/builtin/topic-outline/TopicOutlineRenderer.vue'
+import { homeRailUiWidgetRegistry } from '@/browser-tools/widget-registry'
 
 const ExactRenderer = defineComponent({
   name: 'ExactRenderer',
@@ -138,12 +139,185 @@ function mountReactive(
 afterEach(() => {
   app?.unmount()
   root?.remove()
+  homeRailUiWidgetRegistry.clear()
   app = null
   root = null
   vi.useRealTimers()
 })
 
 describe('GenerativeUiNodeHost', () => {
+  it('registers exact widget identity and exposes semantic focus and expansion', async () => {
+    const mounted = mount(GenerativeUiNodeHost, {
+      documentId: 'document-one',
+      documentRevision: 4,
+      node: node('node-one', { revision: 2 }),
+      placement: placement(),
+      context,
+      registry: registry(),
+    })
+    await nextTick()
+    const host = mounted.querySelector<HTMLElement>('[data-generative-ui-node="node-one"]')!
+    const target = {
+      document_id: 'document-one',
+      document_revision: 4,
+      widget_id: 'node-one',
+      widget_revision: 2,
+    }
+
+    expect(host.dataset.documentId).toBe('document-one')
+    expect(host.dataset.documentRevision).toBe('4')
+    expect(host.dataset.nodeRevision).toBe('2')
+    expect(host.dataset.renderState).toBe('stable')
+    expect(homeRailUiWidgetRegistry.describe(target)).toMatchObject({
+      ...target,
+      kind: 'com.example.plugin/card',
+      visible: true,
+      focused: false,
+      expanded: false,
+    })
+
+    homeRailUiWidgetRegistry.focus(target)
+    expect(document.activeElement).toBe(host)
+    expect(homeRailUiWidgetRegistry.setExpanded(target, true)).toMatchObject({ expanded: true })
+    await nextTick()
+    expect(host.dataset.expanded).toBe('true')
+  })
+
+  it('fails closed for a widget inside a hidden ancestor', async () => {
+    const hiddenHost = defineComponent({
+      render() {
+        return h('div', { style: { display: 'none' } }, [
+          h(GenerativeUiNodeHost, {
+            documentId: 'document-hidden',
+            documentRevision: 1,
+            node: node('node-hidden'),
+            placement: placement('node-hidden'),
+            context,
+            registry: registry(),
+          }),
+        ])
+      },
+    })
+    mount(hiddenHost, {})
+    await nextTick()
+    const target = {
+      document_id: 'document-hidden',
+      document_revision: 1,
+      widget_id: 'node-hidden',
+      widget_revision: 1,
+    }
+
+    expect(homeRailUiWidgetRegistry.describe(target).visible).toBe(false)
+    expect(() => homeRailUiWidgetRegistry.focus(target)).toThrow(/not currently visible/)
+    expect(() => homeRailUiWidgetRegistry.setExpanded(target, true)).toThrow(/not currently visible/)
+  })
+
+  it('removes historical content from the current-revision widget registry', async () => {
+    const mounted = mount(GenerativeUiNodeHost, {
+      documentId: 'document-history',
+      documentRevision: 5,
+      node: node('node-history', { revision: 3 }),
+      placement: placement('node-history'),
+      context,
+      registry: registry(),
+      generation: {
+        superseded_count: 1,
+        history: [{
+          key: 'history-one',
+          node: node('node-history', {
+            revision: 2,
+            fallback: { title: 'Historical node', summary: 'Historical summary' },
+          }),
+          created_at: 1_789_000_000_000,
+        }],
+        history_loading: false,
+        history_loaded: true,
+      },
+    })
+    await nextTick()
+    const target = {
+      document_id: 'document-history',
+      document_revision: 5,
+      widget_id: 'node-history',
+      widget_revision: 3,
+    }
+    expect(homeRailUiWidgetRegistry.describe(target).widget_revision).toBe(3)
+
+    homeRailUiWidgetRegistry.setExpanded(target, true)
+    await nextTick()
+    const tabs = mounted.querySelectorAll<HTMLButtonElement>('[data-generation-history] [role="tab"]')
+    expect(tabs).toHaveLength(2)
+    tabs[1]!.click()
+    await nextTick()
+    await nextTick()
+    const host = mounted.querySelector<HTMLElement>('[data-generative-ui-node="node-history"]')!
+    expect(mounted.textContent).toContain('Historical node')
+    expect(host.dataset.generationState).toBe('superseded')
+    expect(host.dataset.documentId).toBeUndefined()
+    expect(host.dataset.documentRevision).toBeUndefined()
+    expect(host.dataset.nodeRevision).toBeUndefined()
+    expect(host.dataset.renderState).toBeUndefined()
+    expect(homeRailUiWidgetRegistry.snapshot().widgets).toEqual([])
+    expect(() => homeRailUiWidgetRegistry.describe(target)).toThrow(/not currently rendered/)
+
+    tabs[0]!.click()
+    await nextTick()
+    await nextTick()
+    expect(host.dataset.generationState).toBe('current')
+    expect(host.dataset.documentId).toBe('document-history')
+    expect(host.dataset.documentRevision).toBe('5')
+    expect(host.dataset.nodeRevision).toBe('3')
+    expect(host.dataset.renderState).toBe('stable')
+    expect(homeRailUiWidgetRegistry.describe(target).widget_revision).toBe(3)
+  })
+
+  it('keeps the body locked until every expanded widget is restored', async () => {
+    const rendererRegistry = registry()
+    const multipleHosts = defineComponent({
+      render() {
+        return h('div', [
+          h(GenerativeUiNodeHost, {
+            documentId: 'document-multiple',
+            documentRevision: 1,
+            node: node('node-a'),
+            placement: placement('node-a', 1),
+            context,
+            registry: rendererRegistry,
+          }),
+          h(GenerativeUiNodeHost, {
+            documentId: 'document-multiple',
+            documentRevision: 1,
+            node: node('node-b'),
+            placement: placement('node-b', 2),
+            context,
+            registry: rendererRegistry,
+          }),
+        ])
+      },
+    })
+    mount(multipleHosts, {})
+    await nextTick()
+    const target = (widgetId: string) => ({
+      document_id: 'document-multiple',
+      document_revision: 1,
+      widget_id: widgetId,
+      widget_revision: 1,
+    })
+
+    homeRailUiWidgetRegistry.setExpanded(target('node-a'), true)
+    homeRailUiWidgetRegistry.setExpanded(target('node-b'), true)
+    await nextTick()
+    expect(document.body.classList.contains('generative-ui-node-expanded')).toBe(true)
+
+    homeRailUiWidgetRegistry.setExpanded(target('node-a'), false)
+    await nextTick()
+    expect(document.body.classList.contains('generative-ui-node-expanded')).toBe(true)
+
+    homeRailUiWidgetRegistry.setExpanded(target('node-b'), false)
+    await nextTick()
+    expect(document.body.classList.contains('generative-ui-node-expanded')).toBe(false)
+  })
+
   it('renders an exact registered component', () => {
     const mounted = mount(GenerativeUiNodeHost, {
       documentId: 'document-one',

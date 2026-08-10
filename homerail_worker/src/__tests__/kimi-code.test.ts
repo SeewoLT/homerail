@@ -396,11 +396,11 @@ process.exit(2);
     });
 
     it("yields readiness error when kimi binary is not found", async () => {
-      // We test this by directly calling checkReadiness and verifying the error path
-      // The actual run() with mocked spawn is complex; test readiness separately
-      const readiness = await adapter.checkReadiness();
-      // In test environments, kimi won't be installed
-      expect(typeof readiness.ready).toBe("boolean");
+      const missingAdapter = new KimiCodeAdapter("/tmp/homerail-missing-kimi-binary-run-test");
+      const readiness = await missingAdapter.checkReadiness();
+
+      expect(readiness.ready).toBe(false);
+      expect(readiness.error).toContain("npm install -g @moonshot-ai/kimi-code");
     });
 
     it("fails explicitly when transcript resume is requested", async () => {
