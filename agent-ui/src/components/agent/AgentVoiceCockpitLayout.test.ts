@@ -134,6 +134,66 @@ describe('AgentVoiceCockpit responsive layout', () => {
     expect(cockpitSource).toContain('if (codexLiveVoiceClient !== client) return')
   })
 
+  it('suspends hidden cockpit interactions without ending Live Voice', () => {
+    expect(cockpitSource).toContain('suspended?: boolean')
+    expect(cockpitSource).toContain(':inert="interactionSuspended"')
+    expect(cockpitSource).toContain('if (interactionSuspended.value) return')
+
+    const openSettings = cockpitSource.slice(
+      cockpitSource.indexOf('function openSettings(): void'),
+      cockpitSource.indexOf('function openRuntimeOverlay(): void'),
+    )
+    expect(openSettings).toContain('store.settingsPageOpen = true')
+    expect(openSettings).not.toContain('store.voiceCockpitOpen = false')
+  })
+
+  it('only stops Live Voice for explicit actions or session and project changes', () => {
+    const projectWatcherStart = cockpitSource.indexOf('() => store.managerProjectId')
+    const projectWatcher = cockpitSource.slice(
+      projectWatcherStart,
+      cockpitSource.indexOf('watch(', projectWatcherStart + 1),
+    )
+    expect(projectWatcher).toContain('void reconcileVoiceProjectSelection()')
+
+    const reconcileProject = cockpitSource.slice(
+      cockpitSource.indexOf('async function reconcileVoiceProjectSelection('),
+      cockpitSource.indexOf('async function handleVoiceSessionSelected('),
+    )
+    expect(reconcileProject).toContain(
+      'shouldReplaceVoiceWorkspaceForProject(workspace.value, store.managerProjectId)',
+    )
+    expect(reconcileProject).toContain("cancelLocalSpeech('project_switch')")
+    expect(reconcileProject).toContain('await stopCodexLiveVoice()')
+    expect(reconcileProject).toContain('voiceTurnAbort?.abort()')
+    expect(reconcileProject).toContain('workspace.value = null')
+    expect(reconcileProject).toContain('await startSession()')
+    expect(cockpitSource).not.toContain('@project-selected="handleVoiceProjectSelected"')
+
+    const startSession = cockpitSource.slice(
+      cockpitSource.indexOf('async function startSession('),
+      cockpitSource.indexOf('async function createFreshVoiceSession('),
+    )
+    expect(startSession).toContain('const requestedProjectId = store.managerProjectId || null')
+    expect(startSession).toContain(
+      'voiceProjectSelectionChanged(requestedProjectId, store.managerProjectId)',
+    )
+    expect(cockpitSource).not.toContain('watch(codexLiveVoiceEffective')
+
+    const stopLegacyCapture = cockpitSource.slice(
+      cockpitSource.indexOf('function stopVoiceCapture(): void'),
+      cockpitSource.indexOf('function closeVoiceInputAfterSubmit(): void'),
+    )
+    expect(stopLegacyCapture).not.toContain('stopCodexLiveVoice')
+
+    const disableLiveVoice = cockpitSource.slice(
+      cockpitSource.indexOf('async function setCodexLiveVoiceEnabled('),
+      cockpitSource.indexOf('async function setCodexLiveVoiceVoice('),
+    )
+    expect(disableLiveVoice).toContain(
+      'if (!enabled && codexLiveVoiceClient) await stopCodexLiveVoice()',
+    )
+  })
+
   it('uses a dense glass model popover with an opaque fallback', () => {
     expect(cockpitSource).toContain('background: var(--hr-bg-raised);')
     expect(cockpitSource).toContain(
@@ -219,6 +279,22 @@ describe('AgentVoiceCockpit responsive layout', () => {
     expect(cockpitSource).toContain(
       '.voice-cockpit--immersive .codex-live-voice-meter--active'
     )
+  })
+
+  it('reveals the immersive exit control from direct touch and pen input', () => {
+    expect(cockpitSource).toContain(
+      'function handleImmersiveTouchPointerDown(event: PointerEvent): void'
+    )
+    expect(cockpitSource).toContain(
+      "event.pointerType !== 'touch' && event.pointerType !== 'pen'"
+    )
+    expect(cockpitSource).toContain(
+      "window.addEventListener('pointerdown', handleImmersiveTouchPointerDown"
+    )
+    expect(cockpitSource).toContain(
+      "window.removeEventListener('pointerdown', handleImmersiveTouchPointerDown)"
+    )
+    expect(cockpitSource).toContain('handleImmersivePointerMove()')
   })
 
   it('temporarily reveals Live Voice controls and returns after interaction becomes idle', () => {

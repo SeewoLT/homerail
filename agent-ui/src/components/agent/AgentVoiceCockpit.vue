@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onActivated,
+  onDeactivated,
+  onMounted,
+  onUnmounted,
+  ref,
+  watch,
+} from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAgentStore } from '@/stores/agent-store'
 import { useUiStore } from '@/stores/ui-store'
@@ -38,6 +47,10 @@ import {
   resolveVoiceSessionProjectRestore,
   VoiceSessionTransitionGuard,
 } from '@/agent/voice-session-restore'
+import {
+  shouldReplaceVoiceWorkspaceForProject,
+  voiceProjectSelectionChanged,
+} from '@/agent/voice-project-selection'
 import { VoiceCurrentSessionWriter } from '@/agent/voice-current-session-writer'
 import {
   CodexLiveVoiceClient,
@@ -180,10 +193,16 @@ const generativeUiShadowPreviewRequested =
 const props = withDefaults(
   defineProps<{
     voiceOnly?: boolean
+    suspended?: boolean
   }>(),
   {
-    voiceOnly: false
+    voiceOnly: false,
+    suspended: false
   }
+)
+const keepAliveDeactivated = ref(false)
+const interactionSuspended = computed(
+  () => props.suspended || keepAliveDeactivated.value,
 )
 const VOICE_LEFT_PANE_KEY = 'omni.voiceCockpit.leftPaneOpen'
 const VOICE_DETAILS_PANE_KEY = 'omni.voiceCockpit.detailsOpen'
@@ -425,6 +444,7 @@ let voiceAbort: AbortController | null = null
 // 避免旧 turn 的 handleVoiceStreamEvent 回调往不相关的 workspace 写数据。
 let voiceTurnAbort: AbortController | null = null
 let voiceSessionToken = 0
+let voiceProjectReconcileGeneration = 0
 let voiceHidDevice: any | null = null
 let voiceHidPressed = false
 let voiceGamepadFrame = 0
@@ -564,14 +584,17 @@ const selectedCodexLiveVoice = computed<CodexLiveVoiceV3Voice>(
     onboardingStatus.value.liveVoiceDefaultVoice ||
     'cove'
 )
-const codexLiveVoiceEffective = computed(
-  () =>
-    codexHarnessActive.value &&
-    codexLiveVoiceEnabled.value &&
-    onboardingStatus.value.liveVoiceEffective
-)
 const codexLiveVoiceSessionActive = computed(
   () => codexLiveVoiceOwnsAudio(codexLiveVoiceState.value)
+)
+const codexLiveVoiceEffective = computed(
+  () =>
+    codexLiveVoiceSessionActive.value ||
+    (
+      codexHarnessActive.value &&
+      codexLiveVoiceEnabled.value &&
+      onboardingStatus.value.liveVoiceEffective
+    )
 )
 const codexLiveVoiceConnecting = computed(
   () =>
@@ -580,6 +603,7 @@ const codexLiveVoiceConnecting = computed(
 )
 const liveVoiceImmersiveActive = computed(
   () =>
+    !interactionSuspended.value &&
     uiStore.liveVoiceImmersiveEnabled &&
     codexLiveVoiceSessionActive.value &&
     !codexLiveVoiceConnecting.value
@@ -1329,6 +1353,7 @@ onMounted(() => {
   document.addEventListener('pointerdown', closeModelMenuOnOutside)
   window.addEventListener('keydown', handleVoiceKeyboardButton, true)
   window.addEventListener('keydown', handleImmersiveKeyboard, true)
+  window.addEventListener('pointerdown', handleImmersiveTouchPointerDown, { passive: true })
   window.addEventListener('pointermove', handleImmersivePointerMove, { passive: true })
   window.addEventListener('keydown', closeModelMenuOnEscape)
   window.addEventListener('gamepadconnected', handleVoiceGamepadConnected)
@@ -1357,6 +1382,14 @@ onMounted(() => {
   setupVoiceStatusSubscription()
 })
 
+onActivated(() => {
+  keepAliveDeactivated.value = false
+})
+
+onDeactivated(() => {
+  keepAliveDeactivated.value = true
+})
+
 watch(
   () => store.onboardingOpen,
   (open, previous) => {
@@ -1367,14 +1400,21 @@ watch(
 watch(
   () => store.managerProjectId,
   () => {
-    if (codexLiveVoiceClient) void stopCodexLiveVoice()
-    void loadVoiceSessionShortcuts()
+    void reconcileVoiceProjectSelection()
   }
 )
 
-watch(codexLiveVoiceEffective, effective => {
-  if (!effective && codexLiveVoiceClient) void stopCodexLiveVoice()
-})
+watch(
+  interactionSuspended,
+  (suspended) => {
+    if (!suspended) return
+    modelMenuOpen.value = false
+    voiceHidPressed = false
+    voiceGamepadPressedButtons = new Set()
+    voiceGamepadPressedButtonIds.value = new Set()
+    voiceGamepadAxisLocks = new Set()
+  },
+)
 
 watch(
   liveVoiceImmersiveActive,
@@ -1459,6 +1499,7 @@ onUnmounted(() => {
   document.removeEventListener('pointerdown', closeModelMenuOnOutside)
   window.removeEventListener('keydown', handleVoiceKeyboardButton, true)
   window.removeEventListener('keydown', handleImmersiveKeyboard, true)
+  window.removeEventListener('pointerdown', handleImmersiveTouchPointerDown)
   window.removeEventListener('pointermove', handleImmersivePointerMove)
   window.removeEventListener('keydown', closeModelMenuOnEscape)
   window.removeEventListener('gamepadconnected', handleVoiceGamepadConnected)
@@ -1501,17 +1542,29 @@ function uninstallCodexVoiceTextBridge(): void {
 
 async function startSession(): Promise<void> {
   const previousWorkspace = workspace.value
+  const requestedProjectId = store.managerProjectId || null
   const generation = beginVoiceSessionTransition()
   loading.value = true
   error.value = ''
   try {
-    const restored = await restoreLatestSession()
+    const restored = await restoreLatestSession(requestedProjectId)
     if (!voiceSessionTransitions.isCurrent(generation)) return
+    if (voiceProjectSelectionChanged(requestedProjectId, store.managerProjectId)) {
+      void startSession()
+      return
+    }
     if (restored) {
       workspace.value = restored
+      if (!requestedProjectId && restored.project_id) {
+        store.setManagerProjectId(restored.project_id)
+      }
     } else {
-      const res = await createVoiceSession(store.managerProjectId)
+      const res = await createVoiceSession(requestedProjectId)
       if (!voiceSessionTransitions.isCurrent(generation)) return
+      if (voiceProjectSelectionChanged(requestedProjectId, store.managerProjectId)) {
+        void startSession()
+        return
+      }
       workspace.value = res.data
       // 新建的会话成为当前会话，更新服务端指针（串行化，避免乱序写）。
       submitCurrentSessionWrite(workspace.value?.session_id ?? null, generation)
@@ -1628,8 +1681,25 @@ function isUnusedVoiceSessionItem(item: VoiceSessionItem): boolean {
   )
 }
 
-async function handleVoiceProjectSelected(_projectId: string): Promise<void> {
+async function reconcileVoiceProjectSelection(): Promise<void> {
+  const generation = ++voiceProjectReconcileGeneration
+  // Coalesce rapid project writes and allow initial restoration to publish its
+  // matching workspace before deciding whether this is a user transition.
+  await nextTick()
+  if (generation !== voiceProjectReconcileGeneration) return
+
+  if (!shouldReplaceVoiceWorkspaceForProject(workspace.value, store.managerProjectId)) {
+    await loadVoiceSessionShortcuts()
+    return
+  }
+
+  cancelLocalSpeech('project_switch')
   if (codexLiveVoiceClient) await stopCodexLiveVoice()
+  if (generation !== voiceProjectReconcileGeneration) return
+  if (listening.value) stopVoiceCapture()
+  voiceTurnAbort?.abort()
+  voiceTurnAbort = null
+  loading.value = false
   liveTranscript.value = ''
   lastUserTranscript.value = ''
   resetSubmittedTranscriptClear()
@@ -1716,12 +1786,10 @@ async function stopAgentLoop(): Promise<void> {
   }
 }
 
-async function restoreLatestSession(): Promise<VoiceWorkspace | null> {
-  const projectId = store.managerProjectId || null
+async function restoreLatestSession(projectId: string | null): Promise<VoiceWorkspace | null> {
   const acceptWorkspace = (restored: VoiceWorkspace): VoiceWorkspace | null => {
     const decision = resolveVoiceSessionProjectRestore(projectId, restored.project_id)
     if (!decision.accepted) return null
-    if (!projectId && decision.projectId) store.setManagerProjectId(decision.projectId)
     return restored
   }
   try {
@@ -1738,7 +1806,7 @@ async function restoreLatestSession(): Promise<VoiceWorkspace | null> {
     // 指针端点不可用时 fallback 到最近会话。
   }
   try {
-    const listRes = await listVoiceSessions(store.managerProjectId, 1)
+    const listRes = await listVoiceSessions(projectId, 1)
     const sessionId = listRes.data?.sessions?.[0]?.session_id
     if (!sessionId) return null
     const res = await getVoiceSession(sessionId)
@@ -1750,10 +1818,13 @@ async function restoreLatestSession(): Promise<VoiceWorkspace | null> {
 }
 
 async function loadVoiceSessionShortcuts(): Promise<void> {
+  const projectId = store.managerProjectId || null
   try {
-    const res = await listVoiceSessions(store.managerProjectId, 10)
+    const res = await listVoiceSessions(projectId, 10)
+    if (voiceProjectSelectionChanged(projectId, store.managerProjectId)) return
     voiceSessionShortcuts.value = res.data?.sessions ?? []
   } catch {
+    if (voiceProjectSelectionChanged(projectId, store.managerProjectId)) return
     voiceSessionShortcuts.value = []
   }
 }
@@ -3004,6 +3075,7 @@ async function setCodexLiveVoiceEnabled(enabled: boolean): Promise<void> {
   try {
     const response = await updateVoiceAgentConfig({ live_voice_enabled: enabled })
     voiceAgentConfig.value = response.data
+    if (!enabled && codexLiveVoiceClient) await stopCodexLiveVoice()
     await refreshOnboarding()
   } catch (err: any) {
     voiceConfigError.value = err?.message || t('voice.model.liveVoiceSaveFailed')
@@ -4146,6 +4218,7 @@ async function setupVoiceHidControl(): Promise<void> {
 }
 
 function handleVoiceKeyboardButton(event: KeyboardEvent): void {
+  if (interactionSuspended.value) return
   const binding = voiceKeyboardBinding.value
   if (!binding) return
   const target = event.target as HTMLElement | null
@@ -4168,6 +4241,10 @@ function handleVoiceHidReport(event: any): void {
   if (!binding) return
   if (event.reportId !== binding.reportId) return
   const pressed = hidReportMatchesBinding(binding, event)
+  if (interactionSuspended.value) {
+    voiceHidPressed = pressed
+    return
+  }
   if (pressed && !voiceHidPressed) {
     voiceHidPressed = true
     toggleListening()
@@ -4285,10 +4362,12 @@ function handleVoiceGamepadButtons(gamepad: Gamepad): void {
   gamepad.buttons.forEach((button, index) => {
     if (!button.pressed) return
     nextPressed.add(index)
-    if (!voiceGamepadPressedButtons.has(index)) handleVoiceGamepadButton(index)
+    if (!interactionSuspended.value && !voiceGamepadPressedButtons.has(index)) {
+      handleVoiceGamepadButton(index)
+    }
   })
   voiceGamepadPressedButtons = nextPressed
-  voiceGamepadPressedButtonIds.value = nextPressed
+  voiceGamepadPressedButtonIds.value = interactionSuspended.value ? new Set() : nextPressed
 }
 
 function gamepadButtonActive(index: number): boolean {
@@ -4311,7 +4390,10 @@ function handleNativeVoiceGamepadButton(event: Event): void {
   }
   if (detail.repeat || voiceGamepadPressedButtons.has(detail.index)) return
   voiceGamepadPressedButtons.add(detail.index)
-  voiceGamepadPressedButtonIds.value = new Set(voiceGamepadPressedButtons)
+  voiceGamepadPressedButtonIds.value = interactionSuspended.value
+    ? new Set()
+    : new Set(voiceGamepadPressedButtons)
+  if (interactionSuspended.value) return
   handleVoiceGamepadButton(detail.index)
 }
 
@@ -4319,6 +4401,7 @@ function handleNativeVoiceGamepadAnalog(event: Event): void {
   const detail = nativeGamepadEventDetail<NativeGamepadAnalogDetail>(event)
   if (!detail) return
   markNativeGamepadConnected()
+  if (interactionSuspended.value) return
   nativeGamepadAnalogAt = performance.now()
   handleVoiceGamepadAxisDirection(detail.hatX ?? 0, 'left', 'right')
   handleVoiceGamepadAxisDirection(detail.hatY ?? 0, 'up', 'down')
@@ -4343,6 +4426,10 @@ function currentVoiceGamepadInputContext(): VoiceGamepadInputContext {
 }
 
 function handleVoiceGamepadAxes(gamepad: Gamepad): void {
+  if (interactionSuspended.value) {
+    voiceGamepadAxisLocks = new Set()
+    return
+  }
   handleVoiceGamepadAxisDirection(gamepad.axes[0] ?? 0, 'left', 'right')
   handleVoiceGamepadAxisDirection(gamepad.axes[1] ?? 0, 'up', 'down')
   if (performance.now() - nativeGamepadAnalogAt > 80) {
@@ -4697,10 +4784,6 @@ function updateNativeVoiceWaveform(samples: Float32Array): void {
 }
 
 function stopVoiceCapture(): void {
-  if (codexLiveVoiceClient) {
-    void stopCodexLiveVoice()
-    return
-  }
   voiceSessionToken += 1
   voiceAbort?.abort()
   voiceAbort = null
@@ -5196,7 +5279,13 @@ function noteLiveVoiceImmersiveInteraction(): void {
   }
 }
 
+function handleImmersiveTouchPointerDown(event: PointerEvent): void {
+  if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return
+  handleImmersivePointerMove()
+}
+
 function handleImmersivePointerMove(): void {
+  if (interactionSuspended.value) return
   if (!immersiveMode.value) {
     noteLiveVoiceImmersiveInteraction()
     return
@@ -5210,6 +5299,7 @@ function handleImmersivePointerMove(): void {
 }
 
 function handleImmersiveKeyboard(event: KeyboardEvent): void {
+  if (interactionSuspended.value) return
   if (!immersiveMode.value) {
     noteLiveVoiceImmersiveInteraction()
     return
@@ -5309,7 +5399,6 @@ async function scrollCardGridToWidget(widgetId?: string): Promise<void> {
 function openSettings(): void {
   exitImmersiveMode()
   store.settingsPageOpen = true
-  store.voiceCockpitOpen = false
 }
 
 function openRuntimeOverlay(): void {
@@ -5340,6 +5429,9 @@ function summarizeTask(value: string): string {
     ref="cockpitRoot"
     class="voice-cockpit fixed inset-0 z-50"
     :class="voiceCockpitClasses"
+    :aria-hidden="interactionSuspended"
+    :inert="interactionSuspended"
+    :data-suspended="interactionSuspended ? 'true' : undefined"
   >
     <div class="voice-cockpit__ambient" />
     <video
@@ -5366,8 +5458,6 @@ function summarizeTask(value: string): string {
       v-if="fullscreenPromptVisible && isMobileDevice"
       class="voice-fullscreen-gate"
       type="button"
-      @pointerup.prevent="enterMobileFullscreen"
-      @touchend.prevent="enterMobileFullscreen"
       @click="enterMobileFullscreen"
     >
       <span>{{ fullscreenGateTitle }}</span>
@@ -5774,7 +5864,6 @@ function summarizeTask(value: string): string {
             :active-session-id="workspace?.session_id ?? null"
             @collapse="voiceSidebarOpen = false"
             @new-session="createFreshVoiceSession"
-            @project-selected="handleVoiceProjectSelected"
             @session-selected="handleVoiceSessionSelected"
             @session-deleted="handleVoiceSessionDeleted"
           />

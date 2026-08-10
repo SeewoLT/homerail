@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, watch } from 'vue'
+import {
+  computed,
+  onActivated,
+  onDeactivated,
+  onMounted,
+  onUnmounted,
+  watch,
+} from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute } from 'vue-router'
 import { useAgentStore } from '@/stores/agent-store'
@@ -14,10 +21,13 @@ import DagResourceStatusPill from '@/components/agent/DagResourceStatusPill.vue'
 import DagRuntimeOverlay from '@/components/agent/dag-runtime/DagRuntimeOverlay.vue'
 import OnboardingWizard from '@/components/agent/onboarding/OnboardingWizard.vue'
 import { useOnboardingStatus } from '@/composables/useOnboardingStatus'
+import { resolveVoiceCockpitLifecycle } from '@/agent/voice-cockpit-lifecycle'
 import { PanelRightClose, PanelRightOpen } from 'lucide-vue-next'
 import { startHomeRailBrowserTools } from '@/browser-tools/webmcp-adapter'
 import { createAgentUiSurfaceController } from '@/browser-tools/ui-surface-controller'
 import { createAsyncDisposerGate } from '@/browser-tools/async-disposer-gate'
+
+defineOptions({ name: 'AgentRootView' })
 
 const store = useAgentStore()
 const uiStore = useUiStore()
@@ -26,7 +36,13 @@ const route = useRoute()
 const textModeEnabled = flagEnabled(import.meta.env.VITE_HOMERAIL_ENABLE_TEXT_MODE)
 const voiceOnlyMode = !textModeEnabled
 const { status: onboardingStatus, refresh: refreshOnboarding } = useOnboardingStatus()
-const browserToolsLifecycle = createAsyncDisposerGate()
+const voiceCockpitLifecycle = computed(() => resolveVoiceCockpitLifecycle({
+  voiceOnlyMode,
+  voiceCockpitOpen: store.voiceCockpitOpen,
+  settingsPageOpen: store.settingsPageOpen,
+  runtimeOverlayOpen: store.runtimeOverlayOpen,
+}))
+let browserToolsLifecycle: ReturnType<typeof createAsyncDisposerGate> | null = null
 
 const captureRunId = computed(() => {
   const raw = route.query.captureRun
@@ -50,8 +66,11 @@ function isMobileVoiceEntry(): boolean {
   return uaLooksMobile || touchLooksPhone
 }
 
-onMounted(async () => {
-  const browserToolsStarted = await browserToolsLifecycle.start(
+function startBrowserTools(): void {
+  browserToolsLifecycle?.dispose()
+  const lifecycle = createAsyncDisposerGate()
+  browserToolsLifecycle = lifecycle
+  void lifecycle.start(
     () => startHomeRailBrowserTools(
       createAgentUiSurfaceController(store),
       {
@@ -60,7 +79,14 @@ onMounted(async () => {
       },
     ),
   )
-  if (!browserToolsStarted) return
+}
+
+function stopBrowserTools(): void {
+  browserToolsLifecycle?.dispose()
+  browserToolsLifecycle = null
+}
+
+onMounted(async () => {
   if (voiceOnlyMode || isMobileVoiceEntry()) store.voiceCockpitOpen = true
   // 检测配置状态，缺配则弹出新手引导
   await refreshOnboarding()
@@ -69,9 +95,9 @@ onMounted(async () => {
   }
 })
 
-onUnmounted(() => {
-  browserToolsLifecycle.dispose()
-})
+onActivated(startBrowserTools)
+onDeactivated(stopBrowserTools)
+onUnmounted(stopBrowserTools)
 
 async function closeOnboarding(): Promise<void> {
   store.closeOnboarding()
@@ -104,7 +130,9 @@ watch(
 </script>
 
 <template>
-  <AgentSettingsPage v-if="store.settingsPageOpen" />
+  <div v-if="store.settingsPageOpen" class="fixed inset-0 z-[300]">
+    <AgentSettingsPage />
+  </div>
 
   <DagRuntimeOverlay
     v-else-if="store.runtimeOverlayOpen"
@@ -163,8 +191,10 @@ watch(
   </div>
 
   <AgentVoiceCockpit
-    v-if="!store.settingsPageOpen && !store.runtimeOverlayOpen && (voiceOnlyMode || store.voiceCockpitOpen)"
+    v-if="voiceCockpitLifecycle.mounted"
+    v-show="voiceCockpitLifecycle.visible"
     :voice-only="voiceOnlyMode"
+    :suspended="voiceCockpitLifecycle.suspended"
   />
 
   <!-- 新手引导横版小窗（悬浮 overlay，不替换 voice cockpit） -->
