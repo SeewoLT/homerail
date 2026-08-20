@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import cockpitSource from './AgentVoiceCockpit.vue?raw'
+import sidebarSource from './VoiceSessionProjectSidebar.vue?raw'
 
 describe('AgentVoiceCockpit responsive layout', () => {
   it('keeps the phone status message from covering canvas actions', () => {
@@ -21,6 +22,25 @@ describe('AgentVoiceCockpit responsive layout', () => {
     expect(cockpitSource).toContain(
       'class="voice-records-slot min-w-0 overflow-hidden py-0 pr-6"'
     )
+  })
+
+  it('keeps the sidebar touch controls inside the responsive grid column', () => {
+    expect(cockpitSource).toContain(
+      "if (viewportWidth.value <= 1280) return effectiveSidebarOpen.value ? '250px' : '52px'"
+    )
+    expect(sidebarSource).toContain(
+      'voice-left-rail flex h-full min-h-0 w-full'
+    )
+    expect(sidebarSource).not.toContain(
+      'voice-left-rail flex h-full min-h-0 w-[292px]'
+    )
+    expect(sidebarSource).toContain('data-testid="voice-sidebar-add-directory"')
+    expect(sidebarSource.match(/h-11 w-11 shrink-0 touch-manipulation/g)).toHaveLength(2)
+    expect(sidebarSource.match(/voice-left-rail__header-button/g)).toHaveLength(2)
+    const headerButtonRule = cockpitSource.match(
+      /\.voice-cockpit--phone-landscape :deep\(\.voice-left-rail__header-button\) \{([\s\S]*?)\n\}/,
+    )?.[1]
+    expect(headerButtonRule).toContain('height: 116px;')
   })
 
   it('keeps model selection independent from incomplete onboarding status', () => {

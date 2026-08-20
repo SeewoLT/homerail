@@ -9942,6 +9942,29 @@ function summarizeTask(value: string): string {
   margin-top: 12px;
 }
 
+/* The landscape phone shell is rendered at 0.38–0.62 scale. Reserve the
+   sidebar header for its two actions so their final on-screen hit areas stay
+   at least 44 CSS pixels instead of shrinking to roughly 17 pixels. */
+.voice-cockpit--phone-landscape :deep(.voice-left-rail__title) {
+  display: none;
+}
+
+.voice-cockpit--phone-landscape :deep(.voice-left-rail__header-actions) {
+  width: 100%;
+  gap: 16px;
+}
+
+.voice-cockpit--phone-landscape :deep(.voice-left-rail__header-button) {
+  width: auto;
+  height: 116px;
+  flex: 1 1 0;
+}
+
+.voice-cockpit--phone-landscape :deep(.voice-left-rail__header-button svg) {
+  width: 40px;
+  height: 40px;
+}
+
 .voice-cockpit--phone-landscape .voice-stage {
   margin: 24px;
   padding: 24px;
